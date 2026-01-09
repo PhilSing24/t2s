@@ -10,10 +10,10 @@ tmux kill-session -t market-data 2>/dev/null
 
 # Kill by PID files if they exist
 for pidfile in tp rdb rte tel logmgr trade_fh quote_fh; do
-    if [ -f ~/binance_feed_handler/logs/processes/${pidfile}.pid ]; then
-        pid=$(cat ~/binance_feed_handler/logs/processes/${pidfile}.pid)
+    if [ -f ~/tick-to-signal/logs/processes/${pidfile}.pid ]; then
+        pid=$(cat ~/tick-to-signal/logs/processes/${pidfile}.pid)
         kill -9 $pid 2>/dev/null
-        rm -f ~/binance_feed_handler/logs/processes/${pidfile}.pid
+        rm -f ~/tick-to-signal/logs/processes/${pidfile}.pid
     fi
 done
 

@@ -35,8 +35,8 @@ Binance Depth Stream ──WebSocket──► Quote FH ──┘                
 
 ## Build
 ```bash
-cmake -S cpp -B cpp/build
-cmake --build cpp/build
+cmake -S . -B build
+cmake --build build
 ```
 
 ## Run

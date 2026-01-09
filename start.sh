@@ -26,31 +26,31 @@ tmux kill-session -t $SESSION 2>/dev/null
 
 # Window 0: Tickerplant
 tmux new-session -d -s $SESSION -n "tp"
-tmux send-keys -t $SESSION:tp "cd ~/binance_feed_handler/kdb && q tp.q" C-m
+tmux send-keys -t $SESSION:tp "cd ~/tick-to-signal/kdb && q tp.q" C-m
 
 # Window 1: RDB
 tmux new-window -t $SESSION -n "rdb"
-tmux send-keys -t $SESSION:rdb "sleep 2 && cd ~/binance_feed_handler/kdb && q rdb.q" C-m
+tmux send-keys -t $SESSION:rdb "sleep 2 && cd ~/tick-to-signal/kdb && q rdb.q" C-m
 
 # Window 2: RTE
 tmux new-window -t $SESSION -n "rte"
-tmux send-keys -t $SESSION:rte "sleep 3 && cd ~/binance_feed_handler/kdb && q rte.q" C-m
+tmux send-keys -t $SESSION:rte "sleep 3 && cd ~/tick-to-signal/kdb && q rte.q" C-m
 
 # Window 3: TEL
 tmux new-window -t $SESSION -n "tel"
-tmux send-keys -t $SESSION:tel "sleep 4 && cd ~/binance_feed_handler/kdb && q tel.q" C-m
+tmux send-keys -t $SESSION:tel "sleep 4 && cd ~/tick-to-signal/kdb && q tel.q" C-m
 
 # Window 4: LOG Manager
 tmux new-window -t $SESSION -n "log"
-tmux send-keys -t $SESSION:log "sleep 5 && cd ~/binance_feed_handler/kdb && q logmgr.q" C-m
+tmux send-keys -t $SESSION:log "sleep 5 && cd ~/tick-to-signal/kdb && q logmgr.q" C-m
 
 # Window 5: Trade Feed Handler
 tmux new-window -t $SESSION -n "trade-fh"
-tmux send-keys -t $SESSION:trade-fh "sleep 6 && cd ~/binance_feed_handler && ./build/trade_feed_handler" C-m
+tmux send-keys -t $SESSION:trade-fh "sleep 6 && cd ~/tick-to-signal && ./build/trade_feed_handler" C-m
 
 # Window 6: Quote Feed Handler
 tmux new-window -t $SESSION -n "quote-fh"
-tmux send-keys -t $SESSION:quote-fh "sleep 7 && cd ~/binance_feed_handler && ./build/quote_feed_handler" C-m
+tmux send-keys -t $SESSION:quote-fh "sleep 7 && cd ~/tick-to-signal && ./build/quote_feed_handler" C-m
 
 # Select first window
 tmux select-window -t $SESSION:tp
