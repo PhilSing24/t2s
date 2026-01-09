@@ -1,0 +1,19 @@
+{
+    "symbols": [
+        "btcusdt",
+        "ethusdt",
+        "solusdt"
+    ],
+    "tickerplant": {
+        "host": "localhost",
+        "port": 5010
+    },
+    "reconnect": {
+        "initial_backoff_ms": 1000,
+        "max_backoff_ms": 8000
+    },
+    "logging": {
+        "level": "info",
+        "file": ""
+    }
+}

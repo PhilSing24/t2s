@@ -1,0 +1,19 @@
+# Build outputs
+build/
+cpp/build/
+
+# Logs (keep folder structure, ignore contents)
+logs/*.log
+logs/processes/*.log
+
+# Editor
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# kdb+ artifacts
+*.qdb
