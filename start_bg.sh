@@ -5,7 +5,7 @@
 
 cd ~/tick-to-signal
 
-# Kill any existing processes first
+# Kill any existing pipeline processes (not ctl.q)
 ./stop.sh 2>/dev/null
 
 # Create log directory
@@ -49,7 +49,7 @@ sleep 1
 
 # Start Quote FH (run from project root)
 cd ~/tick-to-signal
-nohup ./build/quote_feed_handler > logs/processes/quote_fh.log 2>&1 &
+nohup ./build/quote_feed_handler config/quote_feed_handler.json > logs/processes/quote_fh.log 2>&1 &
 echo $! > logs/processes/quote_fh.pid
 
 echo "All processes started"
