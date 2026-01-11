@@ -1,5 +1,5 @@
 / rte.q - Real-Time Engine (Production Grade with u.q)
-/ Trade Buckets (for VWAP, Var-Covar) + Order Book (latest L5 snapshot) + Imbalance + Latency
+/ Trade Buckets (for VWAP, Var-Covar) + Order Book (latest L5 snapshot) + Imbalance
 / With log replay capability for crash recovery
 
 / =============================================================================
@@ -9,21 +9,24 @@
 .rte.cfg.port:5012;
 .rte.cfg.tpPort:5010;
 .rte.cfg.logDir:"logs";
-.rte.cfg.defaultWindowMin:5;           / Default window in minutes
-.rte.cfg.bucketSec:1;                   / Bucket size in seconds (for VWAP precision)
-.rte.cfg.bucketRetentionMin:65;         / Keep 65 minutes of trade buckets (for 1-hour vcov)
-.rte.cfg.latencyRetentionMin:15;        / Keep 15 minutes of latency history
-.rte.cfg.vcovRetentionMin:15;           / Keep 15 minutes of var-covar history
-.rte.cfg.vcovWindowMin:60;              / 1-hour window for var-covar calculation
-.rte.cfg.vcovBucketSec:30;              / Resample to 30-sec for var-covar
-.rte.cfg.vcovMinBuckets:100;            / Minimum buckets for valid matrix (~100 of 120)
-.rte.cfg.cleanupIntervalMs:5000;        / Cleanup every 5 seconds
+.rte.cfg.defaultWindowMin:5;                    / Default window in minutes
+.rte.cfg.bucketSec:1;                           / Bucket size in seconds (for VWAP precision)
+.rte.cfg.bucketRetentionMin:65;                 / Keep 65 minutes of trade buckets (for 1-hour vcov)
+.rte.cfg.vcovRetentionMin:15;                   / Keep 15 minutes of var-covar history
+.rte.cfg.vcovWindowMin:60;                      / 1-hour window for var-covar calculation
+.rte.cfg.vcovBucketSec:30;                      / Resample to 30-sec for var-covar
+.rte.cfg.vcovMinBuckets:100;                    / Minimum buckets for valid matrix (~100 of 120)
+.rte.cfg.cleanupIntervalMs:5000;                / Cleanup every 5 seconds
+.rte.cfg.iVol:`BTCUSDT`ETHUSDT`SOLUSDT!45.00 65.00 67.00; / 30 days implied volatility to compare with intra-day vol
+.rte.cfg.obiAlpha:0.05;                         / OBI EMA smoothing factor (lower = smoother)
+.rte.cfg.obiThreshold:0.3;                      / OBI threshold for buyer/seller pressure
+.rte.cfg.obiRetentionMin:7;                    / Keep 15 minutes of OBI history
 
-/ Derived configuration
-.rte.cfg.bucketNs:.rte.cfg.bucketSec * 1000000000j;
-.rte.cfg.bucketRetentionNs:.rte.cfg.bucketRetentionMin * 60 * 1000000000j;
-.rte.cfg.latencyRetentionNs:.rte.cfg.latencyRetentionMin * 60 * 1000000000j;
-.rte.cfg.vcovRetentionNs:.rte.cfg.vcovRetentionMin * 60 * 1000000000j;
+/ Derived configuration (precomputed for hot path efficiency)
+.rte.cfg.bucketNs:.rte.cfg.bucketSec * 1000000000j;                          / Bucket size in nanoseconds
+.rte.cfg.bucketRetentionNs:.rte.cfg.bucketRetentionMin * 60 * 1000000000j;   / Bucket retention in ns
+.rte.cfg.vcovRetentionNs:.rte.cfg.vcovRetentionMin * 60 * 1000000000j;       / Var-covar retention in ns
+.rte.cfg.obiRetentionNs:.rte.cfg.obiRetentionMin * 60 * 1000000000j;         / OBI retention in ns
 
 / Store start time of the process
 .proc.startTime:.z.p;
@@ -42,7 +45,12 @@ tradeBuckets:([] sym:`symbol$(); bucket:`timestamp$(); sumPxQty:`float$(); sumQt
 / Add trade to current bucket (hot path)
 .rte.bucket.add:{[s;time;price;qty]
   bucketTime:`timestamp$.rte.cfg.bucketNs * `long$time div .rte.cfg.bucketNs;
-  `tradeBuckets upsert (s; bucketTime; price * qty; qty; 1j);
+  k:(s;bucketTime);
+  pxqty:price*qty;
+  $[k in key tradeBuckets;
+    tradeBuckets[k;`sumPxQty`sumQty`cnt]+:(pxqty; qty; 1j);
+    `tradeBuckets upsert (s; bucketTime; pxqty; qty; 1j)
+  ];
   };
 
 / Cleanup old buckets (called by timer)
@@ -184,44 +192,32 @@ tradeBuckets:([] sym:`symbol$(); bucket:`timestamp$(); sumPxQty:`float$(); sumQt
 / Latest order book imbalance per symbol
 .rte.imb.latest:()!();
 
-/ Update imbalance for a symbol
+/ EMA of order book imbalance per symbol
+.rte.imb.ema:()!();
+
+/ OBI history (for charting)
+.rte.imb.history:([] time:`timestamp$(); sym:`symbol$(); OBI:`float$(); smOBI:`float$());
+
+/ Update imbalance for a symbol with EMA smoothing
 .rte.imb.update:{[s;bidDepth;askDepth;time]
   total:bidDepth + askDepth;
   imb:$[total > 0f; (bidDepth - askDepth) % total; 0n];
-  .rte.imb.latest[s]:`bidDepth`askDepth`imbalance`time!(bidDepth; askDepth; imb; time);
-  };
-
-/ =============================================================================
-/ Latency Tracking - Trade Latency from Exchange to VWAP Ready
-/ =============================================================================
-
-/ Latest latency per symbol (for current display)
-/ external: Binance -> FH (network, uncontrollable)
-/ internal: FH -> RTE (our code)
-/ total: end-to-end
-.rte.latency.latest:()!();
-
-/ Latency history (for charting)
-.rte.latency.history:([] time:`timestamp$(); sym:`symbol$(); externalNs:`long$(); internalNs:`long$(); totalNs:`long$());
-
-/ Epoch offset: nanoseconds between Unix epoch (1970) and kdb+ epoch (2000)
-.rte.epochOffset:neg "j"$1970.01.01D0;
-
-/ Update latency for a trade
-.rte.latency.update:{[s;exchTimeMs;fhRecvTimeNs;rteTime]
-  rteTimeNs:.rte.epochOffset + `long$rteTime;
-  externalNs:fhRecvTimeNs - exchTimeMs * 1000000;
-  internalNs:rteTimeNs - fhRecvTimeNs;
-  totalNs:externalNs + internalNs;
   
-  .rte.latency.latest[s]:`external`internal`total`time!(externalNs; internalNs; totalNs; rteTime);
-  `.rte.latency.history insert (rteTime; s; externalNs; internalNs; totalNs);
+  / EMA: new = alpha * current + (1-alpha) * previous
+  prevSmOBI:$[s in key .rte.imb.ema; .rte.imb.ema[s]; imb];
+  smOBI:(.rte.cfg.obiAlpha * imb) + (1 - .rte.cfg.obiAlpha) * prevSmOBI;
+  .rte.imb.ema[s]:smOBI;
+  
+  .rte.imb.latest[s]:`bidDepth`askDepth`imbalance`smOBI`time!(bidDepth; askDepth; imb; smOBI; time);
+  
+  / Store history
+  `.rte.imb.history insert (time; s; imb; smOBI);
   };
 
-/ Cleanup old latency history (called by timer)
-.rte.latency.cleanup:{[]
-  cutoff:.z.p - .rte.cfg.latencyRetentionNs;
-  delete from `.rte.latency.history where time < cutoff;
+/ Cleanup old OBI history (called by timer)
+.rte.imb.cleanup:{[]
+  cutoff:.z.p - .rte.cfg.obiRetentionNs;
+  delete from `.rte.imb.history where time < cutoff;
   };
 
 / =============================================================================
@@ -232,14 +228,49 @@ tradeBuckets:([] sym:`symbol$(); bucket:`timestamp$(); sumPxQty:`float$(); sumQt
 / Usage: .rte.getVwap[`BTCUSDT; 5]
 .rte.getVwap:{[s;m] .rte.vwap.calc[s; m] };
 
+/ Get summary table for all symbols: last price, VWAPs, and trend
+/ Usage: .rte.getSummary[1;5]  / 1-min vs 5-min VWAP
+/ trend: `up if short VWAP > long VWAP, `down otherwise
+.rte.getSummary:{[shortMin;longMin]
+  syms:asc distinct (0!tradeBuckets)`sym;
+  if[0 = count syms; :([] sym:(); lastPrice:(); vwapShort:(); vwapLong:(); trend:())];
+  
+  lp:exec last sumPxQty % sumQty by sym from tradeBuckets;
+  vShort:{[m;s] first exec vwap from .rte.getVwap[s;m]}[shortMin] each syms;
+  vLong:{[m;s] first exec vwap from .rte.getVwap[s;m]}[longMin] each syms;
+  
+  trend:?[vShort > vLong; `up; `down];
+  
+  ([] sym:syms; lastPrice:lp syms; vwapShort:vShort; vwapLong:vLong; trend:trend)
+  };
+
 / Get latest order book imbalance for a symbol
 / Usage: .rte.getImbalance[`BTCUSDT]
 .rte.getImbalance:{[s]
   if[not s in key .rte.imb.latest;
-    :([] sym:enlist s; bidDepth:enlist 0n; askDepth:enlist 0n; imbalance:enlist 0n; time:enlist 0Np)];
+    :([] sym:enlist s; bidDepth:enlist 0n; askDepth:enlist 0n; imbalance:enlist 0n; smOBI:enlist 0n; time:enlist 0Np)];
   data:.rte.imb.latest[s];
   ([] sym:enlist s; bidDepth:enlist data`bidDepth; askDepth:enlist data`askDepth; 
-      imbalance:enlist data`imbalance; time:enlist data`time)
+      imbalance:enlist data`imbalance; smOBI:enlist data`smOBI; time:enlist data`time)
+  };
+  
+/ Get OBI with smoothed EMA and pressure for all symbols
+/ Usage: .rte.getImbalanceAll[]
+.rte.getImbalanceAll:{[]
+  syms:key .rte.imb.latest;
+  if[0 = count syms; :([] sym:(); OBI:(); smOBI:(); pressure:())];
+  obi:{.rte.imb.latest[x]`imbalance} each syms;
+  smOBI:{.rte.imb.latest[x]`smOBI} each syms;
+  th:.rte.cfg.obiThreshold;
+  pressure:?[smOBI > th; `buyer; ?[smOBI < neg th; `seller; `neutral]];
+  ([] sym:syms; OBI:obi; smOBI:smOBI; pressure:pressure)
+  };
+
+/ Get OBI history for a symbol
+/ Usage: .rte.getOBIHistory[`BTCUSDT; 5]
+.rte.getOBIHistory:{[s;m]
+  cutoff:.z.p - m * 60 * 1000000000j;
+  select time, OBI, smOBI from .rte.imb.history where sym in enlist s, time>=cutoff
   };
 
 / Get L5 order book for display (cold path - formatting done here)
@@ -259,50 +290,6 @@ tradeBuckets:([] sym:`symbol$(); bucket:`timestamp$(); sumPxQty:`float$(); sumQt
   d:.rte.book.latest[s];
   bestBid:d 0; bestAsk:d 10;
   `spread`mid`bestBid`bestAsk`time!(bestAsk - bestBid; 0.5 * bestBid + bestAsk; bestBid; bestAsk; d 20)
-  };
-
-/ Get full order book with spread (convenience function for dashboard)
-/ Usage: .rte.getOrderBookWithSpread[`BTCUSDT]
-.rte.getOrderBookWithSpread:{[s]
-  `book`spread`mid`sym!(.rte.getOrderBook[s]; .rte.getSpread[s]`spread; .rte.getSpread[s]`mid; s)
-  };
-
-/ Get current latency for a symbol
-/ Usage: .rte.getLatency[`BTCUSDT]
-.rte.getLatency:{[s]
-  if[not s in key .rte.latency.latest; :`external`internal`total`time!(0N; 0N; 0N; 0Np)];
-  .rte.latency.latest[s]
-  };
-
-/ Get current latency for a symbol in milliseconds
-/ Usage: .rte.getLatencyMs[`BTCUSDT]
-.rte.getLatencyMs:{[s]
-  lat:.rte.getLatency[s];
-  `externalMs`internalMs`totalMs`time!(lat[`external]%1e6; lat[`internal]%1e6; lat[`total]%1e6; lat`time)
-  };
-
-/ Get latency history for charting
-/ Usage: .rte.getLatencyHistory[`BTCUSDT; 15]
-.rte.getLatencyHistory:{[s;mins]
-  cutoff:.z.p - mins * 60 * 1000000000j;
-  select time, externalNs, internalNs, totalNs from .rte.latency.history where sym=s, time>=cutoff
-  };
-
-/ Get latency history for charting in milliseconds
-/ Usage: .rte.getLatencyHistoryMs[`BTCUSDT; 15]
-.rte.getLatencyHistoryMs:{[s;mins]
-  cutoff:.z.p - mins * 60 * 1000000000j;
-  select time, externalMs:externalNs%1e6, internalMs:internalNs%1e6, totalMs:totalNs%1e6 
-  from .rte.latency.history where sym=s, time>=cutoff
-  };
-
-/ Get VWAP with latency info (combined for dashboard)
-/ Usage: .rte.getVwapWithLatency[`BTCUSDT; 5]
-.rte.getVwapWithLatency:{[s;m]
-  vwap:.rte.vwap.calc[s;m];
-  lat:.rte.getLatency[s];
-  vwap,'([] externalNs:enlist lat`external; internalNs:enlist lat`internal; 
-         totalNs:enlist lat`total; latencyTime:enlist lat`time)
   };
 
 / Get latest var-covar matrix
@@ -332,6 +319,14 @@ tradeBuckets:([] sym:`symbol$(); bucket:`timestamp$(); sumPxQty:`float$(); sumQt
   }[syms;matrix] each til count syms
   };
 
+/ Get correlation matrix as table for dashboard
+/ Usage: .rte.getCorrelationTable[]
+.rte.getCorrelationTable:{[]
+  corr:.rte.getCorrelation[];
+  if[0 = count corr; :()];
+  ([] sym:key corr) ,' flip corr
+  };
+
 / Get annualized volatility for all symbols
 / Usage: .rte.getAnnualizedVol[]
 .rte.getAnnualizedVol:{[]
@@ -342,6 +337,18 @@ tradeBuckets:([] sym:`symbol$(); bucket:`timestamp$(); sumPxQty:`float$(); sumQt
   syms:.rte.vcov.latest`syms;
   matrix:.rte.vcov.latest`matrix;
   syms!{[matrix;factor;s] sqrt factor * matrix[s;s]}[matrix;factor] each syms
+  };
+
+/ Get vol comparison table
+/ Usage: .rte.getVolComparison[]
+.rte.getVolComparison:{[]
+  vol:.rte.getAnnualizedVol[];
+  if[0 = count vol; :([] sym:(); annualizedVol:(); impliedVol:(); vsIVol:())];
+  syms:key vol;
+  impliedVol:.rte.cfg.iVol syms;
+  annualizedVol:100 * value vol;
+  vsIVol:?[annualizedVol > impliedVol; `above; `below];
+  ([] sym:syms; annualizedVol:annualizedVol; impliedVol:impliedVol; vsIVol:vsIVol)
   };
 
 / =============================================================================
@@ -374,16 +381,12 @@ tradeBuckets:([] sym:`symbol$(); bucket:`timestamp$(); sumPxQty:`float$(); sumQt
 
 .u.upd:{[tbl;data]
   if[tbl = `trade_binance;
-    rteTime:.z.p;
     time:data 0;
     s:data 1;
     price:data 3;
     qty:data 4;
-    exchTimeMs:data 6;
-    fhRecvTimeNs:data 8;
     
     .rte.bucket.add[s; time; price; qty];
-    .rte.latency.update[s; exchTimeMs; fhRecvTimeNs; rteTime];
   ];
 
   if[tbl = `quote_binance;
@@ -439,8 +442,8 @@ upd:.u.upd;
   delete from `tradeBuckets;
   .rte.book.latest:()!();
   .rte.imb.latest:()!();
-  .rte.latency.latest:()!();
-  delete from `.rte.latency.history;
+  .rte.imb.ema:()!();
+  delete from `.rte.imb.history;
   .rte.vcov.latest:()!();
   delete from `.rte.vcov.history;
   -1 "RTE: EOD processing complete - state cleared";
@@ -467,9 +470,9 @@ upd:.u.upd;
 
 .z.ts:{[]
   .rte.bucket.cleanup[];
-  .rte.latency.cleanup[];
   .rte.vcov.update[];
   .rte.vcov.cleanup[];
+  .rte.imb.cleanup[];
   };
 
 / =============================================================================
@@ -484,18 +487,20 @@ system "p ",string .rte.cfg.port;
 -1 "Configuration:";
 -1 "  Bucket size: ",string[.rte.cfg.bucketSec],"s (for VWAP)";
 -1 "  Bucket retention: ",string[.rte.cfg.bucketRetentionMin]," minutes";
--1 "  Latency retention: ",string[.rte.cfg.latencyRetentionMin]," minutes";
 -1 "  Var-Covar window: ",string[.rte.cfg.vcovWindowMin]," minutes";
 -1 "  Var-Covar bucket: ",string[.rte.cfg.vcovBucketSec],"s (resampled)";
 -1 "  Var-Covar min buckets: ",string[.rte.cfg.vcovMinBuckets]," (for isValid)";
 -1 "  Var-Covar retention: ",string[.rte.cfg.vcovRetentionMin]," minutes";
+-1 "  OBI alpha: ",string[.rte.cfg.obiAlpha]," (EMA smoothing)";
+-1 "  OBI threshold: ",string[.rte.cfg.obiThreshold]," (pressure)";
+-1 "  OBI retention: ",string[.rte.cfg.obiRetentionMin]," minutes";
 -1 "  Cleanup interval: ",string[.rte.cfg.cleanupIntervalMs],"ms";
 
 -1 "";
 -1 "Checking for log to replay...";
 logExists:.rte.logExists[.rte.logFile[.z.D]];
 
-if[logExists; -1 "RTE: Found existing log for today - replaying..."; .rte.replay[.z.D]; .rte.bucket.cleanup[]; .rte.latency.cleanup[]; -1 "RTE: Cleanup applied"];
+if[logExists; -1 "RTE: Found existing log for today - replaying..."; .rte.replay[.z.D]; .rte.bucket.cleanup[]; -1 "RTE: Cleanup applied"];
 if[not logExists; -1 "RTE: No existing log for today"];
 
 -1 "";
@@ -508,24 +513,23 @@ system "t ",string .rte.cfg.cleanupIntervalMs;
 -1 "  Trade buckets: ",string[count tradeBuckets];
 -1 "  Book symbols: ",string[count .rte.book.latest];
 -1 "  Imbalance symbols: ",string[count .rte.imb.latest];
--1 "  Latency symbols: ",string[count .rte.latency.latest];
 -1 "";
 -1 "Query interface:";
 -1 "  .rte.getVwap[`BTCUSDT; 5]                 / 5-minute VWAP";
 -1 "  .rte.getVwap[`BTCUSDT; 1]                 / 1-minute VWAP";
+-1 "  .rte.getSummary[1;5]                      / Summary with VWAP trend";
 -1 "  .rte.getImbalance[`BTCUSDT]               / Latest imbalance";
+-1 "  .rte.getImbalanceAll[]                    / OBI with EMA and pressure";
+-1 "  .rte.getOBIHistory[`BTCUSDT; 5]           / OBI history (5 min)";
 -1 "  .rte.getOrderBook[`BTCUSDT]               / L5 order book for display";
 -1 "  .rte.getSpread[`BTCUSDT]                  / Spread and mid-price";
--1 "  .rte.getOrderBookWithSpread[`BTCUSDT]     / Book + spread combined";
--1 "  .rte.getLatency[`BTCUSDT]                 / Current latency (ns)";
--1 "  .rte.getLatencyMs[`BTCUSDT]               / Current latency (ms)";
--1 "  .rte.getLatencyHistory[`BTCUSDT; 15]      / Latency history (ns)";
--1 "  .rte.getLatencyHistoryMs[`BTCUSDT; 15]    / Latency history (ms)";
--1 "  .rte.getVwapWithLatency[`BTCUSDT; 5]      / VWAP + latency combined";
 -1 "  .rte.getVarCovar[60]                      / Var-covar matrix (60-min)";
 -1 "  .rte.getVcov[]                            / Latest var-covar matrix";
 -1 "  .rte.getVcovHistory[`BTCUSDT;`ETHUSDT;15] / Covariance history";
 -1 "  .rte.getCorrelation[]                     / Correlation matrix";
+-1 "  .rte.getCorrelationTable[]                / Correlation as table";
+-1 "  .rte.getAnnualizedVol[]                   / Annualized volatility";
+-1 "  .rte.getVolComparison[]                   / Vol vs implied vol";
 -1 "  .rte.replay[.z.D]                         / Replay today's log";
 -1 "";
 -1 "RTE ready";
