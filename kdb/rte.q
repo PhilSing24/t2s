@@ -1,5 +1,5 @@
 / rte.q - Real-Time Engine (Production Grade with u.q)
-/ VWAP (bucketed aggregation) + Imbalance (latest snapshot)
+/ Trade Buckets (for VWAP, Var-Covar) + Order Book (latest L5 snapshot) + Imbalance + Latency
 / With log replay capability for crash recovery
 
 / =============================================================================
@@ -9,77 +9,176 @@
 .rte.cfg.port:5012;
 .rte.cfg.tpPort:5010;
 .rte.cfg.logDir:"logs";
-.rte.cfg.defaultWindowMin:5;           / Default VWAP window in minutes
-.rte.cfg.bucketSec:1;                   / Bucket size in seconds
-.rte.cfg.retentionMin:10;               / Keep 10 minutes of buckets
+.rte.cfg.defaultWindowMin:5;           / Default window in minutes
+.rte.cfg.bucketSec:1;                   / Bucket size in seconds (for VWAP precision)
+.rte.cfg.bucketRetentionMin:65;         / Keep 65 minutes of trade buckets (for 1-hour vcov)
+.rte.cfg.latencyRetentionMin:15;        / Keep 15 minutes of latency history
+.rte.cfg.vcovRetentionMin:15;           / Keep 15 minutes of var-covar history
+.rte.cfg.vcovWindowMin:60;              / 1-hour window for var-covar calculation
+.rte.cfg.vcovBucketSec:30;              / Resample to 30-sec for var-covar
+.rte.cfg.vcovMinBuckets:100;            / Minimum buckets for valid matrix (~100 of 120)
 .rte.cfg.cleanupIntervalMs:5000;        / Cleanup every 5 seconds
 
 / Derived configuration
 .rte.cfg.bucketNs:.rte.cfg.bucketSec * 1000000000j;
-.rte.cfg.retentionNs:.rte.cfg.retentionMin * 60 * 1000000000j;
+.rte.cfg.bucketRetentionNs:.rte.cfg.bucketRetentionMin * 60 * 1000000000j;
+.rte.cfg.latencyRetentionNs:.rte.cfg.latencyRetentionMin * 60 * 1000000000j;
+.rte.cfg.vcovRetentionNs:.rte.cfg.vcovRetentionMin * 60 * 1000000000j;
 
 / Store start time of the process
 .proc.startTime:.z.p;
 
 / =============================================================================
-/ VWAP State - Bucketed Aggregation (Production Grade)
+/ Trade Buckets - Shared State for VWAP and Var-Covar
 / =============================================================================
 
-/ Time-bucketed VWAP data (1-second buckets)
+/ Time-bucketed trade data (1-second buckets)
 / Each bucket contains aggregated trade data for that second
-vwapBuckets:([] 
-  sym:`symbol$();           / Symbol
-  bucket:`timestamp$();     / Bucket start time (1-second granularity)
-  sumPxQty:`float$();       / Sum of (price * quantity)
-  sumQty:`float$();         / Sum of quantity
-  cnt:`long$()              / Number of trades in bucket
-  );
+tradeBuckets:([] sym:`symbol$(); bucket:`timestamp$(); sumPxQty:`float$(); sumQty:`float$(); cnt:`long$());
 
 / Key by sym and bucket for O(1) upsert
-`sym`bucket xkey `vwapBuckets;
+`sym`bucket xkey `tradeBuckets;
 
-/ Add trade to current bucket
-.rte.vwap.add:{[s;time;price;qty]
-  / Calculate bucket (floor to nearest second)
+/ Add trade to current bucket (hot path)
+.rte.bucket.add:{[s;time;price;qty]
   bucketTime:`timestamp$.rte.cfg.bucketNs * `long$time div .rte.cfg.bucketNs;
-  
-  / Upsert into bucket (O(1) operation)
-  `vwapBuckets upsert (s; bucketTime; price * qty; qty; 1j);
-  };
-
-/ Calculate VWAP for a symbol over a time window
-.rte.vwap.calc:{[s;windowMin]
-  / Calculate cutoff time
-  windowNs:windowMin * 60 * 1000000000j;
-  cutoff:.z.p - windowNs;
-  
-  / Query buckets within window - unkey the result with 0!
-  buckets:0!select from vwapBuckets where sym in enlist s, bucket >= cutoff;
-  
-  / Return empty result if no data
-  if[0 = count buckets;
-    :([] sym:enlist s; vwap:enlist 0n; totalQty:enlist 0f; tradeCount:enlist 0j; isValid:enlist 0b)];
-  
-  / Aggregate across buckets
-  totalPxQty:sum buckets`sumPxQty;
-  totalQty:sum buckets`sumQty;
-  tradeCount:sum buckets`cnt;
-  
-  / Calculate VWAP
-  vwap:$[totalQty > 0f; totalPxQty % totalQty; 0n];
-  
-  / Return result as single-row table
-  ([] sym:enlist s; vwap:enlist vwap; totalQty:enlist totalQty; tradeCount:enlist tradeCount; isValid:enlist tradeCount > 10)
+  `tradeBuckets upsert (s; bucketTime; price * qty; qty; 1j);
   };
 
 / Cleanup old buckets (called by timer)
-.rte.vwap.cleanup:{[]
-  cutoff:.z.p - .rte.cfg.retentionNs;
-  delete from `vwapBuckets where bucket < cutoff;
+.rte.bucket.cleanup:{[]
+  cutoff:.z.p - .rte.cfg.bucketRetentionNs;
+  delete from `tradeBuckets where bucket < cutoff;
   };
 
 / =============================================================================
-/ Imbalance State - L5 (Latest snapshot per symbol)
+/ VWAP - Calculated from Trade Buckets
+/ =============================================================================
+
+/ Calculate VWAP for a symbol over a time window
+.rte.vwap.calc:{[s;windowMin]
+  windowNs:windowMin * 60 * 1000000000j;
+  cutoff:.z.p - windowNs;
+  
+  buckets:0!select from tradeBuckets where sym in enlist s, bucket >= cutoff;
+  
+  if[0 = count buckets;
+    :([] sym:enlist s; vwap:enlist 0n; totalQty:enlist 0f; tradeCount:enlist 0j; isValid:enlist 0b)];
+  
+  totalPxQty:sum buckets`sumPxQty;
+  totalQty:sum buckets`sumQty;
+  tradeCount:sum buckets`cnt;
+  vwap:$[totalQty > 0f; totalPxQty % totalQty; 0n];
+  
+  ([] sym:enlist s; vwap:enlist vwap; totalQty:enlist totalQty; tradeCount:enlist tradeCount; isValid:enlist tradeCount > 10)
+  };
+
+/ =============================================================================
+/ Variance-Covariance Matrix - Calculated from Trade Buckets
+/ =============================================================================
+
+/ Latest var-covar matrix
+.rte.vcov.latest:()!();
+
+/ Var-covar history (flattened for charting)
+.rte.vcov.history:([] time:`timestamp$(); sym1:`symbol$(); sym2:`symbol$(); covar:`float$());
+
+/ Calculate var-covar matrix for all symbols (cold path)
+/ Resamples 1-sec trade buckets to 30-sec for meaningful returns
+.rte.getVarCovar:{[windowMin]
+  cutoff:.z.p - windowMin * 60 * 1000000000j;
+  
+  / Get 1-sec bucket prices
+  prices1s:select bucket, sym, price:sumPxQty % sumQty from tradeBuckets where bucket >= cutoff;
+  
+  / Resample to 30-sec buckets (last price in each 30-sec window)
+  vcovBucketNs:.rte.cfg.vcovBucketSec * 1000000000j;
+  prices:select last price by sym, bucket:`timestamp$vcovBucketNs * `long$bucket div vcovBucketNs from prices1s;
+  prices:0!prices;
+  
+  / Get symbols dynamically
+  syms:asc distinct prices`sym;
+  if[2 > count syms; :`syms`matrix`window`buckets`isValid!(syms; ()!(); windowMin; 0j; 0b)];
+  
+  / Get all buckets (sorted)
+  buckets:asc distinct prices`bucket;
+  
+  / Build price vectors aligned by bucket (null for missing)
+  getPrices:{[prices;buckets;s]
+    d:(exec bucket!price from prices where sym=s);
+    d buckets
+    };
+  / Forward-fill nulls (use last known price when no trade)
+  priceMatrix:fills each getPrices[prices;buckets] each syms;
+  
+  / Compute log returns
+  returns:{r:log x % prev x; @[r;0;:;0n]} each priceMatrix;
+  
+  / Find valid indices (all symbols have values) - use all each for proper precedence
+  validIdx:where all each not null each flip returns;
+  if[10 > count validIdx; :`syms`matrix`window`buckets`isValid!(syms; ()!(); windowMin; count validIdx; 0b)];
+  
+  / Subset to valid rows
+  R:returns @\: validIdx;
+  
+  / Build var-covar matrix
+  matrix:syms!{[syms;R;i] syms!{[R;i;j] cov[R i;R j]}[R;i] each til count syms}[syms;R] each til count syms;
+  
+  / isValid: have enough buckets for meaningful calculation
+  isValid:count[validIdx] >= .rte.cfg.vcovMinBuckets;
+  
+  `syms`matrix`window`buckets`isValid!(syms; matrix; windowMin; count validIdx; isValid)
+  };
+
+/ Update var-covar and store history (called by timer)
+.rte.vcov.update:{[]
+  res:.rte.getVarCovar[.rte.cfg.vcovWindowMin];
+  
+  if[0 = count res`matrix; :()];
+  
+  .rte.vcov.latest:res;
+  
+  / Flatten matrix to history rows
+  t:.z.p;
+  syms:res`syms;
+  matrix:res`matrix;
+  n:count syms;
+  
+  / Build columns directly (n*n rows for n x n matrix)
+  times:(n*n)#t;
+  s1s:raze n#/:syms;
+  s2s:(n*n)#syms;
+  covs:raze {[matrix;syms;s1] matrix[s1;syms]}[matrix;syms] each syms;
+  
+  `.rte.vcov.history insert (times; s1s; s2s; covs);
+  };
+
+/ Cleanup old var-covar history (called by timer)
+.rte.vcov.cleanup:{[]
+  cutoff:.z.p - .rte.cfg.vcovRetentionNs;
+  delete from `.rte.vcov.history where time < cutoff;
+  };
+
+/ =============================================================================
+/ Order Book State - L5 Latest Snapshot (Optimized for Update Path)
+/ =============================================================================
+
+/ Latest L5 order book per symbol
+/ Stored as raw list for minimal update overhead:
+/   Indices 0-4:   bidPrice1-5
+/   Indices 5-9:   bidQty1-5
+/   Indices 10-14: askPrice1-5
+/   Indices 15-19: askQty1-5
+/   Index 20:      time
+.rte.book.latest:()!();
+
+/ Update book state - hot path, minimal allocation
+.rte.book.update:{[s;data;time]
+  .rte.book.latest[s]:data[2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21],time;
+  };
+
+/ =============================================================================
+/ Imbalance State - Derived from L5 Depth
 / =============================================================================
 
 / Latest order book imbalance per symbol
@@ -93,144 +192,257 @@ vwapBuckets:([]
   };
 
 / =============================================================================
+/ Latency Tracking - Trade Latency from Exchange to VWAP Ready
+/ =============================================================================
+
+/ Latest latency per symbol (for current display)
+/ external: Binance -> FH (network, uncontrollable)
+/ internal: FH -> RTE (our code)
+/ total: end-to-end
+.rte.latency.latest:()!();
+
+/ Latency history (for charting)
+.rte.latency.history:([] time:`timestamp$(); sym:`symbol$(); externalNs:`long$(); internalNs:`long$(); totalNs:`long$());
+
+/ Epoch offset: nanoseconds between Unix epoch (1970) and kdb+ epoch (2000)
+.rte.epochOffset:neg "j"$1970.01.01D0;
+
+/ Update latency for a trade
+.rte.latency.update:{[s;exchTimeMs;fhRecvTimeNs;rteTime]
+  rteTimeNs:.rte.epochOffset + `long$rteTime;
+  externalNs:fhRecvTimeNs - exchTimeMs * 1000000;
+  internalNs:rteTimeNs - fhRecvTimeNs;
+  totalNs:externalNs + internalNs;
+  
+  .rte.latency.latest[s]:`external`internal`total`time!(externalNs; internalNs; totalNs; rteTime);
+  `.rte.latency.history insert (rteTime; s; externalNs; internalNs; totalNs);
+  };
+
+/ Cleanup old latency history (called by timer)
+.rte.latency.cleanup:{[]
+  cutoff:.z.p - .rte.cfg.latencyRetentionNs;
+  delete from `.rte.latency.history where time < cutoff;
+  };
+
+/ =============================================================================
 / Query Interface
 / =============================================================================
 
 / Get VWAP for a symbol over N minutes
 / Usage: .rte.getVwap[`BTCUSDT; 5]
-.rte.getVwap:{[s;m]
-  .rte.vwap.calc[s; m]
-  };
+.rte.getVwap:{[s;m] .rte.vwap.calc[s; m] };
 
 / Get latest order book imbalance for a symbol
 / Usage: .rte.getImbalance[`BTCUSDT]
 .rte.getImbalance:{[s]
-  / Return result as single-row table
   if[not s in key .rte.imb.latest;
     :([] sym:enlist s; bidDepth:enlist 0n; askDepth:enlist 0n; imbalance:enlist 0n; time:enlist 0Np)];
-  
   data:.rte.imb.latest[s];
   ([] sym:enlist s; bidDepth:enlist data`bidDepth; askDepth:enlist data`askDepth; 
       imbalance:enlist data`imbalance; time:enlist data`time)
+  };
+
+/ Get L5 order book for display (cold path - formatting done here)
+/ Usage: .rte.getOrderBook[`BTCUSDT]
+.rte.getOrderBook:{[s]
+  if[not s in key .rte.book.latest;
+    :([] bidQty:5#0n; bidPrice:5#0n; askPrice:5#0n; askQty:5#0n)];
+  d:.rte.book.latest[s];
+  ([] bidQty:d 5 6 7 8 9; bidPrice:d 0 1 2 3 4; askPrice:d 10 11 12 13 14; askQty:d 15 16 17 18 19)
+  };
+
+/ Get spread and mid-price
+/ Usage: .rte.getSpread[`BTCUSDT]
+.rte.getSpread:{[s]
+  if[not s in key .rte.book.latest;
+    :`spread`mid`bestBid`bestAsk`time!(0n;0n;0n;0n;0Np)];
+  d:.rte.book.latest[s];
+  bestBid:d 0; bestAsk:d 10;
+  `spread`mid`bestBid`bestAsk`time!(bestAsk - bestBid; 0.5 * bestBid + bestAsk; bestBid; bestAsk; d 20)
+  };
+
+/ Get full order book with spread (convenience function for dashboard)
+/ Usage: .rte.getOrderBookWithSpread[`BTCUSDT]
+.rte.getOrderBookWithSpread:{[s]
+  `book`spread`mid`sym!(.rte.getOrderBook[s]; .rte.getSpread[s]`spread; .rte.getSpread[s]`mid; s)
+  };
+
+/ Get current latency for a symbol
+/ Usage: .rte.getLatency[`BTCUSDT]
+.rte.getLatency:{[s]
+  if[not s in key .rte.latency.latest; :`external`internal`total`time!(0N; 0N; 0N; 0Np)];
+  .rte.latency.latest[s]
+  };
+
+/ Get current latency for a symbol in milliseconds
+/ Usage: .rte.getLatencyMs[`BTCUSDT]
+.rte.getLatencyMs:{[s]
+  lat:.rte.getLatency[s];
+  `externalMs`internalMs`totalMs`time!(lat[`external]%1e6; lat[`internal]%1e6; lat[`total]%1e6; lat`time)
+  };
+
+/ Get latency history for charting
+/ Usage: .rte.getLatencyHistory[`BTCUSDT; 15]
+.rte.getLatencyHistory:{[s;mins]
+  cutoff:.z.p - mins * 60 * 1000000000j;
+  select time, externalNs, internalNs, totalNs from .rte.latency.history where sym=s, time>=cutoff
+  };
+
+/ Get latency history for charting in milliseconds
+/ Usage: .rte.getLatencyHistoryMs[`BTCUSDT; 15]
+.rte.getLatencyHistoryMs:{[s;mins]
+  cutoff:.z.p - mins * 60 * 1000000000j;
+  select time, externalMs:externalNs%1e6, internalMs:internalNs%1e6, totalMs:totalNs%1e6 
+  from .rte.latency.history where sym=s, time>=cutoff
+  };
+
+/ Get VWAP with latency info (combined for dashboard)
+/ Usage: .rte.getVwapWithLatency[`BTCUSDT; 5]
+.rte.getVwapWithLatency:{[s;m]
+  vwap:.rte.vwap.calc[s;m];
+  lat:.rte.getLatency[s];
+  vwap,'([] externalNs:enlist lat`external; internalNs:enlist lat`internal; 
+         totalNs:enlist lat`total; latencyTime:enlist lat`time)
+  };
+
+/ Get latest var-covar matrix
+/ Usage: .rte.getVcov[]
+.rte.getVcov:{[] .rte.vcov.latest };
+
+/ Get var-covar history for a symbol pair
+/ Usage: .rte.getVcovHistory[`BTCUSDT; `ETHUSDT; 15]
+.rte.getVcovHistory:{[s1;s2;mins]
+  cutoff:.z.p - mins * 60 * 1000000000j;
+  select time, covar from .rte.vcov.history where sym1=s1, sym2=s2, time>=cutoff
+  };
+
+/ Get correlation matrix from var-covar (derived)
+/ Usage: .rte.getCorrelation[]
+.rte.getCorrelation:{[]
+  if[0 = count .rte.vcov.latest; :()!()];
+  syms:.rte.vcov.latest`syms;
+  matrix:.rte.vcov.latest`matrix;
+  syms!{[syms;matrix;i]
+    vari:matrix[syms i;syms i];
+    syms!{[matrix;syms;i;vari;j]
+      varj:matrix[syms j;syms j];
+      covij:matrix[syms i;syms j];
+      $[(vari > 0) & varj > 0; covij % sqrt vari * varj; 0n]
+    }[matrix;syms;i;vari] each til count syms
+  }[syms;matrix] each til count syms
+  };
+
+/ Get annualized volatility for all symbols
+/ Usage: .rte.getAnnualizedVol[]
+.rte.getAnnualizedVol:{[]
+  if[0 = count .rte.vcov.latest; :()!()];
+  / Annualization factor: seconds per year / bucket size
+  / 365 * 24 * 60 * 60 = 31,536,000 seconds per year (crypto 24/7)
+  factor:31536000 % .rte.cfg.vcovBucketSec;
+  syms:.rte.vcov.latest`syms;
+  matrix:.rte.vcov.latest`matrix;
+  syms!{[matrix;factor;s] sqrt factor * matrix[s;s]}[matrix;factor] each syms
   };
 
 / =============================================================================
 / Update Handler (Called by Tickerplant and during replay)
 / =============================================================================
 
+/ Trade data layout:
+/   Index 0:  time
+/   Index 1:  sym
+/   Index 2:  tradeId
+/   Index 3:  price
+/   Index 4:  qty
+/   Index 5:  buyerIsMaker
+/   Index 6:  exchEventTimeMs
+/   Index 7:  exchTradeTimeMs
+/   Index 8:  fhRecvTimeUtcNs
+/   Index 9:  fhParseUs
+/   Index 10: fhSendUs
+/   Index 11: fhSeqNo
+/   Index 12: tpRecvTimeUtcNs
+
+/ Quote data layout:
+/   Index 0:     time
+/   Index 1:     sym
+/   Index 2-6:   bidPrice1-5
+/   Index 7-11:  bidQty1-5
+/   Index 12-16: askPrice1-5
+/   Index 17-21: askQty1-5
+/   Index 22+:   metadata (fhRecvTimeUtcNs, fhParseUs, etc.)
+
 .u.upd:{[tbl;data]
-  / Handle trade updates
   if[tbl = `trade_binance;
-    / data format: (time; sym; tradeId; price; qty; ...)
+    rteTime:.z.p;
     time:data 0;
     s:data 1;
     price:data 3;
     qty:data 4;
-    .rte.vwap.add[s; time; price; qty];
+    exchTimeMs:data 6;
+    fhRecvTimeNs:data 8;
+    
+    .rte.bucket.add[s; time; price; qty];
+    .rte.latency.update[s; exchTimeMs; fhRecvTimeNs; rteTime];
   ];
 
-  / Handle quote updates
   if[tbl = `quote_binance;
-    / data format: (time; sym; ...; bid1Qty through bid5Qty; ...; ask1Qty through ask5Qty)
     time:data 0;
     s:data 1;
-    
-    / Sum bid depth (L1-L5) - indices 7-11
+    .rte.book.update[s;data;time];
     bidDepth:(data 7) + (data 8) + (data 9) + (data 10) + (data 11);
-    
-    / Sum ask depth (L1-L5) - indices 17-21
     askDepth:(data 17) + (data 18) + (data 19) + (data 20) + (data 21);
-    
     .rte.imb.update[s; bidDepth; askDepth; time];
   ];
   };
 
-/ Create root-level upd function for u.q compatibility
 upd:.u.upd;
 
 / =============================================================================
 / Log Replay
 / =============================================================================
 
-/ Build log file path for a given date and type
-/ @param d - date
-/ @param typ - `trade or `quote
-.rte.logFile:{[d;typ]
-  hsym `$(.rte.cfg.logDir,"/",string[d],".",string[typ],".log")
-  };
+.rte.logFile:{[d] hsym `$(.rte.cfg.logDir,"/",string[d],".log") };
 
-/ Check if log file exists and has content
-/ @param f - log file path (hsym)
-/ @return 1b if exists and non-empty, 0b otherwise
-.rte.logExists:{[f]
-  sz:@[hcount; f; -1j];
-  sz > 0
-  };
+.rte.logExists:{[f] sz:@[hcount; f; -1j]; sz > 0 };
 
-/ Get chunk count from log file (also validates file)
-/ @param f - log file path (hsym)
-/ @return (chunks; filesize) or (chunks; validBytes) if corrupt
 .rte.logInfo:{[f]
   if[not .rte.logExists[f]; :(0j; 0j)];
   info:-11!(-2;f);
   $[1 = count info; (info; hcount f); info]
   };
 
-/ Replay a single log file
-/ @param f - log file path (hsym)
-/ @return number of chunks replayed
 .rte.replayFile:{[f]
-  if[not .rte.logExists[f];
-    -1 "RTE: Log file not found: ",string[f];
-    :0j
-  ];
-  
+  if[not .rte.logExists[f]; -1 "RTE: Log file not found: ",string[f]; :0j];
   -1 "RTE: Replaying from ",string[f];
-  
-  / Replay using streaming execute with error handling
   replayed:.[{-11!x}; enlist f; {[e] -1 "RTE: Replay error - ",e; 0j}];
-  
   -1 "RTE: Replayed ",string[replayed]," chunks";
   replayed
   };
 
-/ Replay all logs for a given date
-/ @param d - date (default today)
-/ @return total chunks replayed
 .rte.replay:{[d]
   if[d ~ (::); d:.z.D];
-  
   -1 "RTE: Starting replay for ",string[d];
-  
-  / Replay trade log (for VWAP)
-  tradeLog:.rte.logFile[d;`trade];
-  tradeChunks:.rte.replayFile[tradeLog];
-  
-  / Replay quote log (for imbalance)
-  quoteLog:.rte.logFile[d;`quote];
-  quoteChunks:.rte.replayFile[quoteLog];
-  
-  total:tradeChunks + quoteChunks;
-  -1 "RTE: Replay complete - ",string[tradeChunks]," trades, ",string[quoteChunks]," quotes";
-  -1 "RTE: VWAP buckets: ",string[count vwapBuckets],", Imbalance symbols: ",string[count .rte.imb.latest];
-  
-  total
+  logFile:.rte.logFile[d];
+  chunks:.rte.replayFile[logFile];
+  -1 "RTE: Replay complete - ",string[chunks]," chunks";
+  -1 "RTE: Trade buckets: ",string[count tradeBuckets],", Book symbols: ",string[count .rte.book.latest],", Imbalance symbols: ",string[count .rte.imb.latest];
+  chunks
   };
 
 / =============================================================================
 / End-of-Day Handler
 / =============================================================================
 
-/ Called by TP at end of day
 .u.end:{[date]
   -1 "RTE: EOD received for ",string[date];
-  
-  / Clear VWAP buckets (start fresh for new day)
-  delete from `vwapBuckets;
-  
-  / Clear imbalance state
+  delete from `tradeBuckets;
+  .rte.book.latest:()!();
   .rte.imb.latest:()!();
-  
+  .rte.latency.latest:()!();
+  delete from `.rte.latency.history;
+  .rte.vcov.latest:()!();
+  delete from `.rte.vcov.history;
   -1 "RTE: EOD processing complete - state cleared";
   };
 
@@ -242,15 +454,10 @@ upd:.u.upd;
   -1 "RTE: Connecting to tickerplant on port ",string[.rte.cfg.tpPort],"...";
   h:@[hopen; `$"::",string .rte.cfg.tpPort; {-1 "RTE: Failed to connect to TP: ",x; 0N}];
   if[null h; '"Cannot connect to TP"];
-  
-  / Subscribe to trades (for VWAP)
   res:h (`.u.sub; `trade_binance; `);
   -1 "RTE: Subscribed to ",string[first res];
-  
-  / Subscribe to quotes (for imbalance)
   res:h (`.u.sub; `quote_binance; `);
   -1 "RTE: Subscribed to ",string[first res];
-  
   .rte.tpHandle:h;
   };
 
@@ -258,9 +465,11 @@ upd:.u.upd;
 / Periodic Cleanup Timer
 / =============================================================================
 
-/ Timer function to clean up old buckets
 .z.ts:{[]
-  .rte.vwap.cleanup[];
+  .rte.bucket.cleanup[];
+  .rte.latency.cleanup[];
+  .rte.vcov.update[];
+  .rte.vcov.cleanup[];
   };
 
 / =============================================================================
@@ -273,37 +482,51 @@ system "p ",string .rte.cfg.port;
 -1 "RTE (Production Grade) starting on port ",string[.rte.cfg.port];
 -1 "=======================================================";
 -1 "Configuration:";
--1 "  Bucket size: ",string[.rte.cfg.bucketSec],"s";
--1 "  Retention: ",string[.rte.cfg.retentionMin]," minutes";
+-1 "  Bucket size: ",string[.rte.cfg.bucketSec],"s (for VWAP)";
+-1 "  Bucket retention: ",string[.rte.cfg.bucketRetentionMin]," minutes";
+-1 "  Latency retention: ",string[.rte.cfg.latencyRetentionMin]," minutes";
+-1 "  Var-Covar window: ",string[.rte.cfg.vcovWindowMin]," minutes";
+-1 "  Var-Covar bucket: ",string[.rte.cfg.vcovBucketSec],"s (resampled)";
+-1 "  Var-Covar min buckets: ",string[.rte.cfg.vcovMinBuckets]," (for isValid)";
+-1 "  Var-Covar retention: ",string[.rte.cfg.vcovRetentionMin]," minutes";
 -1 "  Cleanup interval: ",string[.rte.cfg.cleanupIntervalMs],"ms";
 
-/ Replay today's logs before subscribing to TP
-/ Note: RTE only keeps recent data, so old data will be cleaned up
 -1 "";
--1 "Checking for logs to replay...";
-tradeLogExists:.rte.logExists[.rte.logFile[.z.D;`trade]];
-quoteLogExists:.rte.logExists[.rte.logFile[.z.D;`quote]];
+-1 "Checking for log to replay...";
+logExists:.rte.logExists[.rte.logFile[.z.D]];
 
-if[tradeLogExists | quoteLogExists; -1 "RTE: Found existing logs for today - replaying..."; .rte.replay[.z.D]; .rte.vwap.cleanup[]; -1 "RTE: Cleanup applied - keeping only last ",string[.rte.cfg.retentionMin]," minutes"];
-if[not tradeLogExists | quoteLogExists; -1 "RTE: No existing logs for today"];
+if[logExists; -1 "RTE: Found existing log for today - replaying..."; .rte.replay[.z.D]; .rte.bucket.cleanup[]; .rte.latency.cleanup[]; -1 "RTE: Cleanup applied"];
+if[not logExists; -1 "RTE: No existing log for today"];
 
-/ Connect and subscribe to TP for live updates
 -1 "";
 .rte.connect[];
 
-/ Start cleanup timer
 system "t ",string .rte.cfg.cleanupIntervalMs;
 
 -1 "";
 -1 "State:";
--1 "  VWAP buckets: ",string[count vwapBuckets];
+-1 "  Trade buckets: ",string[count tradeBuckets];
+-1 "  Book symbols: ",string[count .rte.book.latest];
 -1 "  Imbalance symbols: ",string[count .rte.imb.latest];
+-1 "  Latency symbols: ",string[count .rte.latency.latest];
 -1 "";
 -1 "Query interface:";
--1 "  .rte.getVwap[`BTCUSDT; 5]      / 5-minute VWAP";
--1 "  .rte.getVwap[`BTCUSDT; 1]      / 1-minute VWAP";
--1 "  .rte.getImbalance[`BTCUSDT]    / Latest imbalance";
--1 "  .rte.replay[.z.D]              / Replay today's logs";
+-1 "  .rte.getVwap[`BTCUSDT; 5]                 / 5-minute VWAP";
+-1 "  .rte.getVwap[`BTCUSDT; 1]                 / 1-minute VWAP";
+-1 "  .rte.getImbalance[`BTCUSDT]               / Latest imbalance";
+-1 "  .rte.getOrderBook[`BTCUSDT]               / L5 order book for display";
+-1 "  .rte.getSpread[`BTCUSDT]                  / Spread and mid-price";
+-1 "  .rte.getOrderBookWithSpread[`BTCUSDT]     / Book + spread combined";
+-1 "  .rte.getLatency[`BTCUSDT]                 / Current latency (ns)";
+-1 "  .rte.getLatencyMs[`BTCUSDT]               / Current latency (ms)";
+-1 "  .rte.getLatencyHistory[`BTCUSDT; 15]      / Latency history (ns)";
+-1 "  .rte.getLatencyHistoryMs[`BTCUSDT; 15]    / Latency history (ms)";
+-1 "  .rte.getVwapWithLatency[`BTCUSDT; 5]      / VWAP + latency combined";
+-1 "  .rte.getVarCovar[60]                      / Var-covar matrix (60-min)";
+-1 "  .rte.getVcov[]                            / Latest var-covar matrix";
+-1 "  .rte.getVcovHistory[`BTCUSDT;`ETHUSDT;15] / Covariance history";
+-1 "  .rte.getCorrelation[]                     / Correlation matrix";
+-1 "  .rte.replay[.z.D]                         / Replay today's log";
 -1 "";
 -1 "RTE ready";
 -1 "=======================================================";
