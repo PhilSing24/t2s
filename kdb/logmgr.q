@@ -18,34 +18,39 @@
 / =============================================================================
 
 / List all log files in the log directory
-/ @return table with date, type, file path, size
+/ @return table with date, file path, size, chunks
 .log.list:{[]
   / Get all files in log directory
   dir:hsym `$.log.cfg.logDir;
   files:key dir;
   
-  if[0 = count files; :([] date:`date$(); typ:`$(); file:`$(); sizeMB:`float$(); chunks:`long$())];
+  if[0 = count files; :([] date:`date$(); file:`$(); sizeMB:`float$(); chunks:`long$())];
   
-  / Parse filenames: YYYY.MM.DD.type.log
+  / Parse filenames: YYYY.MM.DD.log (single log format)
   parsed:{
     parts:"." vs string x;
-    if[5 <> count parts; :()];  / Invalid format
+    / Valid format: 4 parts (YYYY, MM, DD, log)
+    if[4 <> count parts; :()];
+    if[not "log" ~ parts 3; :()];
     d:"D"$"." sv 3#parts;
-    typ:`$parts 3;
-    if[not typ in `trade`quote; :()];
-    (d; typ; x)
+    if[null d; :()];
+    (d; x)
     } each files;
   
-  / Filter valid entries
-  parsed:parsed where not (::) ~/: parsed;
+  / Filter valid entries - keep only non-empty results
+  / Note: () is different from (::) in q, use count to filter
+  valid:parsed where 0 < count each parsed;
   
-  if[0 = count parsed; :([] date:`date$(); typ:`$(); file:`$(); sizeMB:`float$(); chunks:`long$())];
+  if[0 = count valid; :([] date:`date$(); file:`$(); sizeMB:`float$(); chunks:`long$())];
   
-  / Build result table
+  / Build result table with full paths
+  dates:valid[;0];
+  filenames:valid[;1];
+  fullPaths:` sv/: dir,/:filenames;
+  
   result:([] 
-    date:parsed[;0]; 
-    typ:parsed[;1]; 
-    file:` sv/: dir,/:parsed[;2]
+    date:dates; 
+    file:fullPaths
   );
   
   / Add file sizes
@@ -102,7 +107,7 @@
   / Delete files
   deleted:0j;
   {
-    -1 "  Deleting: ",string[x`file]," (",string[x`date],", ",string[x`typ],")";
+    -1 "  Deleting: ",string[x`file]," (",string[x`date],")";
     @[hdel; x`file; {-1 "  ERROR deleting: ",x}];
     deleted+:1;
   } each toDelete;
@@ -116,17 +121,13 @@
 / =============================================================================
 
 / Get summary of all logs
-/ @return table with date, trade chunks, quote chunks, total size
+/ @return table with date, chunks, total size
 .log.summary:{[]
   logs:.log.list[];
   
-  if[0 = count logs; :([] date:`date$(); tradeChunks:`long$(); quoteChunks:`long$(); totalMB:`float$())];
+  if[0 = count logs; :([] date:`date$(); chunks:`long$(); sizeMB:`float$())];
   
-  select 
-    tradeChunks:sum chunks where typ = `trade,
-    quoteChunks:sum chunks where typ = `quote,
-    totalMB:sum sizeMB
-    by date from logs
+  select chunks, sizeMB from logs
   };
 
 / Check log file integrity
@@ -152,21 +153,14 @@
   `status`file`chunks`size`valid!($[valid; `ok; `corrupt]; f; chunks; size; valid)
   };
 
-/ Verify all logs for a date
+/ Verify log for a date
 / @param d - date (default today)
-/ @return table with verification results
+/ @return verification result dictionary
 .log.verifyDate:{[d]
   if[d ~ (::); d:.z.D];
   
-  tradeFile:hsym `$(.log.cfg.logDir,"/",string[d],".trade.log");
-  quoteFile:hsym `$(.log.cfg.logDir,"/",string[d],".quote.log");
-  
-  tradeInfo:.log.verify[tradeFile];
-  quoteInfo:.log.verify[quoteFile];
-  
-  ([] typ:`trade`quote; status:(tradeInfo`status; quoteInfo`status); 
-      chunks:(tradeInfo`chunks; quoteInfo`chunks); 
-      size:(tradeInfo`size; quoteInfo`size))
+  logFile:hsym `$(.log.cfg.logDir,"/",string[d],".log");
+  .log.verify[logFile]
   };
 
 / =============================================================================
@@ -196,6 +190,7 @@ system "p ",string .log.cfg.port;
 -1 "=======================================================";
 -1 "Configuration:";
 -1 "  Log directory: ",.log.cfg.logDir;
+-1 "  Log format: single file per day (YYYY.MM.DD.log)";
 -1 "  Retention: ",string[.log.cfg.retentionDays]," days";
 -1 "  Cleanup hour: ",string[.log.cfg.cleanupHour],":00";
 
@@ -203,7 +198,7 @@ system "p ",string .log.cfg.port;
 -1 "";
 -1 "Current logs:";
 logs:.log.list[];
-if[0 < count logs; show select date, typ, sizeMB, chunks from logs; -1 "  Total: ",string[count logs]," files, ",string[sum logs`sizeMB]," MB"];
+if[0 < count logs; show select date, sizeMB, chunks from logs; -1 "  Total: ",string[count logs]," files, ",string[sum logs`sizeMB]," MB"];
 if[0 = count logs; -1 "  No log files found"];
 
 -1 "";
@@ -212,7 +207,7 @@ if[0 = count logs; -1 "  No log files found"];
 -1 "  .log.summary[]                 / Summary by date";
 -1 "  .log.info[`:/path/to/log]      / Get file info";
 -1 "  .log.verify[`:/path/to/log]    / Verify file integrity";
--1 "  .log.verifyDate[.z.D]          / Verify today's logs";
+-1 "  .log.verifyDate[.z.D]          / Verify today's log";
 -1 "  .log.cleanup[]                 / Delete old logs (default retention)";
 -1 "  .log.cleanup[3]                / Delete logs older than 3 days";
 -1 "";

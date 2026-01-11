@@ -6,7 +6,7 @@
 / Configuration
 / -----------------------------------------------------------------------------
 
-.ctl.baseDir:getenv[`HOME],"/binance_feed_handler";
+.ctl.baseDir:getenv[`HOME],"/tick-to-signal";
 .ctl.startScript:"start_bg.sh";
 .ctl.stopScript:"stop.sh";
 .ctl.pidDir:.ctl.baseDir,"/logs/processes";
@@ -22,27 +22,35 @@
 / Native process control (doesn't rely on scripts)
 / -----------------------------------------------------------------------------
 
-/ Kill process by PID file
+/ Kill process by PID file (graceful then forced)
 .ctl.killByPid:{[pidFile]
   fullPath:.ctl.pidDir,"/",pidFile;
   pid:@[{first read0 hsym `$x}; fullPath; ""];
   if[not ""~pid;
-    cmd:"kill -9 ",pid," 2>/dev/null";
-    @[system; cmd; {-1 "Kill error for ",x}];
+    / Try graceful shutdown first (SIGTERM)
+    @[system; "kill -15 ",pid," 2>/dev/null"; {}];
+    system "sleep 1";
+    / Force kill if still alive (SIGKILL)
+    @[system; "kill -9 ",pid," 2>/dev/null"; {}];
     -1 "Killed PID ",pid," from ",pidFile;
     @[hdel; hsym `$fullPath; {}];
   ];
   };
 
-/ Kill process by port
+/ Kill process by port (graceful then forced)
 .ctl.killByPort:{[port]
+  / Graceful first (SIGTERM)
+  cmd:"lsof -ti:",string[port]," 2>/dev/null | xargs kill -15 2>/dev/null";
+  @[system; cmd; {}];
+  system "sleep 1";
+  / Force kill if still alive (SIGKILL)
   cmd:"lsof -ti:",string[port]," 2>/dev/null | xargs kill -9 2>/dev/null";
   @[system; cmd; {}];
   };
 
 / Native stop function (doesn't use stop.sh)
 .ctl.stopNative:{[]
-  -1 "Stopping processes natively...";
+  -1 "Stopping processes (graceful then forced)...";
   
   / Method 1: Kill by PID files
   .ctl.killByPid each ("tp.pid";"rdb.pid";"rte.pid";"tel.pid";"logmgr.pid";"trade_fh.pid";"quote_fh.pid");
@@ -50,7 +58,10 @@
   / Method 2: Kill by ports (fallback)
   .ctl.killByPort each 5010 5011 5012 5013 5014;
   
-  / Method 3: Kill by process name (fallback)
+  / Method 3: Kill by process name (fallback) - graceful then forced
+  @[system; "pkill -15 -f trade_feed_handler 2>/dev/null"; {}];
+  @[system; "pkill -15 -f quote_feed_handler 2>/dev/null"; {}];
+  system "sleep 1";
   @[system; "pkill -9 -f trade_feed_handler 2>/dev/null"; {}];
   @[system; "pkill -9 -f quote_feed_handler 2>/dev/null"; {}];
   
@@ -133,7 +144,7 @@
 -1 "Control process started on port 5000";
 -1 "Functions:";
 -1 "  .ctl.start[]       - Start all processes";
--1 "  .ctl.stop[]        - Stop all processes (native)";
+-1 "  .ctl.stop[]        - Stop all processes (graceful)";
 -1 "  .ctl.forceStop[]   - Force stop (ignores status flag)";
 -1 "  .ctl.getStatus[]   - Get status info";
 -1 "  .ctl.healthCheck[] - Check which ports are alive";

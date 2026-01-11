@@ -1,5 +1,5 @@
 / tp.q - Tickerplant with STANDARD tick.q pub/sub (u.q)
-/ Production-grade with proper log file format for -11! replay
+/ Production-grade with single log file for temporal consistency
 
 / -------------------------------------------------------
 / Configuration
@@ -9,8 +9,8 @@
 .tp.cfg.logDir:"logs";
 .tp.cfg.logEnabled:1b;
 
-/ Epoch offset: nanoseconds between 2000.01.01 and 1970.01.01
-.tp.epochOffset:946684800000000000j;
+/ Nanoseconds between kdb+ epoch (2000.01.01) and Unix epoch (1970.01.01)
+.tp.epochOffset: neg "j"$1970.01.01D0;
 
 / to store start time of the process
 .proc.startTime:.z.p;
@@ -90,25 +90,22 @@ health_feed_handler:([]
   );
 
 / -------------------------------------------------------
-/ Logging - Separate files for trades and quotes
+/ Logging - Single file for all tables (standard tick.q)
 / Format compatible with -11! streaming replay
 / -------------------------------------------------------
 
-/ Log handles (set at startup)
-.tp.tradeLogHandle:0N;
-.tp.quoteLogHandle:0N;
+/ Log handle (set at startup)
+.tp.logHandle:0N;
 
-/ Log file paths (stored for reference)
-.tp.tradeLogFile:`;
-.tp.quoteLogFile:`;
+/ Log file path (stored for reference)
+.tp.logFile:`;
 
 / Message counter for recovery tracking
-.tp.logCount:`trade`quote!0 0j;
+.tp.logCount:0j;
 
 / Build log file path for today
-/ @param typ - `trade or `quote
-.tp.logFile:{[typ]
-  hsym `$(.tp.cfg.logDir,"/",string[.z.D],".",string[typ],".log")
+.tp.logFilePath:{[]
+  hsym `$(.tp.cfg.logDir,"/",string[.z.D],".log")
   };
 
 / Initialize a log file for -11! compatibility
@@ -123,53 +120,46 @@ health_feed_handler:([]
   hopen f
   };
 
-/ Open log files (with proper initialization)
+/ Open log file (with proper initialization)
 .tp.openLog:{[]
   if[not .tp.cfg.logEnabled; :()];
   
   / Create log directory
   system "mkdir -p ",.tp.cfg.logDir;
   
-  / Store file paths
-  .tp.tradeLogFile:.tp.logFile[`trade];
-  .tp.quoteLogFile:.tp.logFile[`quote];
+  / Store file path
+  .tp.logFile:.tp.logFilePath[];
   
-  / Initialize and open log files
-  .tp.tradeLogHandle:.tp.initLog[.tp.tradeLogFile];
-  .tp.quoteLogHandle:.tp.initLog[.tp.quoteLogFile];
+  / Initialize and open log file
+  .tp.logHandle:.tp.initLog[.tp.logFile];
   
-  / Get current message counts (for recovery tracking)
-  .tp.logCount[`trade]:@[{-11!(-2;x)}; .tp.tradeLogFile; 0j];
-  .tp.logCount[`quote]:@[{-11!(-2;x)}; .tp.quoteLogFile; 0j];
+  / Get current message count (for recovery tracking)
+  .tp.logCount:@[{-11!(-2;x)}; .tp.logFile; 0j];
   
-  -1 "TP: Trade log: ",string[.tp.tradeLogFile]," (",string[.tp.logCount`trade]," existing chunks)";
-  -1 "TP: Quote log: ",string[.tp.quoteLogFile]," (",string[.tp.logCount`quote]," existing chunks)";
+  -1 "TP: Log file: ",string[.tp.logFile]," (",string[.tp.logCount]," existing chunks)";
   };
 
-/ Close log files
+/ Close log file
 .tp.closeLog:{[]
   if[not .tp.cfg.logEnabled; :()];
-  if[not null .tp.tradeLogHandle; @[hclose; .tp.tradeLogHandle; {}]; .tp.tradeLogHandle:0N];
-  if[not null .tp.quoteLogHandle; @[hclose; .tp.quoteLogHandle; {}]; .tp.quoteLogHandle:0N];
-  -1 "TP: Log files closed";
+  if[not null .tp.logHandle; @[hclose; .tp.logHandle; {}]; .tp.logHandle:0N];
+  -1 "TP: Log file closed";
   };
 
-/ Write to appropriate log
+/ Write to log file
 / Format: enlist (`.u.upd; tableName; data)
 / This format is compatible with -11! replay which calls .z.ps -> value
 .tp.log:{[tbl;data]
   if[not .tp.cfg.logEnabled; :()];
-  $[tbl = `trade_binance;
-    [.tp.tradeLogHandle enlist (`.u.upd; tbl; data); .tp.logCount[`trade]+:1];
-    tbl = `quote_binance;
-    [.tp.quoteLogHandle enlist (`.u.upd; tbl; data); .tp.logCount[`quote]+:1];
-    ()
-  ];
+  / Skip health updates from logging (optional - remove if you want health in log)
+  if[tbl = `health_feed_handler; :()];
+  .tp.logHandle enlist (`.u.upd; tbl; data);
+  .tp.logCount+:1;
   };
 
 / Rotate logs (call at end of day)
 .tp.rotate:{[]
-  -1 "TP: Rotating log files...";
+  -1 "TP: Rotating log file...";
   .tp.closeLog[];
   .tp.openLog[];
   };
@@ -177,11 +167,10 @@ health_feed_handler:([]
 / Get current log status
 .tp.logStatus:{[]
   ([] 
-    typ:`trade`quote;
-    file:(.tp.tradeLogFile; .tp.quoteLogFile);
-    handle:(.tp.tradeLogHandle; .tp.quoteLogHandle);
-    chunks:(.tp.logCount`trade; .tp.logCount`quote);
-    sizeMB:(@[hcount; .tp.tradeLogFile; 0j] % 1e6; @[hcount; .tp.quoteLogFile; 0j] % 1e6)
+    file:enlist .tp.logFile;
+    handle:enlist .tp.logHandle;
+    chunks:enlist .tp.logCount;
+    sizeMB:enlist @[hcount; .tp.logFile; 0j] % 1e6
   )
   };
 
@@ -200,9 +189,7 @@ health_feed_handler:([]
 / -------------------------------------------------------
 
 / Convert kdb timestamp to nanoseconds since Unix epoch
-.tp.tsToNs:{[ts]
-  .tp.epochOffset + "j"$ts - 2000.01.01D0
-  };
+.tp.tsToNs:{[ts] .tp.epochOffset + "j"$ts };
 
 / Core update function
 / Called by feed handler via .z.ps -> .u.upd
@@ -238,14 +225,13 @@ health_feed_handler:([]
 .tp.endOfDay:{[]
   -1 "TP: End-of-day processing started...";
   
-  / Log final counts
-  -1 "TP: Trade log chunks: ",string[.tp.logCount`trade];
-  -1 "TP: Quote log chunks: ",string[.tp.logCount`quote];
+  / Log final count
+  -1 "TP: Log chunks: ",string[.tp.logCount];
   
   / Broadcast EOD to all subscribers
   .u.end[.z.D];
   
-  / Rotate log files (closes current, opens new for next day)
+  / Rotate log file (closes current, opens new for next day)
   .tp.rotate[];
   
   / Clear in-memory tables
@@ -253,8 +239,8 @@ health_feed_handler:([]
   delete from `quote_binance;
   delete from `health_feed_handler;
   
-  / Reset counters
-  .tp.logCount:`trade`quote!0 0j;
+  / Reset counter
+  .tp.logCount:0j;
   
   -1 "TP: End-of-day processing complete";
   };
@@ -271,8 +257,9 @@ system "p ",string .tp.cfg.port;
 -1 "Configuration:";
 -1 "  Logging: ",$[.tp.cfg.logEnabled; "enabled"; "disabled"];
 -1 "  Log directory: ",.tp.cfg.logDir;
+-1 "  Log format: single file (standard tick.q)";
 
-/ Open log files
+/ Open log file
 .tp.openLog[];
 
 -1 "";
