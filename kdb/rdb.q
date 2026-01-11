@@ -96,7 +96,7 @@ quote_binance:([]
   rdbApplyTimeUtcNs:.rdb.tsToNs[rdbApplyTs];
   data:data,rdbApplyTimeUtcNs;
   / Insert into table
-  tbl upsert enlist data;
+  tbl insert data;
   };
 
 / Create root-level upd function for u.q compatibility
@@ -106,11 +106,10 @@ upd:.u.upd;
 / Log Replay
 / -----------------------------------------------------------------------------
 
-/ Build log file path for a given date and type
+/ Build log file path for a given date
 / @param d - date
-/ @param typ - `trade or `quote
-.rdb.logFile:{[d;typ]
-  hsym `$(.rdb.cfg.logDir,"/",string[d],".",string[typ],".log")
+.rdb.logFile:{[d]
+  hsym `$(.rdb.cfg.logDir,"/",string[d],".log")
   };
 
 / Check if log file exists and has content
@@ -133,7 +132,7 @@ upd:.u.upd;
   $[1 = count info; (info; hcount f); info]
   };
 
-/ Replay a single log file
+/ Replay a log file
 / @param f - log file path (hsym)
 / @return number of chunks replayed
 .rdb.replayFile:{[f]
@@ -152,7 +151,7 @@ upd:.u.upd;
   replayed
   };
 
-/ Replay all logs for a given date
+/ Replay log for a given date
 / @param d - date (default today)
 / @return total chunks replayed
 .rdb.replay:{[d]
@@ -160,19 +159,14 @@ upd:.u.upd;
   
   -1 "RDB: Starting replay for ",string[d];
   
-  / Replay trade log
-  tradeLog:.rdb.logFile[d;`trade];
-  tradeChunks:.rdb.replayFile[tradeLog];
+  / Replay single log file (contains both trades and quotes in chronological order)
+  logFile:.rdb.logFile[d];
+  chunks:.rdb.replayFile[logFile];
   
-  / Replay quote log
-  quoteLog:.rdb.logFile[d;`quote];
-  quoteChunks:.rdb.replayFile[quoteLog];
-  
-  total:tradeChunks + quoteChunks;
-  -1 "RDB: Replay complete - ",string[tradeChunks]," trades, ",string[quoteChunks]," quotes";
+  -1 "RDB: Replay complete - ",string[chunks]," chunks";
   -1 "RDB: Tables now have ",string[count trade_binance]," trades, ",string[count quote_binance]," quotes";
   
-  total
+  chunks
   };
 
 / -----------------------------------------------------------------------------
@@ -230,15 +224,14 @@ system "p ",string .rdb.cfg.port;
 -1 "RDB (Production Grade) starting on port ",string[.rdb.cfg.port];
 -1 "=======================================================";
 
-/ Replay today's logs before subscribing to TP
+/ Replay today's log before subscribing to TP
 / This ensures we recover any data from earlier in the day
 -1 "";
--1 "Checking for logs to replay...";
-tradeLogExists:.rdb.logExists[.rdb.logFile[.z.D;`trade]];
-quoteLogExists:.rdb.logExists[.rdb.logFile[.z.D;`quote]];
+-1 "Checking for log to replay...";
+logExists:.rdb.logExists[.rdb.logFile[.z.D]];
 
-if[tradeLogExists | quoteLogExists; -1 "RDB: Found existing logs for today - replaying..."; .rdb.replay[.z.D]];
-if[not tradeLogExists | quoteLogExists; -1 "RDB: No existing logs for today"];
+if[logExists; -1 "RDB: Found existing log for today - replaying..."; .rdb.replay[.z.D]];
+if[not logExists; -1 "RDB: No existing log for today"];
 
 / Connect and subscribe to TP for live updates
 -1 "";
@@ -250,7 +243,7 @@ if[not tradeLogExists | quoteLogExists; -1 "RDB: No existing logs for today"];
 -1 "  quote_binance: ",string[count quote_binance]," rows (",string[count cols quote_binance]," fields)";
 -1 "";
 -1 "Query interface:";
--1 "  .rdb.replay[.z.D]              / Replay today's logs";
+-1 "  .rdb.replay[.z.D]              / Replay today's log";
 -1 "  .rdb.replay[2026.01.06]        / Replay specific date";
 -1 "  .rdb.logInfo[`:/path/to/log]   / Check log file info";
 -1 "";
