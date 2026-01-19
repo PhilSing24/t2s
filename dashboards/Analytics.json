@@ -1,0 +1,1739 @@
+{
+  "id": "79b385d5-eaef-7aab-b917-2a837b266c3e",
+  "name": "Analytics",
+  "creationDate": "Sun, 11 Jan 2026 12:19:43 GMT",
+  "lastUpdateDate": "Sun, 11 Jan 2026 12:46:29 GMT",
+  "thumb": null,
+  "screenDetails": [
+    {
+      "label": "Screen 1",
+      "value": "1bdf4e9c-e623-3a5d-f88d-ba0fe51df4a8"
+    }
+  ],
+  "screens": [
+    {
+      "id": "1bdf4e9c-e623-3a5d-f88d-ba0fe51df4a8",
+      "name": "Screen 1",
+      "thumb": null,
+      "widgets": [
+        {
+          "id": "53fc7533-2d98-2ca4-bd9c-5c4a5a4ccb67",
+          "layout": {
+            "row": 0,
+            "column": 0,
+            "rowSpan": 2,
+            "colSpan": 36
+          },
+          "component": {
+            "id": "bfbfc080-3436-a75c-051e-6c5d84b08f0d",
+            "key": "BasicComponents",
+            "options": {
+              "version": "v2.9.0",
+              "possibleCols": [],
+              "Basics": {
+                "ComponentName": "NavigationMenu",
+                "Name": "",
+                "Data": {
+                  "_dashboardsType": "data",
+                  "value": "Menu"
+                },
+                "FontSize": 13,
+                "Node": {
+                  "Parent": "parent",
+                  "Node": "node",
+                  "URL": "url",
+                  "ID": "id"
+                },
+                "Actions": []
+              },
+              "Style": {
+                "advanced": "div.basicComponents_navbar {\r\n    background-color: #0a1929;\r\n    padding: 10px 20px;\r\n    box-shadow: 0 2px 4px rgba(0,0,0,0.3);\r\n    border-bottom: 2px solid #ffffff;\r\n}\r\n\r\ndiv.basicComponents_navbar > div.navbar > a {\r\n    color: #ffffff;\r\n    font-weight: 500;\r\n    font-size: 14px;\r\n    padding: 10px 20px;\r\n    text-decoration: none;\r\n    transition: all 0.3s ease;\r\n    border-bottom: 3px solid transparent;  /* Hidden underline by default */\r\n}\r\n\r\ndiv.basicComponents_navbar > div.navbar > a:hover {\r\n    background-color: #1e3a5f;\r\n    color: #ffffff;\r\n    border-radius: 4px 4px 0 0;  /* Rounded top only */\r\n}\r\n\r\ndiv.basicComponents_navbar > div.navbar > a.active {\r\n    border-bottom: 3px solid #2196f3;  /* Blue underline for active tab */\r\n    color: #ffffff;\r\n}",
+                "cssClasses": ""
+              },
+              "Alignment": {
+                "paddingLeft": 0,
+                "paddingRight": 0,
+                "paddingTop": 0,
+                "paddingBottom": 0,
+                "innerPaddingLeft": 0,
+                "innerPaddingRight": 0,
+                "innerPaddingTop": 0,
+                "innerPaddingBottom": 0,
+                "titlePaddingLeft": 0,
+                "titlePaddingRight": 0,
+                "titlePaddingTop": 7,
+                "titlePaddingBottom": 7
+              },
+              "format": {
+                "titleFontSize": 16,
+                "titleHorizontal": "Center",
+                "titleShadow": false,
+                "tileBorderWidth": 0,
+                "tileBorderRounding": 0,
+                "tileBorderColor": "#000000",
+                "tileBackgroundColor": "#000000",
+                "tileTransparentBackground": true,
+                "tileShadow": false
+              },
+              "possibleColumns": [
+                "node",
+                "parent",
+                "url",
+                "id"
+              ]
+            },
+            "containerId": null,
+            "components": [],
+            "widgets": [],
+            "definitionId": "35",
+            "hasOnSettingsChange": true
+          }
+        },
+        {
+          "id": "642c7b26-9253-8d2e-1585-fbfd3ab00d01",
+          "layout": {
+            "row": 4,
+            "column": 2,
+            "rowSpan": 5,
+            "colSpan": 10
+          },
+          "component": {
+            "id": "f19481b7-932a-6d61-6277-dfd3795e5927",
+            "key": "Datagrid",
+            "options": {
+              "version": "v2.12.0",
+              "datagridPossibleColumns": [
+                "sym",
+                "lastPrice",
+                "vwapShort",
+                "vwapLong",
+                "trend"
+              ],
+              "datagridPossibleHeaderColumns": [
+                "none"
+              ],
+              "datagridPossibleColumnsWithItself": [
+                "<this>",
+                "sym",
+                "lastPrice",
+                "vwapShort",
+                "vwapLong",
+                "trend"
+              ],
+              "selectedColumnPossibleValues": [
+                "sym",
+                "lastPrice",
+                "vwapShort",
+                "vwapLong",
+                "trend"
+              ],
+              "highlightTargetPossibleValues": [
+                "sym",
+                "lastPrice",
+                "vwapShort",
+                "vwapLong",
+                "trend",
+                "*"
+              ],
+              "sortingPossibleValues": [
+                "",
+                "sym",
+                "lastPrice",
+                "vwapShort",
+                "vwapLong",
+                "trend"
+              ],
+              "footerPossibleValues": [
+                "None",
+                "Average",
+                "Count",
+                "Sum",
+                "WeightedAverage"
+              ],
+              "Basics": {
+                "Data": {
+                  "_dashboardsType": "data",
+                  "value": "TradeSummary"
+                },
+                "Filtering": "disabled",
+                "IsFilterVisible": false,
+                "ShowPagingControl": false,
+                "EnableGrouping": false
+              },
+              "ColumnsConfiguration": [
+                {
+                  "Field": "sym",
+                  "DisplayName": "sym",
+                  "WidthWeight": 100,
+                  "MinWidthAbsolute": 100,
+                  "FooterWeights": "sym"
+                },
+                {
+                  "Field": "lastPrice",
+                  "DisplayName": "lastPrice",
+                  "Format": "Formatted Number",
+                  "WidthWeight": 100,
+                  "MinWidthAbsolute": 100,
+                  "FooterWeights": "sym"
+                },
+                {
+                  "Field": "vwapShort",
+                  "DisplayName": "vwapShort",
+                  "Format": "Formatted Number",
+                  "WidthWeight": 100,
+                  "MinWidthAbsolute": 100,
+                  "FooterWeights": "sym"
+                },
+                {
+                  "Field": "vwapLong",
+                  "DisplayName": "vwapLong",
+                  "Format": "Formatted Number",
+                  "WidthWeight": 100,
+                  "MinWidthAbsolute": 100,
+                  "FooterWeights": "sym"
+                },
+                {
+                  "Field": "trend",
+                  "DisplayName": "trend",
+                  "WidthWeight": 100,
+                  "MinWidthAbsolute": 100,
+                  "FooterWeights": "sym"
+                }
+              ],
+              "FileExport": {
+                "ShowExportCsvButton": false,
+                "ShowExportExcelButton": false
+              },
+              "Alignment": {
+                "paddingLeft": 0,
+                "paddingRight": 0,
+                "paddingTop": 0,
+                "paddingBottom": 0,
+                "innerPaddingLeft": 0,
+                "innerPaddingRight": 0,
+                "innerPaddingTop": 0,
+                "innerPaddingBottom": 0,
+                "titlePaddingLeft": 0,
+                "titlePaddingRight": 0
+              },
+              "format": {
+                "widgetTitle": "TRADE SUMMARY",
+                "titleColor": "#ffb700",
+                "titleFontBold": true,
+                "tileBorderWidth": 0,
+                "tileBorderRounding": 0,
+                "tileBorderColor": "#000000",
+                "tileBackgroundColor": "#000000",
+                "tileTransparentBackground": true,
+                "tileShadow": false
+              },
+              "HighlightRules": [
+                {
+                  "Name": "",
+                  "Enabled": true,
+                  "Target": "trend",
+                  "ConditionSource": "trend",
+                  "ConditionOperator": "contains",
+                  "ConditionValue": "up",
+                  "Color": "#00ff00",
+                  "BackgroundColor": "",
+                  "BorderColor": "",
+                  "Icon": "",
+                  "IconColor": "",
+                  "RuleType": "discrete",
+                  "RuleMin": 0,
+                  "RuleMax": 1,
+                  "RuleLimitEnabled": false,
+                  "TargetElement": "background",
+                  "PaletteTheme": " ",
+                  "Palette": [
+                    {
+                      "color": "#b71c1c"
+                    },
+                    {
+                      "color": "#F57F17"
+                    },
+                    {
+                      "color": "#33691E"
+                    }
+                  ]
+                },
+                {
+                  "Name": "",
+                  "Enabled": true,
+                  "Target": "trend",
+                  "ConditionSource": "trend",
+                  "ConditionOperator": "contains",
+                  "ConditionValue": "down",
+                  "Color": "#ff0037",
+                  "BackgroundColor": "",
+                  "BorderColor": "",
+                  "Icon": "",
+                  "IconColor": "",
+                  "RuleType": "discrete",
+                  "RuleMin": 0,
+                  "RuleMax": 1,
+                  "RuleLimitEnabled": false,
+                  "TargetElement": "background",
+                  "PaletteTheme": " ",
+                  "Palette": [
+                    {
+                      "color": "#b71c1c"
+                    },
+                    {
+                      "color": "#F57F17"
+                    },
+                    {
+                      "color": "#33691E"
+                    }
+                  ]
+                }
+              ]
+            },
+            "containerId": null,
+            "components": [],
+            "widgets": [],
+            "definitionId": "21",
+            "hasOnSettingsChange": true
+          }
+        },
+        {
+          "id": "6041a075-48e6-9244-3f97-bfbe447706f5",
+          "layout": {
+            "row": 4,
+            "column": 25,
+            "rowSpan": 5,
+            "colSpan": 10
+          },
+          "component": {
+            "id": "929c758f-620c-65c9-488c-6144aab69b1a",
+            "key": "Datagrid",
+            "options": {
+              "version": "v2.12.0",
+              "datagridPossibleColumns": [
+                "key",
+                "BTCUSDT",
+                "ETHUSDT",
+                "SOLUSDT"
+              ],
+              "datagridPossibleHeaderColumns": [
+                "none"
+              ],
+              "datagridPossibleColumnsWithItself": [
+                "<this>",
+                "key",
+                "BTCUSDT",
+                "ETHUSDT",
+                "SOLUSDT"
+              ],
+              "selectedColumnPossibleValues": [
+                "key",
+                "BTCUSDT",
+                "ETHUSDT",
+                "SOLUSDT"
+              ],
+              "highlightTargetPossibleValues": [
+                "key",
+                "BTCUSDT",
+                "ETHUSDT",
+                "SOLUSDT",
+                "*"
+              ],
+              "sortingPossibleValues": [
+                "",
+                "key",
+                "BTCUSDT",
+                "ETHUSDT",
+                "SOLUSDT"
+              ],
+              "footerPossibleValues": [
+                "None",
+                "Average",
+                "Count",
+                "Sum",
+                "WeightedAverage"
+              ],
+              "Basics": {
+                "Data": {
+                  "_dashboardsType": "data",
+                  "value": "Correlation Matrix"
+                },
+                "Filtering": "disabled",
+                "IsFilterVisible": false,
+                "ShowPagingControl": false,
+                "EnableGrouping": false
+              },
+              "ColumnsConfiguration": [
+                {
+                  "Field": "key",
+                  "DisplayName": "key",
+                  "WidthWeight": 100,
+                  "MinWidthAbsolute": 100,
+                  "FooterWeights": "key"
+                },
+                {
+                  "Field": "BTCUSDT",
+                  "DisplayName": "BTCUSDT",
+                  "Format": "Formatted Number",
+                  "Precision": 4,
+                  "WidthWeight": 140,
+                  "MinWidthAbsolute": 140,
+                  "FooterWeights": "key"
+                },
+                {
+                  "Field": "ETHUSDT",
+                  "DisplayName": "ETHUSDT",
+                  "Format": "Formatted Number",
+                  "Precision": 4,
+                  "WidthWeight": 140,
+                  "MinWidthAbsolute": 140,
+                  "FooterWeights": "key"
+                },
+                {
+                  "Field": "SOLUSDT",
+                  "DisplayName": "SOLUSDT",
+                  "Format": "Formatted Number",
+                  "Precision": 4,
+                  "WidthWeight": 140,
+                  "MinWidthAbsolute": 140,
+                  "FooterWeights": "key"
+                }
+              ],
+              "FileExport": {
+                "ShowExportCsvButton": false,
+                "ShowExportExcelButton": false
+              },
+              "Alignment": {
+                "paddingLeft": 0,
+                "paddingRight": 0,
+                "paddingTop": 0,
+                "paddingBottom": 0,
+                "innerPaddingLeft": 0,
+                "innerPaddingRight": 0,
+                "innerPaddingTop": 0,
+                "innerPaddingBottom": 0,
+                "titlePaddingLeft": 0,
+                "titlePaddingRight": 0
+              },
+              "format": {
+                "widgetTitle": "INTRADAY CORRELATION",
+                "titleColor": "#ffb700",
+                "titleFontBold": true,
+                "tileBorderWidth": 0,
+                "tileBorderRounding": 0,
+                "tileBorderColor": "#000000",
+                "tileBackgroundColor": "#000000",
+                "tileTransparentBackground": true,
+                "tileShadow": false
+              }
+            },
+            "containerId": null,
+            "components": [],
+            "widgets": [],
+            "definitionId": "21",
+            "hasOnSettingsChange": true
+          }
+        },
+        {
+          "id": "e56042d4-5c7e-f7fc-28df-46ad0a94d615",
+          "layout": {
+            "row": 4,
+            "column": 14,
+            "rowSpan": 5,
+            "colSpan": 10
+          },
+          "component": {
+            "id": "f536fa1f-4de4-8397-ca32-4d846f75f73f",
+            "key": "Datagrid",
+            "options": {
+              "version": "v2.12.0",
+              "datagridPossibleColumns": [
+                "sym",
+                "annualizedVol",
+                "impliedVol",
+                "vsIVol"
+              ],
+              "datagridPossibleHeaderColumns": [
+                "none"
+              ],
+              "datagridPossibleColumnsWithItself": [
+                "<this>",
+                "sym",
+                "annualizedVol",
+                "impliedVol",
+                "vsIVol"
+              ],
+              "selectedColumnPossibleValues": [
+                "sym",
+                "annualizedVol",
+                "impliedVol",
+                "vsIVol"
+              ],
+              "highlightTargetPossibleValues": [
+                "sym",
+                "annualizedVol",
+                "impliedVol",
+                "vsIVol",
+                "*"
+              ],
+              "sortingPossibleValues": [
+                "",
+                "sym",
+                "annualizedVol",
+                "impliedVol",
+                "vsIVol"
+              ],
+              "footerPossibleValues": [
+                "None",
+                "Average",
+                "Count",
+                "Sum",
+                "WeightedAverage"
+              ],
+              "Basics": {
+                "Data": {
+                  "_dashboardsType": "data",
+                  "value": "VolatilityVector"
+                },
+                "Filtering": "disabled",
+                "IsFilterVisible": false,
+                "ShowPagingControl": false,
+                "EnableGrouping": false
+              },
+              "ColumnsConfiguration": [
+                {
+                  "Field": "sym",
+                  "DisplayName": "sym",
+                  "WidthWeight": 100,
+                  "MinWidthAbsolute": 100,
+                  "FooterWeights": "sym"
+                },
+                {
+                  "Field": "annualizedVol",
+                  "DisplayName": "annualizedVol",
+                  "Format": "Formatted Number",
+                  "Precision": 4,
+                  "WidthWeight": 100,
+                  "MinWidthAbsolute": 100,
+                  "FooterWeights": "sym"
+                },
+                {
+                  "Field": "impliedVol",
+                  "DisplayName": "impliedVol",
+                  "Format": "Number",
+                  "Precision": 4,
+                  "WidthWeight": 100,
+                  "MinWidthAbsolute": 100,
+                  "FooterWeights": "sym"
+                },
+                {
+                  "Field": "vsIVol",
+                  "DisplayName": "vsIVol",
+                  "WidthWeight": 100,
+                  "MinWidthAbsolute": 100,
+                  "FooterWeights": "sym"
+                }
+              ],
+              "FileExport": {
+                "ShowExportCsvButton": false,
+                "ShowExportExcelButton": false
+              },
+              "Alignment": {
+                "paddingLeft": 0,
+                "paddingRight": 0,
+                "paddingTop": 0,
+                "paddingBottom": 0,
+                "innerPaddingLeft": 0,
+                "innerPaddingRight": 0,
+                "innerPaddingTop": 0,
+                "innerPaddingBottom": 0,
+                "titlePaddingLeft": 0,
+                "titlePaddingRight": 0
+              },
+              "format": {
+                "widgetTitle": "INTRADAY VOLATILITY",
+                "titleColor": "#ffb700",
+                "titleFontBold": true,
+                "tileBorderWidth": 0,
+                "tileBorderRounding": 0,
+                "tileBorderColor": "#000000",
+                "tileBackgroundColor": "#000000",
+                "tileTransparentBackground": true,
+                "tileShadow": false
+              }
+            },
+            "containerId": null,
+            "components": [],
+            "widgets": [],
+            "definitionId": "21",
+            "hasOnSettingsChange": true
+          }
+        },
+        {
+          "id": "d03de1a1-9e92-d589-e15e-c933d4121c86",
+          "layout": {
+            "row": 10,
+            "column": 14,
+            "rowSpan": 5,
+            "colSpan": 10
+          },
+          "component": {
+            "id": "fefd773f-3ba1-2339-d5c5-ef3c29f9e897",
+            "key": "Datagrid",
+            "options": {
+              "version": "v2.12.0",
+              "datagridPossibleColumns": [
+                "sym",
+                "OBI",
+                "smOBI",
+                "pressure"
+              ],
+              "datagridPossibleHeaderColumns": [
+                "none"
+              ],
+              "datagridPossibleColumnsWithItself": [
+                "<this>",
+                "sym",
+                "OBI",
+                "smOBI",
+                "pressure"
+              ],
+              "selectedColumnPossibleValues": [
+                "sym",
+                "OBI",
+                "smOBI",
+                "pressure"
+              ],
+              "highlightTargetPossibleValues": [
+                "sym",
+                "OBI",
+                "smOBI",
+                "pressure",
+                "*"
+              ],
+              "sortingPossibleValues": [
+                "",
+                "sym",
+                "OBI",
+                "smOBI",
+                "pressure"
+              ],
+              "footerPossibleValues": [
+                "None",
+                "Average",
+                "Count",
+                "Sum",
+                "WeightedAverage"
+              ],
+              "Basics": {
+                "Data": {
+                  "_dashboardsType": "data",
+                  "value": "OBIVector"
+                },
+                "Filtering": "disabled",
+                "IsFilterVisible": false,
+                "ShowPagingControl": false,
+                "EnableGrouping": false
+              },
+              "ColumnsConfiguration": [
+                {
+                  "Field": "sym",
+                  "DisplayName": "sym",
+                  "WidthWeight": 100,
+                  "MinWidthAbsolute": 100,
+                  "FooterWeights": "sym"
+                },
+                {
+                  "Field": "OBI",
+                  "DisplayName": "OBI",
+                  "Format": "Formatted Number",
+                  "Precision": 4,
+                  "WidthWeight": 100,
+                  "MinWidthAbsolute": 100,
+                  "FooterWeights": "sym"
+                },
+                {
+                  "Field": "smOBI",
+                  "DisplayName": "smOBI",
+                  "Format": "Formatted Number",
+                  "Precision": 4,
+                  "WidthWeight": 100,
+                  "MinWidthAbsolute": 100,
+                  "FooterWeights": "sym"
+                },
+                {
+                  "Field": "pressure",
+                  "DisplayName": "pressure",
+                  "WidthWeight": 100,
+                  "MinWidthAbsolute": 100,
+                  "FooterWeights": "sym"
+                }
+              ],
+              "Alignment": {
+                "paddingLeft": 0,
+                "paddingRight": 0,
+                "paddingTop": 0,
+                "paddingBottom": 0,
+                "innerPaddingLeft": 0,
+                "innerPaddingRight": 0,
+                "innerPaddingTop": 0,
+                "innerPaddingBottom": 0,
+                "titlePaddingLeft": 0,
+                "titlePaddingRight": 0
+              },
+              "format": {
+                "widgetTitle": "ORDER BOOK IMBALANCE",
+                "titleColor": "#ffb700",
+                "titleFontBold": true,
+                "tileBorderWidth": 0,
+                "tileBorderRounding": 0,
+                "tileBorderColor": "#000000",
+                "tileBackgroundColor": "#000000",
+                "tileTransparentBackground": true,
+                "tileShadow": false
+              },
+              "FileExport": {
+                "ShowExportCsvButton": false,
+                "ShowExportExcelButton": false
+              },
+              "HighlightRules": [
+                {
+                  "Name": "Imbalance pressure",
+                  "Enabled": true,
+                  "Target": "pressure",
+                  "ConditionSource": "pressure",
+                  "ConditionOperator": "contains",
+                  "ConditionValue": "buyer",
+                  "Color": "#0dff00",
+                  "BackgroundColor": "",
+                  "BorderColor": "",
+                  "Icon": "",
+                  "IconColor": "",
+                  "RuleType": "discrete",
+                  "RuleMin": 0,
+                  "RuleMax": 1,
+                  "RuleLimitEnabled": false,
+                  "TargetElement": "background",
+                  "PaletteTheme": " ",
+                  "Palette": [
+                    {
+                      "color": "#b71c1c"
+                    },
+                    {
+                      "color": "#F57F17"
+                    },
+                    {
+                      "color": "#33691E"
+                    }
+                  ]
+                },
+                {
+                  "Name": "",
+                  "Enabled": true,
+                  "Target": "pressure",
+                  "ConditionSource": "pressure",
+                  "ConditionOperator": "contains",
+                  "ConditionValue": "seller",
+                  "Color": "#ff002f",
+                  "BackgroundColor": "",
+                  "BorderColor": "",
+                  "Icon": "",
+                  "IconColor": "",
+                  "RuleType": "discrete",
+                  "RuleMin": 0,
+                  "RuleMax": 1,
+                  "RuleLimitEnabled": false,
+                  "TargetElement": "background",
+                  "PaletteTheme": " ",
+                  "Palette": [
+                    {
+                      "color": "#b71c1c"
+                    },
+                    {
+                      "color": "#F57F17"
+                    },
+                    {
+                      "color": "#33691E"
+                    }
+                  ]
+                }
+              ]
+            },
+            "containerId": null,
+            "components": [],
+            "widgets": [],
+            "definitionId": "21",
+            "hasOnSettingsChange": true
+          }
+        },
+        {
+          "id": "32acf0e0-feb0-7f10-4fc4-64ad82928be4",
+          "layout": {
+            "row": 16,
+            "column": 1,
+            "rowSpan": 8,
+            "colSpan": 34
+          },
+          "component": {
+            "id": "99ff9ecd-8eb0-f7b2-7474-a16e386a37d6",
+            "key": "ChartGL",
+            "options": {
+              "version": "v2.12.0",
+              "possibleLegendGroups": [
+                "None"
+              ],
+              "possiblePositions": [
+                "Top",
+                "Bottom",
+                "Left",
+                "Right"
+              ],
+              "Style": {
+                "advanced": "[data-widgetid=\"32acf0e0-feb0-7f10-4fc4-64ad82928be4\"] svg path {\n    stroke-width: 5px;\n}",
+                "cssClasses": ""
+              },
+              "Basics": {
+                "Name": "",
+                "Hover": "",
+                "Selected": "",
+                "Focus": "",
+                "SelectFirstPoint": false,
+                "RangeSelection": false,
+                "Zoom": true,
+                "Duration": 400,
+                "Easing": "easeOutQuart",
+                "TrackLoadTime": false,
+                "LoadTime": "",
+                "UsePatterns": false,
+                "UseHierarchicalRules": true
+              },
+              "Layers": [
+                {
+                  "possibleActionsColumns": [
+                    "None",
+                    "<thisX>",
+                    "<thisY>",
+                    "<thisName>",
+                    "time",
+                    "OBI",
+                    "smOBI"
+                  ],
+                  "possibleColorColumns": [
+                    "None",
+                    "time",
+                    "OBI",
+                    "smOBI"
+                  ],
+                  "possibleIconColumns": [
+                    "",
+                    "time",
+                    "OBI",
+                    "smOBI"
+                  ],
+                  "possibleRadiusData": [
+                    "Fixed Size",
+                    "time",
+                    "OBI",
+                    "smOBI"
+                  ],
+                  "possibleLayers": [
+                    "No Fill",
+                    "Origin"
+                  ],
+                  "possibleRulesColumns": [],
+                  "possibleXColumns": [
+                    "time",
+                    "OBI",
+                    "smOBI"
+                  ],
+                  "possibleYColumns": [
+                    "*",
+                    "time",
+                    "OBI",
+                    "smOBI"
+                  ],
+                  "possibleMultiColumns": [
+                    "",
+                    "*",
+                    "time",
+                    "OBI",
+                    "smOBI"
+                  ],
+                  "Data": {
+                    "_dashboardsType": "data",
+                    "value": "OBIHistory"
+                  },
+                  "PaletteTheme": " ",
+                  "Palette": [
+                    {
+                      "type": "#0061FF"
+                    },
+                    {
+                      "type": "#F23A66"
+                    },
+                    {
+                      "type": "#009BAB"
+                    },
+                    {
+                      "type": "#7647CC"
+                    },
+                    {
+                      "type": "#FFC300"
+                    },
+                    {
+                      "type": "#9FA3A6"
+                    },
+                    {
+                      "type": "#003A99"
+                    },
+                    {
+                      "type": "#A90B31"
+                    },
+                    {
+                      "type": "#005D67"
+                    },
+                    {
+                      "type": "#452481"
+                    }
+                  ],
+                  "Actions": [],
+                  "HighlightRules": [],
+                  "_Id": "L0",
+                  "_Type": "Line",
+                  "possibleXAxes": [
+                    "X-Axis 1"
+                  ],
+                  "possibleYAxes": [
+                    "Y-Axis 1"
+                  ],
+                  "Name": "Smoothed Order Book Imbalance",
+                  "XAxisId": "X-Axis 1",
+                  "YAxisId": "Y-Axis 1",
+                  "Color": "#ffb700",
+                  "Opacity": 80,
+                  "LegendGroup": "None",
+                  "ColorData": "None",
+                  "ShowCurrentTick": false,
+                  "CacheStreamingData": false,
+                  "Legend": false,
+                  "Enabled": true,
+                  "Labels": {
+                    "Align": "center",
+                    "Color": "#000000",
+                    "Enabled": false,
+                    "Font": {
+                      "Bold": false,
+                      "Size": 12
+                    },
+                    "Frequency": 1,
+                    "Offset": "0",
+                    "Rotation": 0,
+                    "MaxLabels": 10,
+                    "Template": "{{x}}, {{toFixed y 2}}"
+                  },
+                  "XAxis": "time",
+                  "YAxis": "smOBI",
+                  "XAxisMulti": "",
+                  "Line": {
+                    "LineThickness": 3,
+                    "LineStyle": "None",
+                    "Fill": "No Fill",
+                    "SpanGaps": false,
+                    "Interpolation": {
+                      "Interpolation": "Linear",
+                      "SteppedLine": "After",
+                      "SegmentLength": 20
+                    },
+                    "PaletteTheme": " ",
+                    "FillPalette": [
+                      {
+                        "type": "#0061FF"
+                      },
+                      {
+                        "type": "#F23A66"
+                      },
+                      {
+                        "type": "#009BAB"
+                      },
+                      {
+                        "type": "#7647CC"
+                      },
+                      {
+                        "type": "#FFC300"
+                      },
+                      {
+                        "type": "#9FA3A6"
+                      },
+                      {
+                        "type": "#003A99"
+                      },
+                      {
+                        "type": "#A90B31"
+                      },
+                      {
+                        "type": "#005D67"
+                      },
+                      {
+                        "type": "#452481"
+                      }
+                    ]
+                  },
+                  "Bubbles": {
+                    "Color": "#0061FF",
+                    "Opacity": 80,
+                    "RadiusData": "Fixed Size",
+                    "RadiusScaling": 0,
+                    "ScaleOnZoom": true,
+                    "SetIconFromData": false,
+                    "Icon": ""
+                  }
+                }
+              ],
+              "Xaxes": [
+                {
+                  "Bounds": "",
+                  "Type": "Linear",
+                  "Position": "Bottom",
+                  "Width": 0,
+                  "Ticks": 10,
+                  "Color": "",
+                  "Stacked": false,
+                  "Title": {
+                    "Display": false,
+                    "LabelString": "",
+                    "FontSize": 16
+                  },
+                  "Range": {
+                    "UseMinMax": false,
+                    "Min": "",
+                    "Max": "",
+                    "SelectionMin": "",
+                    "SelectionMax": "",
+                    "ResetToNull": true
+                  },
+                  "Gridlines": {
+                    "GridlinesOffset": false,
+                    "GridlinesColor": "",
+                    "GridlinesOpacity": 15
+                  },
+                  "Format": {
+                    "Display": true,
+                    "Rotation": 0,
+                    "BeginAtZero": false,
+                    "Format": "Number",
+                    "DateFormat": "",
+                    "Precision": 2,
+                    "FontSize": 12,
+                    "Prefix": "",
+                    "Suffix": "",
+                    "HideTrailingZeroes": false,
+                    "MultiAxis": []
+                  }
+                }
+              ],
+              "Yaxes": [
+                {
+                  "Bounds": "",
+                  "Type": "Linear",
+                  "Position": "Left",
+                  "Width": 0,
+                  "Ticks": 10,
+                  "Color": "",
+                  "Stacked": false,
+                  "Title": {
+                    "Display": false,
+                    "LabelString": "",
+                    "FontSize": 16
+                  },
+                  "Range": {
+                    "UseMinMax": false,
+                    "Min": "",
+                    "Max": "",
+                    "SelectionMin": "",
+                    "SelectionMax": "",
+                    "ResetToNull": true
+                  },
+                  "Gridlines": {
+                    "GridlinesOffset": false,
+                    "GridlinesColor": "",
+                    "GridlinesOpacity": 15
+                  },
+                  "Format": {
+                    "Display": true,
+                    "Rotation": 0,
+                    "BeginAtZero": false,
+                    "Format": "Number",
+                    "DateFormat": "",
+                    "Precision": 2,
+                    "FontSize": 12,
+                    "Prefix": "",
+                    "Suffix": "",
+                    "HideTrailingZeroes": false
+                  }
+                }
+              ],
+              "Overlay": {
+                "ShowCrosshairs": true,
+                "ShowCoordinates": true,
+                "SnapToPoint": true,
+                "UseCustomTooltip": false,
+                "CustomTooltip": "<table><thead><tr><th>{{this.0.xAxis}}</th><th></th></tr></thead><tbody>{{#each this}}<tr><td width=\"{{width}}\"><i class=\"{{icon}}\" style=\"color:{{color}}; {{image}};\"></i> {{name}}: </td><td>{{yAxis}}</td></tr>{{/each}}</tbody></table>",
+                "ShowAllLayers": true,
+                "ShowAllPoints": false,
+                "GroupByLayer": false
+              },
+              "Legend": {
+                "Position": "Top",
+                "UseCustomLegend": false,
+                "CustomLegend": "\n<ul class=\"chartgl-legend\">\n  {{#each this}}\n    {{!-- legend color --}}\n    <li>\n      {{#if icon}}\n        <i style=\"height:{{width}}px;color:{{color}};margin-top:2.5px;margin-right:5px;{{image}}\"class=\"fa {{icon}}\"></i>\n      {{else}}  \n        {{#if bullColor}}\n          <span style=\"margin-right:5px;\">  \n            <i style=\"font-size: 16px;color:{{color}};margin-top:0;\" class=\"fa fa-ellipsis-v\"></i>\n            <i style=\"font-size: 8px;margin-left:-5px;color:{{bullColor}};margin-top:3px;position: absolute;\"class=\"fa fa-square\"></i>\n          </span>\n        {{else}}\n          {{#if isHeatmap}}\n            <svg style=\"background:{{color}}; border-radius:2px;width:{{width}}px; height:{{width}}px;margin-top:2px;margin-right:5px;{{image}}\"class=\"fa fa-square\"></svg>\n          {{else}}\n            <i style=\"height:{{width}}px;color:{{color}};margin-top:2.5px;margin-right:5px;{{image}}\"class=\"fa fa-square\"></i>\n            {{/if}}\n        {{/if}}\n      {{/if}}\n\n      {{!-- legend text --}}\n      <span style=\"color:{{fontColor}}; text-decoration:{{strike}}\" id=\"{{text}}\">{{text}}</span>\n    </li>\n  {{/each}}\n</ul>",
+                "LegendGroups": []
+              },
+              "Annotations": {
+                "ShowAnnotateControl": false,
+                "Annotations": ""
+              },
+              "FileExport": {
+                "Actions": [],
+                "FileName": [],
+                "ShowExportCsvButton": false,
+                "ShowExportExcelButton": false,
+                "ShowExportPngButton": false,
+                "PngButton": "Export Png",
+                "UseChartFormat": false
+              },
+              "OverrideRules": [],
+              "HierarchicalRules": [],
+              "Alignment": {
+                "paddingLeft": 0,
+                "paddingRight": 0,
+                "paddingTop": 0,
+                "paddingBottom": 0,
+                "innerPaddingLeft": 0,
+                "innerPaddingRight": 0,
+                "innerPaddingTop": 0,
+                "innerPaddingBottom": 0,
+                "titlePaddingLeft": 0,
+                "titlePaddingRight": 0,
+                "titlePaddingTop": 7,
+                "titlePaddingBottom": 7
+              },
+              "format": {
+                "widgetTitle": "Order Book Imbalance History",
+                "titleFontSize": 16,
+                "titleHorizontal": "Left",
+                "titleColor": "#ffb700",
+                "titleShadow": false,
+                "tileBorderWidth": 0,
+                "tileBorderRounding": 0,
+                "tileBorderColor": "#000000",
+                "tileBackgroundColor": "#000000",
+                "tileTransparentBackground": true,
+                "tileShadow": false
+              },
+              "possiblePalettes": [
+                " ",
+                ".palette_default",
+                ".palette_gradient",
+                ".palette_pastel",
+                ".palette_colorblind"
+              ]
+            },
+            "containerId": null,
+            "components": [],
+            "widgets": [],
+            "definitionId": "669",
+            "hasOnSettingsChange": true
+          }
+        },
+        {
+          "id": "11549db7-7504-3d2f-4352-be3567397748",
+          "layout": {
+            "row": 15,
+            "column": 1,
+            "rowSpan": 1,
+            "colSpan": 7
+          },
+          "component": {
+            "id": "0af1724a-9718-33ad-d868-8eb8d892047f",
+            "key": "BasicComponents",
+            "options": {
+              "version": "2.12.0",
+              "dropdownPossibleValues": [
+                "sym"
+              ],
+              "Basics": {
+                "Name": "",
+                "Data": {
+                  "_dashboardsType": "data",
+                  "value": "symList"
+                },
+                "SelectedValue": {
+                  "_dashboardsType": "viewstate",
+                  "value": "selectedSym"
+                },
+                "ComponentName": "Dropdown",
+                "DataSourceMapping": {
+                  "Value": "sym",
+                  "Text": "sym"
+                },
+                "GroupMapping": {
+                  "Group": false,
+                  "GroupBy": ""
+                },
+                "Items": [],
+                "Width": 100,
+                "Theme": "Dark",
+                "Label": "select:",
+                "LabelWidth": 75,
+                "MultiSelect": false,
+                "SelectAllByDefault": false,
+                "ShowSearch": false,
+                "AdvancedSearch": false,
+                "AcceptEmptyValues": false,
+                "ForceSelectedValue": false,
+                "FieldSummaryThreshold": 5,
+                "TooltipSummaryThreshold": 10,
+                "SelectAllValue": "",
+                "horizontal": "Center",
+                "vertical": "Middle",
+                "tooltip": "",
+                "SortListBySelected": false,
+                "Custom": {
+                  "Icon": "",
+                  "IconColor": ""
+                }
+              },
+              "Actions": [],
+              "Style": {
+                "advanced": "",
+                "cssClasses": ""
+              },
+              "Alignment": {
+                "paddingLeft": 0,
+                "paddingRight": 0,
+                "paddingTop": 0,
+                "paddingBottom": 0,
+                "innerPaddingLeft": 0,
+                "innerPaddingRight": 0,
+                "innerPaddingTop": 0,
+                "innerPaddingBottom": 0,
+                "titlePaddingLeft": 0,
+                "titlePaddingRight": 0,
+                "titlePaddingTop": 7,
+                "titlePaddingBottom": 7
+              },
+              "format": {
+                "titleFontSize": 16,
+                "titleHorizontal": "Center",
+                "titleShadow": false,
+                "tileBorderWidth": 0,
+                "tileBorderRounding": 0,
+                "tileBorderColor": "#000000",
+                "tileBackgroundColor": "#000000",
+                "tileTransparentBackground": true,
+                "tileShadow": false
+              },
+              "dropdownPossibleValuesWithEmpty": [
+                "",
+                "sym"
+              ]
+            },
+            "containerId": null,
+            "components": [],
+            "widgets": [],
+            "definitionId": "16",
+            "hasOnSettingsChange": true
+          }
+        }
+      ],
+      "relativeHeight": true,
+      "rowCount": 24,
+      "rowHeight": 25,
+      "colCount": 36,
+      "floatable": true,
+      "isDefault": true
+    }
+  ],
+  "popups": [],
+  "tags": [],
+  "dashboardTheme": "Dark",
+  "themeSwitchable": true,
+  "saveTimestamp": null,
+  "relativeHeight": true,
+  "rowCount": 24,
+  "rowHeight": 25,
+  "colCount": 36,
+  "floatable": true,
+  "viewState": {
+    "selected": {
+      "_viewType": true,
+      "_default": "0",
+      "_type": "symbol"
+    },
+    ".settings": {},
+    "_settings": {
+      "dashboardUser": {
+        "_viewType": true,
+        "_type": "symbol",
+        "_default": ""
+      },
+      "dashboardTimezone": {
+        "_viewType": true,
+        "_type": "symbol",
+        "_default": ""
+      },
+      "dashboardUrl": {
+        "_viewType": true,
+        "_type": "string",
+        "_default": ""
+      },
+      "dashboardTitle": {
+        "_viewType": true,
+        "_type": "symbol",
+        "_default": ""
+      },
+      "dashboardStartTimestamp": {
+        "_viewType": true,
+        "_type": "timestamp",
+        "_default": "",
+        "_rolling": true
+      },
+      "dashboardAvailableMemoryThreshold": {
+        "_viewType": true,
+        "_type": "int",
+        "_default": 0
+      }
+    },
+    "New node": {
+      "_viewType": true,
+      "_default": "",
+      "_type": "symbol"
+    },
+    "selectedSym": {
+      "_viewType": true,
+      "_default": "BTCUSDT",
+      "_type": "symbol"
+    }
+  },
+  "data": {
+    "Menu": {
+      "_pagingType": "NONE",
+      "_autoExecute": true,
+      "_autoExec": true,
+      "_columns": [
+        "node",
+        "parent",
+        "url",
+        "id"
+      ],
+      "_dataType": "virtual",
+      "_dataSource": "kdb",
+      "_connection": "CTL",
+      "_connection_Viewstate": "",
+      "_mappings": {
+        "key": "node",
+        "mappings": {},
+        "value": "parent"
+      },
+      "_maxRows": 2000,
+      "_subscriptionType": "static",
+      "_subscriptionInterval": 3,
+      "_layout": [
+        {
+          "isExpanded": true,
+          "weight": 2
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": true,
+          "weight": 0
+        },
+        {
+          "isExpanded": false,
+          "weight": 2
+        }
+      ],
+      "_subscriptionKey": "",
+      "_virtualParams": [
+        {
+          "name": "source",
+          "index": 0,
+          "type": "datasource",
+          "value": "",
+          "isVirtual": true
+        }
+      ],
+      "_virtualQueryString": "function (source, callback) {\n    const results = {\n        columns: [\"node\", \"parent\", \"url\", \"id\"],\n        meta: {\n            \"node\": 0,\n            \"parent\": 0,\n            \"url\": 0,\n            \"id\": 7\n        },\n        rows: [\n            {\"node\": \"Feedhandler Monitoring\", \"parent\": \"\", \"url\":\"#27ca034c-79b6-9a86-c611-20217d28d5fd\", \"id\": 1},\n\t\t\t{\"node\": \"DataFlow Monitoring\", \"parent\": \"\", \"url\": \"#82b46d80-c30f-b05f-0280-dc5ccaf830ae\", \"id\": 2},\n            {\"node\": \"Trades & Quotes\", \"parent\": \"\", \"url\": \"#178c9fc9-922c-2f21-c454-a59024146dbc\", \"id\": 3},\n            {\"node\": \"Analytics\", \"parent\": \"\", \"url\": \"#79b385d5-eaef-7aab-b917-2a837b266c3e\", \"id\": 4}\n        ]\n    };\n    callback(results);\n}"
+    },
+    "TradeSummary": {
+      "_pagingType": "NONE",
+      "_autoExecute": true,
+      "_autoExec": true,
+      "_columns": [
+        "sym",
+        "lastPrice",
+        "vwapShort",
+        "vwapLong",
+        "trend"
+      ],
+      "_dataType": "query",
+      "_dataSource": "kdb",
+      "_connection": "RTE",
+      "_connection_Viewstate": "",
+      "_mappings": {
+        "key": "sym",
+        "mappings": {},
+        "value": "lastPrice"
+      },
+      "_maxRows": 2000,
+      "_subscriptionType": "polling",
+      "_subscriptionInterval": 3,
+      "_layout": [
+        {
+          "isExpanded": true,
+          "weight": 2
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": true,
+          "weight": 0
+        },
+        {
+          "isExpanded": true,
+          "weight": 2
+        }
+      ],
+      "_queryString": ".rte.getSummary[1;5]",
+      "_queryParams": [],
+      "_subscriptionKey": "",
+      "_hasUpdateQuery": false,
+      "_updateQueryParams": [],
+      "_updateQueryString": "",
+      "_updateType": "query",
+      "_pageSize": 2000,
+      "_serverPaging": false
+    },
+    "Correlation Matrix": {
+      "_pagingType": "NONE",
+      "_autoExecute": true,
+      "_autoExec": true,
+      "_columns": [
+        "key",
+        "BTCUSDT",
+        "ETHUSDT",
+        "SOLUSDT"
+      ],
+      "_dataType": "query",
+      "_dataSource": "kdb",
+      "_connection": "RTE",
+      "_connection_Viewstate": "",
+      "_mappings": {
+        "key": "key",
+        "mappings": {},
+        "value": "BTCUSDT"
+      },
+      "_maxRows": 2000,
+      "_subscriptionType": "static",
+      "_subscriptionInterval": 3,
+      "_layout": [
+        {
+          "isExpanded": true,
+          "weight": 2
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": true,
+          "weight": 0
+        },
+        {
+          "isExpanded": true,
+          "weight": 2
+        }
+      ],
+      "_queryString": ".rte.getCorrelation[]",
+      "_queryParams": [],
+      "_subscriptionKey": "",
+      "_hasUpdateQuery": false,
+      "_updateQueryParams": [],
+      "_updateQueryString": "",
+      "_updateType": "query",
+      "_pageSize": 2000,
+      "_serverPaging": false
+    },
+    "VolatilityVector": {
+      "_pagingType": "NONE",
+      "_autoExecute": true,
+      "_autoExec": true,
+      "_columns": [
+        "sym",
+        "annualizedVol",
+        "impliedVol",
+        "vsIVol"
+      ],
+      "_dataType": "query",
+      "_dataSource": "kdb",
+      "_connection": "RTE",
+      "_connection_Viewstate": "",
+      "_mappings": {
+        "key": "sym",
+        "mappings": {},
+        "value": "annualizedVol"
+      },
+      "_maxRows": 2000,
+      "_subscriptionType": "polling",
+      "_subscriptionInterval": 3,
+      "_layout": [
+        {
+          "isExpanded": true,
+          "weight": 2
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": true,
+          "weight": 0
+        },
+        {
+          "isExpanded": true,
+          "weight": 2
+        }
+      ],
+      "_queryString": ".rte.getVolComparison[]",
+      "_queryParams": [],
+      "_subscriptionKey": "",
+      "_hasUpdateQuery": false,
+      "_updateQueryParams": [],
+      "_updateQueryString": "",
+      "_updateType": "query",
+      "_pageSize": 2000,
+      "_serverPaging": false
+    },
+    "OBIHistory": {
+      "_pagingType": "NONE",
+      "_autoExecute": true,
+      "_autoExec": true,
+      "_columns": [
+        "time",
+        "OBI",
+        "smOBI"
+      ],
+      "_dataType": "query",
+      "_dataSource": "kdb",
+      "_connection": "RTE",
+      "_connection_Viewstate": "",
+      "_mappings": {
+        "key": "time",
+        "mappings": {},
+        "value": "OBI"
+      },
+      "_maxRows": 2000,
+      "_subscriptionType": "polling",
+      "_subscriptionInterval": 3,
+      "_layout": [
+        {
+          "isExpanded": true,
+          "weight": 2
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": true,
+          "weight": 1
+        },
+        {
+          "isExpanded": true,
+          "weight": 2
+        }
+      ],
+      "_queryString": ".rte.getOBIHistory[`BTCUSDT; 5]",
+      "_queryParams": [],
+      "_subscriptionKey": "",
+      "_hasUpdateQuery": false,
+      "_updateQueryParams": [],
+      "_updateQueryString": "",
+      "_updateType": "query",
+      "_pageSize": 2000,
+      "_serverPaging": false
+    },
+    "OBIVector": {
+      "_pagingType": "NONE",
+      "_autoExecute": true,
+      "_autoExec": true,
+      "_columns": [
+        "sym",
+        "OBI",
+        "smOBI",
+        "pressure"
+      ],
+      "_dataType": "query",
+      "_dataSource": "kdb",
+      "_connection": "RTE",
+      "_connection_Viewstate": "",
+      "_mappings": {
+        "key": "sym",
+        "mappings": {},
+        "value": "OBI"
+      },
+      "_maxRows": 2000,
+      "_subscriptionType": "polling",
+      "_subscriptionInterval": 3,
+      "_layout": [
+        {
+          "isExpanded": true,
+          "weight": 2
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": true,
+          "weight": 0
+        },
+        {
+          "isExpanded": false,
+          "weight": 2
+        }
+      ],
+      "_queryString": ".rte.getImbalanceAll[]",
+      "_queryParams": [],
+      "_subscriptionKey": "",
+      "_hasUpdateQuery": false,
+      "_updateQueryParams": [],
+      "_updateQueryString": "",
+      "_updateType": "query",
+      "_pageSize": 2000,
+      "_serverPaging": false
+    },
+    "symList": {
+      "_pagingType": "NONE",
+      "_autoExecute": true,
+      "_autoExec": true,
+      "_columns": [
+        "sym"
+      ],
+      "_dataType": "query",
+      "_dataSource": "kdb",
+      "_connection": "RTE",
+      "_connection_Viewstate": "",
+      "_mappings": {
+        "key": "sym",
+        "mappings": {},
+        "value": ""
+      },
+      "_maxRows": 2000,
+      "_subscriptionType": "static",
+      "_subscriptionInterval": 3,
+      "_layout": [
+        {
+          "isExpanded": true,
+          "weight": 2
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": true,
+          "weight": 0
+        },
+        {
+          "isExpanded": false,
+          "weight": 2
+        }
+      ],
+      "_queryString": "select distinct sym from tradeBuckets",
+      "_queryParams": [],
+      "_subscriptionKey": "",
+      "_hasUpdateQuery": false,
+      "_updateQueryParams": [],
+      "_updateQueryString": "",
+      "_updateType": "query",
+      "_pageSize": 2000,
+      "_serverPaging": false
+    }
+  },
+  "permissionEntity": null,
+  "worksheetPadding": 10,
+  "widgetsSpacing": 0,
+  "borderColor": "000000",
+  "borderBackground": "000000",
+  "transparentBackground": true,
+  "borderWidth": 0,
+  "borderRounding": 0,
+  "borderSpacing": 0,
+  "borderShadow": false,
+  "saveViewerState": "enabled",
+  "hostnameAccess": "",
+  "hidePdfGlobalVS": false,
+  "hierarchicalRules": {
+    "ChartHierarchicalRules": [],
+    "GridHierarchicalRules": []
+  },
+  "hash": "79b385d5-eaef-7aab-b917-2a837b266c3e",
+  "enableShareDashboard": false,
+  "notifications": {
+    "Notifications": {
+      "_Version": "4.2.0s2",
+      "Enabled": true,
+      "InBrowserNotifications": false,
+      "Position": "Bottom Right",
+      "MaxVisibleCount": 3,
+      "FadeOut": 5,
+      "Icon": "fa-bell-o",
+      "Sound": "beep",
+      "SoundVolume": 100,
+      "Grouping": false,
+      "GroupingInterval": 1,
+      "triggers": []
+    }
+  },
+  "showLoadingIndicators": true,
+  "unsavedViewerPrompt": false,
+  "advancedCss": "",
+  "cssClasses": "",
+  "version": "v2.14.0",
+  "shortcuts": [],
+  "wasChanged": false
+}

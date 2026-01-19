@@ -1,17 +1,13 @@
 / logmgr.q - Log Manager (Cleanup and Diagnostics)
-/ Lightweight process for log file maintenance
+/ Run on-demand: q logmgr.q
+/ Then: .log.list[], .log.cleanup[7], etc.
 
 / =============================================================================
 / Configuration
 / =============================================================================
 
-.log.cfg.port:5014;
 .log.cfg.logDir:"logs";
 .log.cfg.retentionDays:7;              / Keep logs for 7 days by default
-.log.cfg.cleanupHour:0;                / Run cleanup at midnight
-
-/ Store start time of the process
-.proc.startTime:.z.p;
 
 / =============================================================================
 / Log File Discovery
@@ -37,8 +33,7 @@
     (d; x)
     } each files;
   
-  / Filter valid entries - keep only non-empty results
-  / Note: () is different from (::) in q, use count to filter
+  / Filter valid entries
   valid:parsed where 0 < count each parsed;
   
   if[0 = count valid; :([] date:`date$(); file:`$(); sizeMB:`float$(); chunks:`long$())];
@@ -56,7 +51,7 @@
   / Add file sizes
   result:update sizeMB:(hcount each file) % 1e6 from result;
   
-  / Add chunk counts (validation)
+  / Add chunk counts
   result:update chunks:{first .log.info[x]} each file from result;
   
   `date xasc result
@@ -68,7 +63,6 @@
 .log.info:{[f]
   sz:@[hcount; f; -1j];
   if[sz < 0; :(0j; 0j; 0b)];
-  / Get chunk count using -11!
   chunks:@[{-11!(-2;x)}; f; 0j];
   (chunks; sz; chunks > 0)
   };
@@ -86,7 +80,6 @@
   cutoff:.z.D - days;
   -1 "LOG: Cleaning up logs older than ",string[cutoff]," (",string[days]," day retention)";
   
-  / Get all logs
   logs:.log.list[];
   
   if[0 = count logs;
@@ -94,7 +87,6 @@
     :0j
   ];
   
-  / Find files to delete
   toDelete:select from logs where date < cutoff;
   
   if[0 = count toDelete;
@@ -104,12 +96,9 @@
   
   -1 "LOG: Deleting ",string[count toDelete]," files...";
   
-  / Delete files
-  deleted:0j;
   {
     -1 "  Deleting: ",string[x`file]," (",string[x`date],")";
     @[hdel; x`file; {-1 "  ERROR deleting: ",x}];
-    deleted+:1;
   } each toDelete;
   
   -1 "LOG: Cleanup complete - deleted ",string[count toDelete]," files";
@@ -121,18 +110,13 @@
 / =============================================================================
 
 / Get summary of all logs
-/ @return table with date, chunks, total size
 .log.summary:{[]
   logs:.log.list[];
-  
   if[0 = count logs; :([] date:`date$(); chunks:`long$(); sizeMB:`float$())];
-  
-  select chunks, sizeMB from logs
+  select date, chunks, sizeMB from logs
   };
 
 / Check log file integrity
-/ @param f - log file path (hsym)
-/ @return dictionary with status
 .log.verify:{[f]
   -1 "LOG: Verifying ",string[f];
   
@@ -154,67 +138,38 @@
   };
 
 / Verify log for a date
-/ @param d - date (default today)
-/ @return verification result dictionary
 .log.verifyDate:{[d]
   if[d ~ (::); d:.z.D];
-  
   logFile:hsym `$(.log.cfg.logDir,"/",string[d],".log");
   .log.verify[logFile]
   };
 
 / =============================================================================
-/ Scheduled Cleanup (optional)
+/ Startup (on-demand)
 / =============================================================================
-
-/ Check if cleanup should run (called by timer)
-.log.checkCleanup:{[]
-  / Run cleanup at configured hour
-  if[.log.cfg.cleanupHour = `hh$.z.T;
-    / Only run once per hour (check minutes = 0)
-    if[0 = `mm$.z.T;
-      -1 "LOG: Scheduled cleanup starting...";
-      .log.cleanup[::];
-    ];
-  ];
-  };
-
-/ =============================================================================
-/ Startup
-/ =============================================================================
-
-system "p ",string .log.cfg.port;
 
 -1 "=======================================================";
--1 "LOG Manager starting on port ",string[.log.cfg.port];
+-1 "LOG Manager (on-demand)";
 -1 "=======================================================";
--1 "Configuration:";
 -1 "  Log directory: ",.log.cfg.logDir;
--1 "  Log format: single file per day (YYYY.MM.DD.log)";
--1 "  Retention: ",string[.log.cfg.retentionDays]," days";
--1 "  Cleanup hour: ",string[.log.cfg.cleanupHour],":00";
-
-/ Show current log status
+-1 "  Default retention: ",string[.log.cfg.retentionDays]," days";
 -1 "";
--1 "Current logs:";
+
 logs:.log.list[];
-if[0 < count logs; show select date, sizeMB, chunks from logs; -1 "  Total: ",string[count logs]," files, ",string[sum logs`sizeMB]," MB"];
-if[0 = count logs; -1 "  No log files found"];
+if[0 < count logs; 
+  -1 "Current logs:";
+  show select date, sizeMB, chunks from logs; 
+  -1 "";
+  -1 "Total: ",string[count logs]," files, ",string[sum logs`sizeMB]," MB"
+];
+if[0 = count logs; -1 "No log files found"];
 
 -1 "";
--1 "Query interface:";
--1 "  .log.list[]                    / List all log files";
--1 "  .log.summary[]                 / Summary by date";
--1 "  .log.info[`:/path/to/log]      / Get file info";
--1 "  .log.verify[`:/path/to/log]    / Verify file integrity";
--1 "  .log.verifyDate[.z.D]          / Verify today's log";
--1 "  .log.cleanup[]                 / Delete old logs (default retention)";
--1 "  .log.cleanup[3]                / Delete logs older than 3 days";
--1 "";
--1 "LOG Manager ready";
+-1 "Commands:";
+-1 "  .log.list[]          / List all logs";
+-1 "  .log.summary[]       / Summary table";
+-1 "  .log.cleanup[]       / Delete old (7 days default)";
+-1 "  .log.cleanup[3]      / Delete older than 3 days";
+-1 "  .log.verifyDate[]    / Verify today's log";
+-1 "  \\\\                   / Exit";
 -1 "=======================================================";
-
-/ Optional: Start timer for scheduled cleanup (every minute check)
-/ Uncomment to enable automatic cleanup at configured hour
-/ .z.ts:{.log.checkCleanup[]};
-/ system "t 60000";

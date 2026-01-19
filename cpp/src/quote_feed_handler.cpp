@@ -101,7 +101,7 @@ void QuoteFeedHandler::stop() {
 // ============================================================================
 
 std::string QuoteFeedHandler::buildDepthStreamPath() const {
-    // Use @depth@100ms for 10 updates/second (faster than @depth which is 1/sec)
+    // Use @depth@100ms - updates pushed every 100ms (10/sec per symbol)
     std::string path = "/stream?streams=";
     for (size_t i = 0; i < symbolsLower_.size(); ++i) {
         if (i > 0) path += "/";

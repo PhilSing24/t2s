@@ -17,3 +17,10 @@ Thumbs.db
 
 # kdb+ artifacts
 *.qdb
+.venv/
+__pycache__/
+.ipynb_checkpoints/
+tmp.*/
+hdb/
+kdb/logs/
+kdb/logs/

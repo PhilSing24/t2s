@@ -1,5 +1,4 @@
-/ tp.q - Tickerplant with STANDARD tick.q pub/sub (u.q)
-/ Production-grade with single log file for temporal consistency
+/ tp.q - Tickerplant with KDB-X pubsub module
 
 / -------------------------------------------------------
 / Configuration
@@ -9,17 +8,15 @@
 .tp.cfg.logDir:"logs";
 .tp.cfg.logEnabled:1b;
 
-/ Nanoseconds between kdb+ epoch (2000.01.01) and Unix epoch (1970.01.01)
-.tp.epochOffset: neg "j"$1970.01.01D0;
+system "g 0";
 
-/ to store start time of the process
+.tp.epochOffset:neg"j"$1970.01.01D0;
 .proc.startTime:.z.p;
 
 / -------------------------------------------------------
-/ Table schema
+/ Table schema (must exist before pubsub init)
 / -------------------------------------------------------
 
-/ Trade table - 13 fields (TP adds tpRecvTimeUtcNs, RDB adds rdbApplyTimeUtcNs)
 trade_binance:([]
   time:`timestamp$();
   sym:`symbol$();
@@ -36,36 +33,29 @@ trade_binance:([]
   tpRecvTimeUtcNs:`long$()
   );
 
-/ Quote table - L5 depth (29 fields: 22 price/qty + 7 meta + tpRecvTimeUtcNs)
-/ FH sends 28 fields, TP adds tpRecvTimeUtcNs
 quote_binance:([]
   time:`timestamp$();
   sym:`symbol$();
-  / L5 bid prices (best to worst)
   bidPrice1:`float$();
   bidPrice2:`float$();
   bidPrice3:`float$();
   bidPrice4:`float$();
   bidPrice5:`float$();
-  / L5 bid quantities
   bidQty1:`float$();
   bidQty2:`float$();
   bidQty3:`float$();
   bidQty4:`float$();
   bidQty5:`float$();
-  / L5 ask prices (best to worst)
   askPrice1:`float$();
   askPrice2:`float$();
   askPrice3:`float$();
   askPrice4:`float$();
   askPrice5:`float$();
-  / L5 ask quantities
   askQty1:`float$();
   askQty2:`float$();
   askQty3:`float$();
   askQty4:`float$();
   askQty5:`float$();
-  / Metadata
   isValid:`boolean$();
   exchEventTimeMs:`long$();
   fhRecvTimeUtcNs:`long$();
@@ -75,7 +65,6 @@ quote_binance:([]
   tpRecvTimeUtcNs:`long$()
   );
 
-/ Health metrics from feed handlers (no tpRecvTimeUtcNs added)
 health_feed_handler:([]
   time:`timestamp$();
   handler:`symbol$();
@@ -90,191 +79,198 @@ health_feed_handler:([]
   );
 
 / -------------------------------------------------------
-/ Logging - Single file for all tables (standard tick.q)
-/ Format compatible with -11! streaming replay
+/ Pub/Sub - KDB-X module (must be named 'pubsub' for IPC)
 / -------------------------------------------------------
 
-/ Log handle (set at startup)
+pubsub:use`di.pubsub
+
+pubsub.init[]
+
+/ -------------------------------------------------------
+/ Logging
+/ -------------------------------------------------------
+
 .tp.logHandle:0N;
-
-/ Log file path (stored for reference)
 .tp.logFile:`;
-
-/ Message counter for recovery tracking
 .tp.logCount:0j;
 
-/ Build log file path for today
-.tp.logFilePath:{[]
-  hsym `$(.tp.cfg.logDir,"/",string[.z.D],".log")
-  };
+.tp.logFilePath:{[] hsym`$(.tp.cfg.logDir,"/",string[.z.D],".log")};
 
-/ Initialize a log file for -11! compatibility
-/ If file doesn't exist, create it with empty list
-/ If file exists, keep it (append mode)
-/ @param f - log file path (hsym)
-/ @return file handle
 .tp.initLog:{[f]
-  / Check if file exists
-  exists:0 < @[hcount; f; 0j];
-  if[not exists; f set ()];
+  if[0=@[hcount;f;0j];f set()];
   hopen f
   };
 
-/ Open log file (with proper initialization)
 .tp.openLog:{[]
-  if[not .tp.cfg.logEnabled; :()];
-  
-  / Create log directory
-  system "mkdir -p ",.tp.cfg.logDir;
-  
-  / Store file path
+  if[not .tp.cfg.logEnabled;:()];
+  system"mkdir -p ",.tp.cfg.logDir;
   .tp.logFile:.tp.logFilePath[];
-  
-  / Initialize and open log file
   .tp.logHandle:.tp.initLog[.tp.logFile];
-  
-  / Get current message count (for recovery tracking)
-  .tp.logCount:@[{-11!(-2;x)}; .tp.logFile; 0j];
-  
-  -1 "TP: Log file: ",string[.tp.logFile]," (",string[.tp.logCount]," existing chunks)";
+  .tp.logCount:@[{-11!(-2;x)};.tp.logFile;0j];
+  -1"TP: Log file: ",string[.tp.logFile]," (",string[.tp.logCount]," chunks)";
   };
 
-/ Close log file
 .tp.closeLog:{[]
-  if[not .tp.cfg.logEnabled; :()];
-  if[not null .tp.logHandle; @[hclose; .tp.logHandle; {}]; .tp.logHandle:0N];
-  -1 "TP: Log file closed";
+  if[not .tp.cfg.logEnabled;:()];
+  if[not null .tp.logHandle;@[hclose;.tp.logHandle;{}];.tp.logHandle:0N];
   };
 
-/ Write to log file
-/ Format: enlist (`.u.upd; tableName; data)
-/ This format is compatible with -11! replay which calls .z.ps -> value
 .tp.log:{[tbl;data]
-  if[not .tp.cfg.logEnabled; :()];
-  / Skip health updates from logging (optional - remove if you want health in log)
-  if[tbl = `health_feed_handler; :()];
-  .tp.logHandle enlist (`.u.upd; tbl; data);
+  if[not .tp.cfg.logEnabled;:()];
+  if[tbl=`health_feed_handler;:()];
+  .tp.logHandle enlist(`upd;tbl;data);
   .tp.logCount+:1;
   };
 
-/ Rotate logs (call at end of day)
 .tp.rotate:{[]
-  -1 "TP: Rotating log file...";
+  -1"TP: Rotating log...";
   .tp.closeLog[];
   .tp.openLog[];
   };
 
-/ Get current log status
-.tp.logStatus:{[]
-  ([] 
-    file:enlist .tp.logFile;
-    handle:enlist .tp.logHandle;
-    chunks:enlist .tp.logCount;
-    sizeMB:enlist @[hcount; .tp.logFile; 0j] % 1e6
-  )
+/ -------------------------------------------------------
+/ Gap Detection
+/ -------------------------------------------------------
+
+/ Field index for fhSeqNo (0-indexed, before TP adds timestamp)
+.tp.idx.tradeSeq:11;   / trade_binance: 12th field
+
+/ State: last seen sequence
+.tp.seq.trade:0N;      / null = not yet initialized
+
+/ Counters: total gaps and total missed messages
+.tp.gaps.trade:0j;     / number of gap events
+.tp.missed.trade:0j;   / total messages missed
+
+/ FH restart counter (sequence went backwards)
+.tp.restarts.trade:0j;
+
+/ Check trade sequence and update gap counters
+/ Returns: 1b if OK, 0b if gap detected (still processes message)
+.tp.checkSeq:{[seq]
+  lastSeq:.tp.seq.trade;
+  / First message - initialize
+  if[null lastSeq; .tp.seq.trade:seq; :1b];
+  / Normal case - sequential
+  if[seq = lastSeq + 1; .tp.seq.trade:seq; :1b];
+  / Gap detected - missed messages
+  if[seq > lastSeq + 1;
+    missed:seq - lastSeq - 1;
+    .tp.gaps.trade+:1;
+    .tp.missed.trade+:missed;
+    -1 "TP: Trade gap - expected ",string[lastSeq+1]," got ",string[seq]," (missed ",string[missed],")";
+    .tp.seq.trade:seq;
+    :0b
+  ];
+  / Sequence went backwards or duplicate - FH restart
+  .tp.restarts.trade+:1;
+  -1 "TP: Trade FH restart detected - seq reset from ",string[lastSeq]," to ",string[seq];
+  .tp.seq.trade:seq;
+  1b
   };
-
-/ -------------------------------------------------------
-/ STANDARD tick.q Pub/Sub (u.q)
-/ -------------------------------------------------------
-
-/ Load the production-grade u.q pub/sub system
-\l u.q
-
-/ Initialize u.q - sets up .u.w dictionary for all tables
-.u.init[];
 
 / -------------------------------------------------------
 / Update handling
 / -------------------------------------------------------
 
-/ Convert kdb timestamp to nanoseconds since Unix epoch
-.tp.tsToNs:{[ts] .tp.epochOffset + "j"$ts };
+.tp.tsToNs:{[ts] .tp.epochOffset+"j"$ts};
 
-/ Core update function
-/ Called by feed handler via .z.ps -> .u.upd
-.u.upd:{[tbl;data]
-  / Health updates don't get tpRecvTimeUtcNs added
-  if[tbl = `health_feed_handler;
+upd:{[tbl;data]
+  / Health messages - no sequence check, no logging
+  if[tbl=`health_feed_handler;
     tbl insert data;
-    .u.pub[tbl;data];
+    pubsub.publish[tbl;data];
     :();
   ];
   
-  / Market data updates get TP timestamp
-  tpRecvTs:.z.p;
-  tpRecvTimeUtcNs:.tp.tsToNs[tpRecvTs];
+  / Check sequence for gap detection (trades only)
+  if[tbl=`trade_binance; .tp.checkSeq[data .tp.idx.tradeSeq]];
   
-  / Append tpRecvTimeUtcNs to the row
-  data:data,tpRecvTimeUtcNs;
+  / Add TP receive timestamp
+  data:data,.tp.tsToNs[.z.p];
   
-  / Log to disk (before insert for durability)
+  / Log, insert, publish
   .tp.log[tbl;data];
-  
-  / Insert locally
   tbl insert data;
-  
-  / Publish to subscribers
-  .u.pub[tbl;data];
+  pubsub.publish[tbl;data];
+  };
+
+/ Alias for feed handlers that call .u.upd
+.u.upd:upd;
+
+/ -------------------------------------------------------
+/ Status and Monitoring
+/ -------------------------------------------------------
+
+/ Standardized health check (consistent across all processes)
+.health:{[]
+  st:$[.tp.gaps.trade > 0; `degraded; `ok];
+  `process`port`uptime`status`memMB`msgsIn`msgsOut!(
+    `tp;
+    .tp.cfg.port;
+    `second$.z.p - .proc.startTime;
+    st;
+    (`long$.Q.w[][`used]) % 1000000;
+    (count trade_binance) + count quote_binance;
+    .tp.logCount)
+  };
+
+.tp.status:{[]
+  flip `metric`value!(
+    `port`uptime`logFile`logChunks`logSizeMB`trades`quotes`tradeGaps`tradeMissed`tradeRestarts`lastTradeSeq;
+    (.tp.cfg.port;`second$.z.p-.proc.startTime;.tp.logFile;.tp.logCount;0.01*`long$100*(@[hcount;.tp.logFile;0j])%1e6;count trade_binance;count quote_binance;.tp.gaps.trade;.tp.missed.trade;.tp.restarts.trade;.tp.seq.trade))
+  };
+
+/ Compact status as dictionary (for programmatic use)
+.tp.statusDict:{[]
+  `port`uptime`logChunks`trades`quotes`tradeGaps`tradeMissed!(.tp.cfg.port;`second$.z.p-.proc.startTime;.tp.logCount;count trade_binance;count quote_binance;.tp.gaps.trade;.tp.missed.trade)
+  };
+
+/ Log status (unchanged for compatibility)
+.tp.logStatus:{[]
+  ([]file:enlist .tp.logFile;chunks:enlist .tp.logCount;sizeMB:enlist(@[hcount;.tp.logFile;0j])%1e6)
   };
 
 / -------------------------------------------------------
-/ End-of-Day Handler
+/ End-of-Day
 / -------------------------------------------------------
 
 .tp.endOfDay:{[]
-  -1 "TP: End-of-day processing started...";
-  
-  / Log final count
-  -1 "TP: Log chunks: ",string[.tp.logCount];
-  
-  / Broadcast EOD to all subscribers
-  .u.end[.z.D];
-  
-  / Rotate log file (closes current, opens new for next day)
+  -1"TP: EOD - chunks:",string[.tp.logCount]," tradeGaps:",string[.tp.gaps.trade];
+  pubsub.callendofday[];
   .tp.rotate[];
-  
-  / Clear in-memory tables
-  delete from `trade_binance;
-  delete from `quote_binance;
-  delete from `health_feed_handler;
-  
-  / Reset counter
+  delete from`trade_binance;
+  delete from`quote_binance;
+  delete from`health_feed_handler;
   .tp.logCount:0j;
-  
-  -1 "TP: End-of-day processing complete";
+  / Reset gap counters for new day
+  .tp.gaps.trade:0j;
+  .tp.missed.trade:0j;
+  .tp.restarts.trade:0j;
+  / Keep last seq (FH doesn't reset on EOD)
   };
 
 / -------------------------------------------------------
 / Startup
 / -------------------------------------------------------
 
-system "p ",string .tp.cfg.port;
+system"p ",string .tp.cfg.port;
 
--1 "=======================================================";
--1 "TP (Production Grade) starting on port ",string[.tp.cfg.port];
--1 "=======================================================";
--1 "Configuration:";
--1 "  Logging: ",$[.tp.cfg.logEnabled; "enabled"; "disabled"];
--1 "  Log directory: ",.tp.cfg.logDir;
--1 "  Log format: single file (standard tick.q)";
-
-/ Open log file
 .tp.openLog[];
 
--1 "";
--1 "Tables:";
--1 "  trade_binance: ",string[count cols trade_binance]," fields";
--1 "  quote_binance: ",string[count cols quote_binance]," fields (L5)";
--1 "  health_feed_handler: ",string[count cols health_feed_handler]," fields";
--1 "";
--1 "Query interface:";
--1 "  .tp.logStatus[]         / View log file status";
--1 "  .tp.endOfDay[]          / Trigger end-of-day processing";
--1 "";
--1 "TP ready - feed handlers can connect";
--1 "=======================================================";
-
-/ -------------------------------------------------------
-/ End
-/ -------------------------------------------------------
+-1"=======================================================";
+-1"TP (KDB-X module) starting on port ",string[.tp.cfg.port];
+-1"=======================================================";
+-1"Tables: trade_binance quote_binance health_feed_handler";
+-1"";
+-1"Monitoring:";
+-1"  .health[]        / Standardized health check";
+-1"  .tp.status[]     / Full status table";
+-1"  .tp.statusDict[] / Status as dictionary";
+-1"  .tp.logStatus[]  / Log file status";
+-1"";
+-1"Operations:";
+-1"  .tp.endOfDay[]    / Trigger end-of-day";
+-1"";
+-1"TP ready";
+-1"=======================================================";

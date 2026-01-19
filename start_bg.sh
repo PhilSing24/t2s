@@ -41,6 +41,12 @@ nohup q logmgr.q > ../logs/processes/logmgr.log 2>&1 &
 echo $! > ../logs/processes/logmgr.pid
 sleep 1
 
+# Start MLE (run from kdb/ directory)
+cd ~/tick-to-signal/kdb
+nohup q mle.q > ../logs/processes/mle.log 2>&1 &
+echo $! > ../logs/processes/mle.pid
+sleep 1
+
 # Start Trade FH (run from project root)
 cd ~/tick-to-signal
 nohup ./build/trade_feed_handler config/trade_feed_handler.json > logs/processes/trade_fh.log 2>&1 &

@@ -1,0 +1,1319 @@
+{
+  "id": "178c9fc9-922c-2f21-c454-a59024146dbc",
+  "name": "TradesQuotes",
+  "creationDate": "Sat, 10 Jan 2026 02:05:05 GMT",
+  "lastUpdateDate": "Sun, 11 Jan 2026 12:42:03 GMT",
+  "thumb": null,
+  "screenDetails": [
+    {
+      "label": "Screen 1",
+      "value": "d5f37392-4670-e4b5-b07e-834b8787b248"
+    }
+  ],
+  "screens": [
+    {
+      "id": "d5f37392-4670-e4b5-b07e-834b8787b248",
+      "name": "Screen 1",
+      "thumb": null,
+      "widgets": [
+        {
+          "id": "5a6b0a19-be84-82f9-ffb1-beb53d173afa",
+          "layout": {
+            "row": 0,
+            "column": 0,
+            "rowSpan": 2,
+            "colSpan": 36
+          },
+          "component": {
+            "id": "9662039d-7137-651f-ee2b-cf6e58668239",
+            "key": "BasicComponents",
+            "options": {
+              "version": "v2.9.0",
+              "possibleCols": [],
+              "Basics": {
+                "ComponentName": "NavigationMenu",
+                "Name": "",
+                "Data": {
+                  "_dashboardsType": "data",
+                  "value": "Menu"
+                },
+                "FontSize": 13,
+                "Node": {
+                  "Parent": "parent",
+                  "Node": "node",
+                  "URL": "url",
+                  "ID": "id"
+                },
+                "Actions": []
+              },
+              "Style": {
+                "advanced": "div.basicComponents_navbar {\r\n    background-color: #0a1929;\r\n    padding: 10px 20px;\r\n    box-shadow: 0 2px 4px rgba(0,0,0,0.3);\r\n    border-bottom: 2px solid #ffffff;\r\n}\r\n\r\ndiv.basicComponents_navbar > div.navbar > a {\r\n    color: #ffffff;\r\n    font-weight: 500;\r\n    font-size: 14px;\r\n    padding: 10px 20px;\r\n    text-decoration: none;\r\n    transition: all 0.3s ease;\r\n    border-bottom: 3px solid transparent;  /* Hidden underline by default */\r\n}\r\n\r\ndiv.basicComponents_navbar > div.navbar > a:hover {\r\n    background-color: #1e3a5f;\r\n    color: #ffffff;\r\n    border-radius: 4px 4px 0 0;  /* Rounded top only */\r\n}\r\n\r\ndiv.basicComponents_navbar > div.navbar > a.active {\r\n    border-bottom: 3px solid #2196f3;  /* Blue underline for active tab */\r\n    color: #ffffff;\r\n}",
+                "cssClasses": ""
+              },
+              "Alignment": {
+                "paddingLeft": 0,
+                "paddingRight": 0,
+                "paddingTop": 0,
+                "paddingBottom": 0,
+                "innerPaddingLeft": 0,
+                "innerPaddingRight": 0,
+                "innerPaddingTop": 0,
+                "innerPaddingBottom": 0,
+                "titlePaddingLeft": 0,
+                "titlePaddingRight": 0,
+                "titlePaddingTop": 7,
+                "titlePaddingBottom": 7
+              },
+              "format": {
+                "titleFontSize": 16,
+                "titleHorizontal": "Center",
+                "titleShadow": false,
+                "tileBorderWidth": 0,
+                "tileBorderRounding": 0,
+                "tileBorderColor": "#000000",
+                "tileBackgroundColor": "#000000",
+                "tileTransparentBackground": true,
+                "tileShadow": false
+              },
+              "possibleColumns": [
+                "node",
+                "parent",
+                "url",
+                "id"
+              ]
+            },
+            "containerId": null,
+            "components": [],
+            "widgets": [],
+            "definitionId": "35",
+            "hasOnSettingsChange": true
+          }
+        },
+        {
+          "id": "d242c6f6-e6f1-25c3-24ba-b29f8579cc62",
+          "layout": {
+            "row": 2,
+            "column": 0,
+            "rowSpan": 22,
+            "colSpan": 36
+          },
+          "component": {
+            "id": "64853865-8955-f24c-afd5-0b7d969bd937",
+            "key": "Panel",
+            "options": {
+              "version": "v2.11.0",
+              "Basics": {
+                "ComponentName": "panel",
+                "Name": "",
+                "RelativeHeight": true,
+                "Advanced": false,
+                "UserLayout": false,
+                "Floatable": true,
+                "EnableWebGLContext": false,
+                "ColCount": 32,
+                "RowHeight": 25,
+                "RowCount": 24,
+                "ExpandWidgets": "None",
+                "Repeatable": false,
+                "RepeatableViewstate": ""
+              },
+              "Style": {
+                "advanced": "",
+                "cssClasses": ""
+              },
+              "Alignment": {
+                "paddingLeft": 0,
+                "paddingRight": 0,
+                "paddingTop": 0,
+                "paddingBottom": 0,
+                "innerPaddingLeft": 0,
+                "innerPaddingRight": 0,
+                "innerPaddingTop": 0,
+                "innerPaddingBottom": 0,
+                "titlePaddingLeft": 0,
+                "titlePaddingRight": 0,
+                "titlePaddingTop": 7,
+                "titlePaddingBottom": 7
+              },
+              "format": {
+                "titleFontSize": 16,
+                "titleHorizontal": "Center",
+                "titleShadow": false,
+                "tileBorderWidth": 0,
+                "tileBorderRounding": 0,
+                "tileBorderColor": "#000000",
+                "tileBackgroundColor": "#000000",
+                "tileTransparentBackground": true,
+                "tileShadow": false
+              }
+            },
+            "containerId": null,
+            "components": [],
+            "widgets": [
+              {
+                "id": "8c546e43-4aba-e4c5-b15d-f700fa7e3d42",
+                "layout": {
+                  "row": 2,
+                  "column": 0,
+                  "rowSpan": 7,
+                  "colSpan": 10
+                },
+                "component": {
+                  "id": "a99fd49b-00be-d670-95d6-ab78b54cdee6",
+                  "key": "Datagrid",
+                  "options": {
+                    "version": "v2.12.0",
+                    "datagridPossibleColumns": [
+                      "bidQty",
+                      "bidPrice",
+                      "askPrice",
+                      "askQty"
+                    ],
+                    "datagridPossibleHeaderColumns": [
+                      "none"
+                    ],
+                    "datagridPossibleColumnsWithItself": [
+                      "<this>",
+                      "bidQty",
+                      "bidPrice",
+                      "askPrice",
+                      "askQty"
+                    ],
+                    "selectedColumnPossibleValues": [
+                      "bidQty",
+                      "bidPrice",
+                      "askPrice",
+                      "askQty"
+                    ],
+                    "highlightTargetPossibleValues": [
+                      "bidQty",
+                      "bidPrice",
+                      "askPrice",
+                      "askQty",
+                      "*"
+                    ],
+                    "sortingPossibleValues": [
+                      "",
+                      "bidQty",
+                      "bidPrice",
+                      "askPrice",
+                      "askQty"
+                    ],
+                    "footerPossibleValues": [
+                      "None",
+                      "Average",
+                      "Count",
+                      "Sum",
+                      "WeightedAverage"
+                    ],
+                    "Basics": {
+                      "Data": {
+                        "_dashboardsType": "data",
+                        "value": "OrderBook_BTC"
+                      },
+                      "Filtering": "disabled",
+                      "IsFilterVisible": false,
+                      "ShowPagingControl": false,
+                      "EnableGrouping": false
+                    },
+                    "ColumnsConfiguration": [
+                      {
+                        "Field": "bidQty",
+                        "DisplayName": "bidQty",
+                        "Format": "Formatted Number",
+                        "Precision": 4,
+                        "WidthWeight": 100,
+                        "MinWidthAbsolute": 100,
+                        "FooterWeights": "bidQty"
+                      },
+                      {
+                        "Field": "bidPrice",
+                        "DisplayName": "bidPrice",
+                        "Format": "Formatted Number",
+                        "IsRangeHighlightColorInverted": true,
+                        "WidthWeight": 100,
+                        "MinWidthAbsolute": 100,
+                        "FooterWeights": "bidQty"
+                      },
+                      {
+                        "Field": "askPrice",
+                        "DisplayName": "askPrice",
+                        "Format": "Formatted Number",
+                        "WidthWeight": 100,
+                        "MinWidthAbsolute": 100,
+                        "FooterWeights": "bidQty"
+                      },
+                      {
+                        "Field": "askQty",
+                        "DisplayName": "askQty",
+                        "Format": "Formatted Number",
+                        "Precision": 4,
+                        "WidthWeight": 100,
+                        "MinWidthAbsolute": 100,
+                        "FooterWeights": "bidQty"
+                      }
+                    ],
+                    "FileExport": {
+                      "ShowExportCsvButton": false,
+                      "ShowExportExcelButton": false
+                    },
+                    "Style": {
+                      "advanced": "/* Bid price - dark green */\n[data-widgetid=\"8c546e43-4aba-e4c5-b15d-f700fa7e3d42\"] .slick-cell.l1 {\n    background-color: #0d4d0d;\n    color: #00ff00;\n}\n\n/* Ask price - dark red */\n[data-widgetid=\"8c546e43-4aba-e4c5-b15d-f700fa7e3d42\"] .slick-cell.l2 {\n    background-color: #4d0d0d;\n    color: #ff4444;\n}\n\n"
+                    },
+                    "Alignment": {
+                      "paddingLeft": 0,
+                      "paddingRight": 0,
+                      "paddingTop": 0,
+                      "paddingBottom": 0,
+                      "innerPaddingLeft": 0,
+                      "innerPaddingRight": 0,
+                      "innerPaddingTop": 0,
+                      "innerPaddingBottom": 0,
+                      "titlePaddingLeft": 0,
+                      "titlePaddingRight": 0
+                    },
+                    "format": {
+                      "widgetTitle": "BTCUSDT",
+                      "titleColor": "#ffb700",
+                      "titleFontBold": true,
+                      "tileBorderWidth": 0,
+                      "tileBorderRounding": 0,
+                      "tileBorderColor": "#000000",
+                      "tileBackgroundColor": "#000000",
+                      "tileTransparentBackground": true,
+                      "tileShadow": false
+                    }
+                  },
+                  "containerId": null,
+                  "components": [],
+                  "widgets": [],
+                  "definitionId": "21",
+                  "hasOnSettingsChange": true
+                }
+              },
+              {
+                "id": "13f7fe85-99d8-2a3a-bb6c-6e13486f7919",
+                "layout": {
+                  "row": 2,
+                  "column": 11,
+                  "rowSpan": 7,
+                  "colSpan": 10
+                },
+                "component": {
+                  "id": "4794d21a-6ac2-d08c-bbb4-7c26303235b8",
+                  "key": "Datagrid",
+                  "options": {
+                    "version": "v2.12.0",
+                    "datagridPossibleColumns": [
+                      "bidQty",
+                      "bidPrice",
+                      "askPrice",
+                      "askQty"
+                    ],
+                    "datagridPossibleHeaderColumns": [
+                      "none"
+                    ],
+                    "datagridPossibleColumnsWithItself": [
+                      "<this>",
+                      "bidQty",
+                      "bidPrice",
+                      "askPrice",
+                      "askQty"
+                    ],
+                    "selectedColumnPossibleValues": [
+                      "bidQty",
+                      "bidPrice",
+                      "askPrice",
+                      "askQty"
+                    ],
+                    "highlightTargetPossibleValues": [
+                      "bidQty",
+                      "bidPrice",
+                      "askPrice",
+                      "askQty",
+                      "*"
+                    ],
+                    "sortingPossibleValues": [
+                      "",
+                      "bidQty",
+                      "bidPrice",
+                      "askPrice",
+                      "askQty"
+                    ],
+                    "footerPossibleValues": [
+                      "None",
+                      "Average",
+                      "Count",
+                      "Sum",
+                      "WeightedAverage"
+                    ],
+                    "Basics": {
+                      "Data": {
+                        "_dashboardsType": "data",
+                        "value": "OrderBook_ETH"
+                      },
+                      "Filtering": "disabled",
+                      "IsFilterVisible": false,
+                      "ShowPagingControl": false,
+                      "EnableGrouping": false
+                    },
+                    "ColumnsConfiguration": [
+                      {
+                        "Field": "bidQty",
+                        "DisplayName": "bidQty",
+                        "Format": "Formatted Number",
+                        "Precision": 4,
+                        "WidthWeight": 100,
+                        "MinWidthAbsolute": 100,
+                        "FooterWeights": "bidQty"
+                      },
+                      {
+                        "Field": "bidPrice",
+                        "DisplayName": "bidPrice",
+                        "Format": "Formatted Number",
+                        "WidthWeight": 100,
+                        "MinWidthAbsolute": 100,
+                        "FooterWeights": "bidQty"
+                      },
+                      {
+                        "Field": "askPrice",
+                        "DisplayName": "askPrice",
+                        "Format": "Formatted Number",
+                        "WidthWeight": 100,
+                        "MinWidthAbsolute": 100,
+                        "FooterWeights": "bidQty"
+                      },
+                      {
+                        "Field": "askQty",
+                        "DisplayName": "askQty",
+                        "Format": "Formatted Number",
+                        "Precision": 4,
+                        "WidthWeight": 100,
+                        "MinWidthAbsolute": 100,
+                        "FooterWeights": "bidQty"
+                      }
+                    ],
+                    "FileExport": {
+                      "ShowExportCsvButton": false,
+                      "ShowExportExcelButton": false
+                    },
+                    "Style": {
+                      "advanced": "/* Bid price - dark green */\r\n[data-widgetid=\"13f7fe85-99d8-2a3a-bb6c-6e13486f7919\"] .slick-cell.l1 {\r\n    background-color: #0d4d0d;\r\n    color: #00ff00;\r\n}\r\n\r\n/* Ask price - dark red */\r\n[data-widgetid=\"13f7fe85-99d8-2a3a-bb6c-6e13486f7919\"] .slick-cell.l2 {\r\n    background-color: #4d0d0d;\r\n    color: #ff4444;\r\n}"
+                    },
+                    "Alignment": {
+                      "paddingLeft": 0,
+                      "paddingRight": 0,
+                      "paddingTop": 0,
+                      "paddingBottom": 0,
+                      "innerPaddingLeft": 0,
+                      "innerPaddingRight": 0,
+                      "innerPaddingTop": 0,
+                      "innerPaddingBottom": 0,
+                      "titlePaddingLeft": 0,
+                      "titlePaddingRight": 0
+                    },
+                    "format": {
+                      "widgetTitle": "ETHUSDT",
+                      "titleColor": "#ffb700",
+                      "titleFontBold": true,
+                      "tileBorderWidth": 0,
+                      "tileBorderRounding": 0,
+                      "tileBorderColor": "#000000",
+                      "tileBackgroundColor": "#000000",
+                      "tileTransparentBackground": true,
+                      "tileShadow": false
+                    }
+                  },
+                  "containerId": null,
+                  "components": [],
+                  "widgets": [],
+                  "definitionId": "21",
+                  "hasOnSettingsChange": true
+                }
+              },
+              {
+                "id": "f16e9dd6-8824-b029-99cf-e398a91f255c",
+                "layout": {
+                  "row": 2,
+                  "column": 22,
+                  "rowSpan": 7,
+                  "colSpan": 10
+                },
+                "component": {
+                  "id": "9bab9b67-7cd7-a52d-5937-944e65b56d53",
+                  "key": "Datagrid",
+                  "options": {
+                    "version": "v2.12.0",
+                    "datagridPossibleColumns": [
+                      "bidQty",
+                      "bidPrice",
+                      "askPrice",
+                      "askQty"
+                    ],
+                    "datagridPossibleHeaderColumns": [
+                      "none"
+                    ],
+                    "datagridPossibleColumnsWithItself": [
+                      "<this>",
+                      "bidQty",
+                      "bidPrice",
+                      "askPrice",
+                      "askQty"
+                    ],
+                    "selectedColumnPossibleValues": [
+                      "bidQty",
+                      "bidPrice",
+                      "askPrice",
+                      "askQty"
+                    ],
+                    "highlightTargetPossibleValues": [
+                      "bidQty",
+                      "bidPrice",
+                      "askPrice",
+                      "askQty",
+                      "*"
+                    ],
+                    "sortingPossibleValues": [
+                      "",
+                      "bidQty",
+                      "bidPrice",
+                      "askPrice",
+                      "askQty"
+                    ],
+                    "footerPossibleValues": [
+                      "None",
+                      "Average",
+                      "Count",
+                      "Sum",
+                      "WeightedAverage"
+                    ],
+                    "Basics": {
+                      "Data": {
+                        "_dashboardsType": "data",
+                        "value": "OrderBook_SOL"
+                      },
+                      "Filtering": "disabled",
+                      "IsFilterVisible": false,
+                      "ShowPagingControl": false,
+                      "EnableGrouping": false
+                    },
+                    "ColumnsConfiguration": [
+                      {
+                        "Field": "bidQty",
+                        "DisplayName": "bidQty",
+                        "Format": "Formatted Number",
+                        "Precision": 4,
+                        "WidthWeight": 100,
+                        "MinWidthAbsolute": 100,
+                        "FooterWeights": "bidQty"
+                      },
+                      {
+                        "Field": "bidPrice",
+                        "DisplayName": "bidPrice",
+                        "Format": "Formatted Number",
+                        "WidthWeight": 100,
+                        "MinWidthAbsolute": 100,
+                        "FooterWeights": "bidQty"
+                      },
+                      {
+                        "Field": "askPrice",
+                        "DisplayName": "askPrice",
+                        "Format": "Formatted Number",
+                        "WidthWeight": 100,
+                        "MinWidthAbsolute": 100,
+                        "FooterWeights": "bidQty"
+                      },
+                      {
+                        "Field": "askQty",
+                        "DisplayName": "askQty",
+                        "Format": "Formatted Number",
+                        "Precision": 4,
+                        "WidthWeight": 100,
+                        "MinWidthAbsolute": 100,
+                        "FooterWeights": "bidQty"
+                      }
+                    ],
+                    "FileExport": {
+                      "ShowExportCsvButton": false,
+                      "ShowExportExcelButton": false
+                    },
+                    "Style": {
+                      "advanced": "/* Bid price - dark green */\n[data-widgetid=\"f16e9dd6-8824-b029-99cf-e398a91f255c\"] .slick-cell.l1 {\n    background-color: #0d4d0d;\n    color: #00ff00;\n}\n\n/* Ask price - dark red */\n[data-widgetid=\"f16e9dd6-8824-b029-99cf-e398a91f255c\"] .slick-cell.l2 {\n    background-color: #4d0d0d;\n    color: #ff4444;\n}"
+                    },
+                    "Alignment": {
+                      "paddingLeft": 0,
+                      "paddingRight": 0,
+                      "paddingTop": 0,
+                      "paddingBottom": 0,
+                      "innerPaddingLeft": 0,
+                      "innerPaddingRight": 0,
+                      "innerPaddingTop": 0,
+                      "innerPaddingBottom": 0,
+                      "titlePaddingLeft": 0,
+                      "titlePaddingRight": 0
+                    },
+                    "format": {
+                      "widgetTitle": "SOLUSDT",
+                      "titleColor": "#ffb700",
+                      "titleFontBold": true,
+                      "tileBorderWidth": 0,
+                      "tileBorderRounding": 0,
+                      "tileBorderColor": "#000000",
+                      "tileBackgroundColor": "#000000",
+                      "tileTransparentBackground": true,
+                      "tileShadow": false
+                    }
+                  },
+                  "containerId": null,
+                  "components": [],
+                  "widgets": [],
+                  "definitionId": "21",
+                  "hasOnSettingsChange": true
+                }
+              },
+              {
+                "id": "0e965c35-41eb-dc37-bf19-e8a63cc2ff91",
+                "layout": {
+                  "row": 11,
+                  "column": 0,
+                  "rowSpan": 13,
+                  "colSpan": 10
+                },
+                "component": {
+                  "id": "40abfda5-9cc7-8eb8-f485-a949d1923ea2",
+                  "key": "AdvancedCharts",
+                  "options": {
+                    "version": "4.7.7",
+                    "Basics": {
+                      "Name": "",
+                      "data": {
+                        "_dashboardsType": "data",
+                        "value": "OHLC_BTC"
+                      },
+                      "stockDisplayType": "CandleStick",
+                      "decimalPlaces": 0,
+                      "viewFrom": "",
+                      "viewTo": "",
+                      "crosshair": "price",
+                      "showInfoBorder": false,
+                      "showDisclaimer": true,
+                      "showVolume": false,
+                      "annotations": "",
+                      "indicators": ""
+                    },
+                    "ViewState": {
+                      "Focus": ""
+                    },
+                    "Toolbar": {
+                      "showChartToolbar": true,
+                      "showDrawMenu": true,
+                      "showIndicators": true
+                    },
+                    "Style": {
+                      "advanced": "",
+                      "cssClasses": "",
+                      "chartDisplayAreaHorizontalGridLinesColor": "#D8D8D8",
+                      "chartDisplayAreaVerticalGridLinesColor": "#D8D8D8",
+                      "crosshairColor": "#ffffff",
+                      "chartDisplayAreaBackground": "#262626",
+                      "chartDisplayAreaAlternativeBackground": "#262626",
+                      "chartBorderColor": "#ffffff",
+                      "axisTextMajor": "#ffffff",
+                      "axisTextMinor": "#ffffff",
+                      "selectedBackground": "#ffffff",
+                      "selectedForeground": "#000000",
+                      "chartDisplayAreaCandleStickUpFill": "#009933",
+                      "chartDisplayAreaCandleStickDownFill": "#d00d00"
+                    },
+                    "Alignment": {
+                      "paddingLeft": 0,
+                      "paddingRight": 0,
+                      "paddingTop": 0,
+                      "paddingBottom": 0,
+                      "innerPaddingLeft": 0,
+                      "innerPaddingRight": 0,
+                      "innerPaddingTop": 0,
+                      "innerPaddingBottom": 0,
+                      "titlePaddingLeft": 0,
+                      "titlePaddingRight": 0,
+                      "titlePaddingTop": 7,
+                      "titlePaddingBottom": 7
+                    },
+                    "format": {
+                      "widgetTitle": "OHLC BTC Trades",
+                      "titleFontSize": 16,
+                      "titleHorizontal": "Center",
+                      "titleColor": "#ffb700",
+                      "titleFontBold": true,
+                      "titleShadow": false,
+                      "tileBorderWidth": 0,
+                      "tileBorderRounding": 0,
+                      "tileBorderColor": "#000000",
+                      "tileBackgroundColor": "#000000",
+                      "tileTransparentBackground": true,
+                      "tileShadow": false
+                    }
+                  },
+                  "containerId": null,
+                  "components": [],
+                  "widgets": [],
+                  "definitionId": "4",
+                  "hasOnSettingsChange": true
+                }
+              },
+              {
+                "id": "54c9fbc0-75a5-cb4e-4e31-73d2598a57ad",
+                "layout": {
+                  "row": 11,
+                  "column": 11,
+                  "rowSpan": 13,
+                  "colSpan": 10
+                },
+                "component": {
+                  "id": "184e19d6-d7ef-835e-b987-7154a39e4b9e",
+                  "key": "AdvancedCharts",
+                  "options": {
+                    "version": "4.7.7",
+                    "Basics": {
+                      "Name": "",
+                      "data": {
+                        "_dashboardsType": "data",
+                        "value": "OHLC_ETH"
+                      },
+                      "stockDisplayType": "CandleStick",
+                      "decimalPlaces": 0,
+                      "viewFrom": "",
+                      "viewTo": "",
+                      "crosshair": "none",
+                      "showInfoBorder": false,
+                      "showDisclaimer": false,
+                      "showVolume": false,
+                      "annotations": "",
+                      "indicators": ""
+                    },
+                    "ViewState": {
+                      "Focus": ""
+                    },
+                    "Toolbar": {
+                      "showChartToolbar": true,
+                      "showDrawMenu": true,
+                      "showIndicators": true
+                    },
+                    "Style": {
+                      "advanced": "",
+                      "cssClasses": "",
+                      "chartDisplayAreaHorizontalGridLinesColor": "#D8D8D8",
+                      "chartDisplayAreaVerticalGridLinesColor": "#D8D8D8",
+                      "crosshairColor": "#ffffff",
+                      "chartDisplayAreaBackground": "#262626",
+                      "chartDisplayAreaAlternativeBackground": "#262626",
+                      "chartBorderColor": "#ffffff",
+                      "axisTextMajor": "#ffffff",
+                      "axisTextMinor": "#ffffff",
+                      "selectedBackground": "#ffffff",
+                      "selectedForeground": "#000000",
+                      "chartDisplayAreaCandleStickUpFill": "#009933",
+                      "chartDisplayAreaCandleStickDownFill": "#d00d00"
+                    },
+                    "Alignment": {
+                      "paddingLeft": 0,
+                      "paddingRight": 0,
+                      "paddingTop": 0,
+                      "paddingBottom": 0,
+                      "innerPaddingLeft": 0,
+                      "innerPaddingRight": 0,
+                      "innerPaddingTop": 0,
+                      "innerPaddingBottom": 0,
+                      "titlePaddingLeft": 0,
+                      "titlePaddingRight": 0,
+                      "titlePaddingTop": 7,
+                      "titlePaddingBottom": 7
+                    },
+                    "format": {
+                      "widgetTitle": "OHLC ETH Trades",
+                      "titleFontSize": 16,
+                      "titleHorizontal": "Center",
+                      "titleColor": "#ffb700",
+                      "titleFontBold": true,
+                      "titleShadow": false,
+                      "tileBorderWidth": 0,
+                      "tileBorderRounding": 0,
+                      "tileBorderColor": "#000000",
+                      "tileBackgroundColor": "#000000",
+                      "tileTransparentBackground": true,
+                      "tileShadow": false
+                    }
+                  },
+                  "containerId": null,
+                  "components": [],
+                  "widgets": [],
+                  "definitionId": "4",
+                  "hasOnSettingsChange": true
+                }
+              },
+              {
+                "id": "4c6c5223-9f70-3df0-a2ee-8fe4b7706b1f",
+                "layout": {
+                  "row": 11,
+                  "column": 22,
+                  "rowSpan": 13,
+                  "colSpan": 10
+                },
+                "component": {
+                  "id": "0bc023f1-a35b-c4fd-b083-3c45f340288b",
+                  "key": "AdvancedCharts",
+                  "options": {
+                    "version": "4.7.7",
+                    "Basics": {
+                      "Name": "",
+                      "data": {
+                        "_dashboardsType": "data",
+                        "value": "OHLC_SOL"
+                      },
+                      "stockDisplayType": "CandleStick",
+                      "decimalPlaces": 2,
+                      "viewFrom": "",
+                      "viewTo": "",
+                      "crosshair": "none",
+                      "showInfoBorder": false,
+                      "showDisclaimer": false,
+                      "showVolume": false,
+                      "annotations": "",
+                      "indicators": ""
+                    },
+                    "ViewState": {
+                      "Focus": ""
+                    },
+                    "Toolbar": {
+                      "showChartToolbar": true,
+                      "showDrawMenu": true,
+                      "showIndicators": true
+                    },
+                    "Style": {
+                      "advanced": "",
+                      "cssClasses": "",
+                      "chartDisplayAreaHorizontalGridLinesColor": "#D8D8D8",
+                      "chartDisplayAreaVerticalGridLinesColor": "#D8D8D8",
+                      "crosshairColor": "#ffffff",
+                      "chartDisplayAreaBackground": "#262626",
+                      "chartDisplayAreaAlternativeBackground": "#262626",
+                      "chartBorderColor": "#ffffff",
+                      "axisTextMajor": "#ffffff",
+                      "axisTextMinor": "#ffffff",
+                      "selectedBackground": "#ffffff",
+                      "selectedForeground": "#000000",
+                      "chartDisplayAreaCandleStickUpFill": "#009933",
+                      "chartDisplayAreaCandleStickDownFill": "#d00d00"
+                    },
+                    "Alignment": {
+                      "paddingLeft": 0,
+                      "paddingRight": 0,
+                      "paddingTop": 0,
+                      "paddingBottom": 0,
+                      "innerPaddingLeft": 0,
+                      "innerPaddingRight": 0,
+                      "innerPaddingTop": 0,
+                      "innerPaddingBottom": 0,
+                      "titlePaddingLeft": 0,
+                      "titlePaddingRight": 0,
+                      "titlePaddingTop": 7,
+                      "titlePaddingBottom": 7
+                    },
+                    "format": {
+                      "widgetTitle": "OHLC SOL Trades",
+                      "titleFontSize": 16,
+                      "titleHorizontal": "Center",
+                      "titleColor": "#ffb700",
+                      "titleFontBold": true,
+                      "titleShadow": false,
+                      "tileBorderWidth": 0,
+                      "tileBorderRounding": 0,
+                      "tileBorderColor": "#000000",
+                      "tileBackgroundColor": "#000000",
+                      "tileTransparentBackground": true,
+                      "tileShadow": false
+                    }
+                  },
+                  "containerId": null,
+                  "components": [],
+                  "widgets": [],
+                  "definitionId": "4",
+                  "hasOnSettingsChange": true
+                }
+              }
+            ],
+            "definitionId": "50",
+            "hasOnSettingsChange": true
+          }
+        }
+      ],
+      "relativeHeight": true,
+      "rowCount": 24,
+      "rowHeight": 25,
+      "colCount": 36,
+      "floatable": true,
+      "isDefault": true
+    }
+  ],
+  "popups": [],
+  "tags": [],
+  "dashboardTheme": "Dark",
+  "themeSwitchable": true,
+  "saveTimestamp": null,
+  "relativeHeight": true,
+  "rowCount": 24,
+  "rowHeight": 25,
+  "colCount": 36,
+  "floatable": true,
+  "viewState": {
+    "selected": {
+      "_viewType": true,
+      "_default": "0",
+      "_type": "symbol"
+    },
+    ".settings": {},
+    "_settings": {
+      "dashboardUser": {
+        "_viewType": true,
+        "_type": "symbol",
+        "_default": ""
+      },
+      "dashboardTimezone": {
+        "_viewType": true,
+        "_type": "symbol",
+        "_default": ""
+      },
+      "dashboardUrl": {
+        "_viewType": true,
+        "_type": "string",
+        "_default": ""
+      },
+      "dashboardTitle": {
+        "_viewType": true,
+        "_type": "symbol",
+        "_default": ""
+      },
+      "dashboardStartTimestamp": {
+        "_viewType": true,
+        "_type": "timestamp",
+        "_default": "",
+        "_rolling": true
+      },
+      "dashboardAvailableMemoryThreshold": {
+        "_viewType": true,
+        "_type": "int",
+        "_default": 0
+      }
+    }
+  },
+  "data": {
+    "OrderBook_BTC": {
+      "_pagingType": "NONE",
+      "_autoExecute": true,
+      "_autoExec": true,
+      "_columns": [],
+      "_dataType": "query",
+      "_dataSource": "kdb",
+      "_connection": "RTE",
+      "_connection_Viewstate": "",
+      "_mappings": {},
+      "_maxRows": 2000,
+      "_subscriptionType": "polling",
+      "_subscriptionInterval": 1,
+      "_layout": [
+        {
+          "isExpanded": true,
+          "weight": 2
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": true,
+          "weight": 0
+        },
+        {
+          "isExpanded": false,
+          "weight": 2
+        }
+      ],
+      "_queryString": ".rte.getOrderBook[`BTCUSDT]",
+      "_queryParams": [],
+      "_subscriptionKey": "",
+      "_hasUpdateQuery": false,
+      "_updateQueryParams": [],
+      "_updateQueryString": "",
+      "_updateType": "query",
+      "_pageSize": 2000,
+      "_serverPaging": false
+    },
+    "OrderBook_ETH": {
+      "_pagingType": "NONE",
+      "_autoExecute": true,
+      "_autoExec": true,
+      "_columns": [
+        "bidQty",
+        "bidPrice",
+        "askPrice",
+        "askQty"
+      ],
+      "_dataType": "query",
+      "_dataSource": "kdb",
+      "_connection": "RTE",
+      "_connection_Viewstate": "",
+      "_mappings": {
+        "key": "bidQty",
+        "mappings": {},
+        "value": "bidPrice"
+      },
+      "_maxRows": 2000,
+      "_subscriptionType": "polling",
+      "_subscriptionInterval": 1,
+      "_layout": [
+        {
+          "isExpanded": true,
+          "weight": 2
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": true,
+          "weight": 0
+        },
+        {
+          "isExpanded": false,
+          "weight": 2
+        }
+      ],
+      "_queryString": ".rte.getOrderBook[`ETHUSDT]",
+      "_queryParams": [],
+      "_subscriptionKey": "",
+      "_hasUpdateQuery": false,
+      "_updateQueryParams": [],
+      "_updateQueryString": "",
+      "_updateType": "query",
+      "_pageSize": 2000,
+      "_serverPaging": false
+    },
+    "OrderBook_SOL": {
+      "_pagingType": "NONE",
+      "_autoExecute": true,
+      "_autoExec": true,
+      "_columns": [
+        "bidQty",
+        "bidPrice",
+        "askPrice",
+        "askQty"
+      ],
+      "_dataType": "query",
+      "_dataSource": "kdb",
+      "_connection": "RTE",
+      "_connection_Viewstate": "",
+      "_mappings": {
+        "key": "bidQty",
+        "mappings": {},
+        "value": "bidPrice"
+      },
+      "_maxRows": 2000,
+      "_subscriptionType": "polling",
+      "_subscriptionInterval": 1,
+      "_layout": [
+        {
+          "isExpanded": true,
+          "weight": 2
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": true,
+          "weight": 0
+        },
+        {
+          "isExpanded": false,
+          "weight": 2
+        }
+      ],
+      "_queryString": ".rte.getOrderBook[`SOLUSDT]",
+      "_queryParams": [],
+      "_subscriptionKey": "",
+      "_hasUpdateQuery": false,
+      "_updateQueryParams": [],
+      "_updateQueryString": "",
+      "_updateType": "query",
+      "_pageSize": 2000,
+      "_serverPaging": false
+    },
+    "OHLC_BTC": {
+      "_pagingType": "NONE",
+      "_autoExecute": true,
+      "_autoExec": true,
+      "_columns": [
+        "Time",
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Volume"
+      ],
+      "_dataType": "query",
+      "_dataSource": "kdb",
+      "_connection": "RDB",
+      "_connection_Viewstate": "",
+      "_mappings": {
+        "key": "Time",
+        "mappings": {},
+        "value": "Open"
+      },
+      "_maxRows": 2000,
+      "_subscriptionType": "polling",
+      "_subscriptionInterval": 3,
+      "_layout": [
+        {
+          "isExpanded": true,
+          "weight": 2
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": true,
+          "weight": 0
+        },
+        {
+          "isExpanded": false,
+          "weight": 2
+        }
+      ],
+      "_queryString": "0!select Open:first price, High:max price, Low:min price, Close:last price, Volume:sum qty by Time:0D00:05 xbar time from trade_binance where sym=`BTCUSDT",
+      "_queryParams": [],
+      "_subscriptionKey": "",
+      "_hasUpdateQuery": false,
+      "_updateQueryParams": [],
+      "_updateQueryString": "",
+      "_updateType": "query",
+      "_pageSize": 2000,
+      "_serverPaging": false
+    },
+    "Menu": {
+      "_pagingType": "NONE",
+      "_autoExecute": true,
+      "_autoExec": true,
+      "_columns": [
+        "node",
+        "parent",
+        "url",
+        "id"
+      ],
+      "_dataType": "virtual",
+      "_dataSource": "kdb",
+      "_connection": "CTL",
+      "_connection_Viewstate": "",
+      "_mappings": {
+        "key": "node",
+        "mappings": {},
+        "value": "parent"
+      },
+      "_maxRows": 2000,
+      "_subscriptionType": "static",
+      "_subscriptionInterval": 3,
+      "_layout": [
+        {
+          "isExpanded": true,
+          "weight": 2
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": true,
+          "weight": 0
+        },
+        {
+          "isExpanded": true,
+          "weight": 2
+        }
+      ],
+      "_subscriptionKey": "",
+      "_virtualParams": [
+        {
+          "name": "source",
+          "index": 0,
+          "type": "datasource",
+          "value": "",
+          "isVirtual": true
+        }
+      ],
+      "_virtualQueryString": "function (source, callback) {\n    const results = {\n        columns: [\"node\", \"parent\", \"url\", \"id\"],\n        meta: {\n            \"node\": 0,\n            \"parent\": 0,\n            \"url\": 0,\n            \"id\": 7\n        },\n        rows: [\n            {\"node\": \"Feedhandler Monitoring\", \"parent\": \"\", \"url\":\"#27ca034c-79b6-9a86-c611-20217d28d5fd\", \"id\": 1},\n\t\t\t{\"node\": \"DataFlow Monitoring\", \"parent\": \"\", \"url\": \"#82b46d80-c30f-b05f-0280-dc5ccaf830ae\", \"id\": 2},\n            {\"node\": \"Trades & Quotes\", \"parent\": \"\", \"url\": \"#178c9fc9-922c-2f21-c454-a59024146dbc\", \"id\": 3},\n            {\"node\": \"Analytics\", \"parent\": \"\", \"url\": \"#79b385d5-eaef-7aab-b917-2a837b266c3e\", \"id\": 4}\n        ]\n    };\n    callback(results);\n}"
+    },
+    "OHLC_ETH": {
+      "_pagingType": "NONE",
+      "_autoExecute": true,
+      "_autoExec": true,
+      "_columns": [
+        "Time",
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Volume"
+      ],
+      "_dataType": "query",
+      "_dataSource": "kdb",
+      "_connection": "RDB",
+      "_connection_Viewstate": "",
+      "_mappings": {
+        "key": "Time",
+        "mappings": {},
+        "value": "Open"
+      },
+      "_maxRows": 2000,
+      "_subscriptionType": "polling",
+      "_subscriptionInterval": 3,
+      "_layout": [
+        {
+          "isExpanded": true,
+          "weight": 2
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": true,
+          "weight": 0
+        },
+        {
+          "isExpanded": true,
+          "weight": 2
+        }
+      ],
+      "_queryString": "0!select Open:first price, High:max price, Low:min price, Close:last price, Volume:sum qty by Time:0D00:05 xbar time from trade_binance where sym=`ETHUSDT",
+      "_queryParams": [],
+      "_subscriptionKey": "",
+      "_hasUpdateQuery": false,
+      "_updateQueryParams": [],
+      "_updateQueryString": "",
+      "_updateType": "query",
+      "_pageSize": 2000,
+      "_serverPaging": false
+    },
+    "OHLC_SOL": {
+      "_pagingType": "NONE",
+      "_autoExecute": true,
+      "_autoExec": true,
+      "_columns": [],
+      "_dataType": "query",
+      "_dataSource": "kdb",
+      "_connection": "RDB",
+      "_connection_Viewstate": "",
+      "_mappings": {},
+      "_maxRows": 2000,
+      "_subscriptionType": "polling",
+      "_subscriptionInterval": 3,
+      "_layout": [
+        {
+          "isExpanded": true,
+          "weight": 2
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": false,
+          "weight": 1
+        },
+        {
+          "isExpanded": true,
+          "weight": 0
+        },
+        {
+          "isExpanded": false,
+          "weight": 2
+        }
+      ],
+      "_queryString": "0!select Open:first price, High:max price, Low:min price, Close:last price, Volume:sum qty by Time:0D00:05 xbar time from trade_binance where sym=`SOLUSDT",
+      "_queryParams": [],
+      "_subscriptionKey": "",
+      "_hasUpdateQuery": false,
+      "_updateQueryParams": [],
+      "_updateQueryString": "",
+      "_updateType": "query",
+      "_pageSize": 2000,
+      "_serverPaging": false
+    }
+  },
+  "permissionEntity": null,
+  "worksheetPadding": 10,
+  "widgetsSpacing": 0,
+  "borderColor": "000000",
+  "borderBackground": "000000",
+  "transparentBackground": true,
+  "borderWidth": 0,
+  "borderRounding": 0,
+  "borderSpacing": 0,
+  "borderShadow": false,
+  "saveViewerState": "enabled",
+  "hostnameAccess": "",
+  "hidePdfGlobalVS": false,
+  "hierarchicalRules": {
+    "ChartHierarchicalRules": [],
+    "GridHierarchicalRules": []
+  },
+  "hash": "178c9fc9-922c-2f21-c454-a59024146dbc",
+  "enableShareDashboard": false,
+  "notifications": {
+    "Notifications": {
+      "_Version": "4.2.0s2",
+      "Enabled": true,
+      "InBrowserNotifications": false,
+      "Position": "Bottom Right",
+      "MaxVisibleCount": 3,
+      "FadeOut": 5,
+      "Icon": "fa-bell-o",
+      "Sound": "beep",
+      "SoundVolume": 100,
+      "Grouping": false,
+      "GroupingInterval": 1,
+      "triggers": []
+    }
+  },
+  "showLoadingIndicators": true,
+  "unsavedViewerPrompt": false,
+  "advancedCss": "",
+  "cssClasses": "",
+  "version": "v2.14.0",
+  "shortcuts": [],
+  "wasChanged": true
+}
