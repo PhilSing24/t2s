@@ -249,12 +249,33 @@ upd:{[tbl;data]
   };
 
 / -------------------------------------------------------
+/ EOD - Midnight UTC Detection
+/ -------------------------------------------------------
+
+.tp.currentDate:.z.D;
+
+.tp.checkEOD:{[]
+  if[.z.D > .tp.currentDate;
+    -1 "TP: Midnight UTC detected - triggering EOD";
+    .tp.endOfDay[];
+    .tp.currentDate:.z.D;
+  ];
+  };
+
+/ Timer - check every 60 seconds for date rollover
+.z.ts:{[] .tp.checkEOD[] };
+
+
+
+/ -------------------------------------------------------
 / Startup
 / -------------------------------------------------------
 
 system"p ",string .tp.cfg.port;
 
 .tp.openLog[];
+
+system "t 1000";   / Check every 1 second
 
 -1"=======================================================";
 -1"TP (KDB-X module) starting on port ",string[.tp.cfg.port];
