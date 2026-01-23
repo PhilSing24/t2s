@@ -43,8 +43,12 @@
 /// Number of price levels to maintain per side (L5)
 constexpr int BOOK_DEPTH = 5;
 
-/// Publish timeout in milliseconds (publish even if no change)
-constexpr int PUBLISH_TIMEOUT_MS = 50;
+/// Minimum publish interval in milliseconds (throttle)
+/// Enforces maximum publish rate of 10/sec per symbol regardless of changes
+constexpr int MIN_PUBLISH_INTERVAL_MS = 100;
+
+/// Publish timeout in milliseconds (heartbeat even if no change)
+constexpr int PUBLISH_TIMEOUT_MS = 100;
 
 /// Maximum delta buffer size before forced snapshot
 constexpr size_t MAX_DELTA_BUFFER_SIZE = 1000;
@@ -186,6 +190,7 @@ public:
         lastPublished_.resize(numSymbols_);
         lastPublishTimes_.resize(numSymbols_);
         hasPublished_.resize(numSymbols_, false);
+        pendingChange_.resize(numSymbols_, false);
         
         // Initialize lastPublishTimes to now
         auto now = std::chrono::steady_clock::now();
@@ -325,6 +330,10 @@ public:
         
         lastUpdateIds_[idx] = finalUpdateId;
         exchEventTimeMs_[idx] = eventTimeMs;
+        
+        // Mark that we have pending changes (for throttle logic)
+        pendingChange_[idx] = true;
+        
         return true;
     }
     
@@ -339,6 +348,7 @@ public:
         exchEventTimeMs_[idx] = 0;
         deltaBuffers_[idx].clear();
         snapshotRequested_[idx] = false;
+        pendingChange_[idx] = false;
     }
     
     /**
@@ -403,19 +413,25 @@ public:
     
     /**
      * @brief Check if should publish L5 for a symbol
+     * 
+     * Enforces minimum publish interval of MIN_PUBLISH_INTERVAL_MS (100ms)
+     * regardless of how frequently the book changes.
+     * 
      * @param idx Symbol index
      * @param current Current L5 quote
      * @return true if should publish
      */
     bool shouldPublish(int idx, const L5Quote& current) {
         auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - lastPublishTimes_[idx]).count();
         
-        // First publish ever
+        // First publish ever - always publish
         if (!hasPublished_[idx]) {
             return true;
         }
         
-        // Validity changed
+        // Validity changed - always publish immediately (state change is critical)
         if (current.isValid != lastPublished_[idx].isValid) {
             return true;
         }
@@ -425,14 +441,18 @@ public:
             return false;
         }
         
+        // THROTTLE: Enforce minimum interval between publishes
+        if (elapsed < MIN_PUBLISH_INTERVAL_MS) {
+            return false;  // Too soon, skip regardless of changes
+        }
+        
+        // Enough time has passed - publish if there's a change or timeout
         // Price/qty changed
         if (!current.samePricesAs(lastPublished_[idx])) {
             return true;
         }
         
         // Timeout (publish heartbeat even if unchanged)
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - lastPublishTimes_[idx]).count();
         if (elapsed >= PUBLISH_TIMEOUT_MS) {
             return true;
         }
@@ -447,6 +467,7 @@ public:
         lastPublished_[idx] = quote;
         lastPublishTimes_[idx] = std::chrono::steady_clock::now();
         hasPublished_[idx] = true;
+        pendingChange_[idx] = false;
     }
     
     /**
@@ -461,6 +482,7 @@ public:
             if (states_[i] == BookState::VALID && hasPublished_[i]) {
                 auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                     now - lastPublishTimes_[i]).count();
+                // Only trigger timeout publish if minimum interval has passed
                 if (elapsed >= PUBLISH_TIMEOUT_MS) {
                     result.push_back(i);
                 }
@@ -508,6 +530,7 @@ private:
     std::vector<L5Quote> lastPublished_;
     std::vector<std::chrono::steady_clock::time_point> lastPublishTimes_;
     std::vector<bool> hasPublished_;
+    std::vector<bool> pendingChange_;   // Track if book changed since last publish
     
     // ========================================================================
     // PRIVATE HELPERS

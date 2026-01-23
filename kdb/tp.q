@@ -178,7 +178,6 @@ pubsub.init[]
 upd:{[tbl;data]
   / Health messages - no sequence check, no logging
   if[tbl=`health_feed_handler;
-    tbl insert data;
     pubsub.publish[tbl;data];
     :();
   ];
@@ -191,7 +190,6 @@ upd:{[tbl;data]
   
   / Log, insert, publish
   .tp.log[tbl;data];
-  tbl insert data;
   pubsub.publish[tbl;data];
   };
 
@@ -211,14 +209,14 @@ upd:{[tbl;data]
     `second$.z.p - .proc.startTime;
     st;
     (`long$.Q.w[][`used]) % 1000000;
-    (count trade_binance) + count quote_binance;
-    .tp.logCount)
-  };
+    .tp.logCount;      / Total logged messages
+    .tp.logCount)      / Same (no separate tracking)
+  }
 
 .tp.status:{[]
   flip `metric`value!(
-    `port`uptime`logFile`logChunks`logSizeMB`trades`quotes`tradeGaps`tradeMissed`tradeRestarts`lastTradeSeq;
-    (.tp.cfg.port;`second$.z.p-.proc.startTime;.tp.logFile;.tp.logCount;0.01*`long$100*(@[hcount;.tp.logFile;0j])%1e6;count trade_binance;count quote_binance;.tp.gaps.trade;.tp.missed.trade;.tp.restarts.trade;.tp.seq.trade))
+    `port`uptime`logFile`logChunks`logSizeMB`tradeGaps`tradeMissed`tradeRestarts`lastTradeSeq;
+    (.tp.cfg.port;`second$.z.p-.proc.startTime;.tp.logFile;.tp.logCount;0.01*`long$100*(@[hcount;.tp.logFile;0j])%1e6;.tp.gaps.trade;.tp.missed.trade;.tp.restarts.trade;.tp.seq.trade))
   };
 
 / Compact status as dictionary (for programmatic use)
