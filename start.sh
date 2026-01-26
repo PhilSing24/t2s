@@ -1,15 +1,43 @@
 #!/bin/bash
+# t2s - Start market data pipeline
+# Usage: ./start.sh
 
-SESSION="market-data"
-BASEDIR="$HOME/new-tick-to-signal"
+set -e  # Exit on error
 
-tmux kill-session -t $SESSION 2>/dev/null
+SESSION="t2s"
+BASEDIR="$HOME/t2s"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m' # No Color
+
+# Dependency checks
+command -v tmux >/dev/null 2>&1 || { echo -e "${RED}Error: tmux not installed${NC}"; exit 1; }
+command -v q >/dev/null 2>&1 || { echo -e "${RED}Error: q (kdb+) not installed${NC}"; exit 1; }
+
+# Check if session already exists
+if tmux has-session -t $SESSION 2>/dev/null; then
+    echo -e "${RED}Session '$SESSION' already running. Run ./stop.sh first.${NC}"
+    exit 1
+fi
+
+# Check critical ports
+PORTS=(5010 5012 5013 5014 5015 5020 5021)
+for port in "${PORTS[@]}"; do
+    if lsof -ti:$port >/dev/null 2>&1; then
+        echo -e "${RED}Error: Port $port already in use${NC}"
+        exit 1
+    fi
+done
+
+echo "Starting t2s pipeline..."
 
 # Window 0: Tickerplant (primary)
 tmux new-session -d -s $SESSION -n "tp"
 tmux send-keys -t $SESSION:tp "cd $BASEDIR/kdb && q tp.q" C-m
 
-# Window 1: WDB (write-only → HDB)
+# Window 1: WDB (write-only -> HDB)
 tmux new-window -t $SESSION -n "wdb"
 tmux send-keys -t $SESSION:wdb "sleep 2 && cd $BASEDIR/kdb && q wdb.q" C-m
 
@@ -44,19 +72,19 @@ tmux send-keys -t $SESSION:quote-fh "sleep 9 && cd $BASEDIR && ./build/quote_fee
 # Select first window
 tmux select-window -t $SESSION:tp
 
-echo "Starting market data pipeline..."
+echo -e "${GREEN}✓ Pipeline starting${NC}"
 echo ""
 echo "Architecture:"
-echo "  TP:5010 → WDB:5012, RTE:5013, MLE:5015, TEL:5014"
-echo "  TP:5010 → Chained TP:5020 → RDB:5021"
+echo "  TP:5010 -> WDB:5012, RTE:5013, MLE:5015, TEL:5014"
+echo "  TP:5010 -> Chained TP:5020 -> RDB:5021"
 echo ""
 echo "Navigation:"
-echo "  Ctrl+B then N     = next window"
-echo "  Ctrl+B then P     = previous window"
-echo "  Ctrl+B then 0-8   = jump to window"
-echo "  Ctrl+B then D     = detach (keeps running)"
+echo "  Ctrl+B N       next window"
+echo "  Ctrl+B P       previous window"
+echo "  Ctrl+B 0-8     jump to window"
+echo "  Ctrl+B D       detach (keeps running)"
 echo ""
-echo "Run 'tmux attach -t $SESSION' to reattach"
+echo "Reattach: tmux attach -t $SESSION"
 echo ""
 
 tmux attach -t $SESSION

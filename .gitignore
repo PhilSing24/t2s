@@ -24,3 +24,10 @@ tmp.*/
 hdb/
 kdb/logs/
 kdb/logs/
+
+#hdb
+hdb/
+hdb_binancedata/
+
+# Jupyter notebooks
+notebooks/
