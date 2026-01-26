@@ -94,7 +94,7 @@ pubsub.init[]
 .tp.logFile:`;
 .tp.logCount:0j;
 
-.tp.logFilePath:{[] hsym`$(.tp.cfg.logDir,"/",string[.z.D],".log")};
+.tp.logFilePath:{[] hsym`$(.tp.cfg.logDir,"/",string[.z.d],".log")};
 
 .tp.initLog:{[f]
   if[0=@[hcount;f;0j];f set()];
@@ -252,13 +252,13 @@ upd:{[tbl;data]
 / EOD - Midnight UTC Detection
 / -------------------------------------------------------
 
-.tp.currentDate:.z.D;
+.tp.currentDate:.z.d;
 
 .tp.checkEOD:{[]
-  if[.z.D > .tp.currentDate;
+  if[.z.d > .tp.currentDate;
     -1 "TP: Midnight UTC detected - triggering EOD";
     .tp.endOfDay[];
-    .tp.currentDate:.z.D;
+    .tp.currentDate:.z.d;
   ];
   };
 

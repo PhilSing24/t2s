@@ -11,6 +11,10 @@
 .wdb.cfg.hdbDir:`$":../hdb";
 .wdb.cfg.maxRows:50000;
 
+/ Enable compression for HDB writes
+/ zstd, 2^17 block, level 1
+.z.zd:(17;5;1);
+
 / Connection resilience
 .wdb.conn.handle:0N;                   / TP connection handle
 .wdb.conn.state:`disconnected;         / `disconnected`connecting`connected
@@ -285,7 +289,8 @@ upd:{[tbl;data]
 / -------------------------------------------------------
 
 endofday:{[]
-  d:.z.d;
+  / Closing date = yesterday
+  d:-1 + .z.d; 
   -1"WDB: EOD processing for ",string[d];
   
   / Get tables with sym column
@@ -313,14 +318,24 @@ endofday:{[]
   dest:.Q.par[.wdb.cfg.hdbDir;d;`];
   system"r ",(1_string TMPSAVE)," ",-1_1_string dest;
   
-  / Reset TMPSAVE for new day
-  TMPSAVE::.wdb.getTmpSave .z.d+1;
+  / Reset TMPSAVE for new day which is current day
+  TMPSAVE::.wdb.getTmpSave .z.d;
   
   / Reset statistics for new day
   .wdb.stats.flushCount:0j;
   .wdb.stats.rowsWritten:0j;
   .wdb.stats.tradesReceived:0j;
   .wdb.stats.quotesReceived:0j;
+
+  / RESUBSCRIBE - pubsub subscription was cleared by callendofday
+  if[not null .wdb.conn.handle;
+    @[{[h]
+      h(`pubsub.subscribe;`trade_binance;`);
+      -1 "WDB: Resubscribed to trade_binance";
+      h(`pubsub.subscribe;`quote_binance;`);
+      -1 "WDB: Resubscribed to quote_binance";
+    }; .wdb.conn.handle; {[err] -1 "WDB: Resubscription failed - ",err}];
+  ];
   
   -1"WDB: EOD complete";
   };
