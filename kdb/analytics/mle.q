@@ -5,7 +5,7 @@
 / 1. Configuration
 / =============================================================================
 
-.mle.cfg.port:5012;
+.mle.cfg.port:5032;
 .mle.cfg.tpPort:5010;
 
 / Target bars per day (used to bootstrap initial threshold)

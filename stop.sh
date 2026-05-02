@@ -4,7 +4,7 @@
 
 SESSION="t2s"
 BASEDIR="$HOME/t2s"
-PIDDIR="$BASEDIR/logs/processes"
+PIDDIR="$BASEDIR/kdb/logs/processes"
 
 # Colors
 RED='\033[0;31m'
@@ -25,7 +25,7 @@ if tmux has-session -t $SESSION 2>/dev/null; then
 fi
 
 # 2. Kill by PID files
-COMPONENTS=(tp wdb rte tel mle chained_tp rdb trade_fh quote_fh)
+COMPONENTS=(tp wdb rte tel sig pnl chained_tp rdb trade_fh quote_fh)
 for comp in "${COMPONENTS[@]}"; do
     pidfile="$PIDDIR/${comp}.pid"
     if [[ -f "$pidfile" ]]; then
@@ -42,11 +42,21 @@ for comp in "${COMPONENTS[@]}"; do
     fi
 done
 
-# 3. Kill stray processes by name
-Q_SCRIPTS=(tp.q wdb.q rte.q tel.q mle.q chained_tp.q rdb.q)
+# 3. Kill stray processes by name (updated paths)
+Q_SCRIPTS=(tick/tp.q tick/wdb.q tick/rdb.q tick/chained_tp.q analytics/rte.q analytics/tel.q analytics/sig.q analytics/pnl.q)
 FH_PROCS=(trade_feed_handler quote_feed_handler)
 
 for script in "${Q_SCRIPTS[@]}"; do
+    if pgrep -f "q $script" >/dev/null 2>&1; then
+        echo -e "  ${YELLOW}Killing q $script${NC}"
+        [[ "$FORCE" == false ]] && pkill -15 -f "q $script" 2>/dev/null && sleep 0.3
+        pkill -9 -f "q $script" 2>/dev/null
+    fi
+done
+
+# Also check for just the filename (in case working dir differs)
+Q_FILES=(tp.q wdb.q rdb.q chained_tp.q rte.q tel.q sig.q pnl.q)
+for script in "${Q_FILES[@]}"; do
     if pgrep -f "q $script" >/dev/null 2>&1; then
         echo -e "  ${YELLOW}Killing q $script${NC}"
         [[ "$FORCE" == false ]] && pkill -15 -f "q $script" 2>/dev/null && sleep 0.3
@@ -63,7 +73,7 @@ for proc in "${FH_PROCS[@]}"; do
 done
 
 # 4. Kill by ports (last resort)
-PORTS=(5010 5012 5013 5014 5015 5020 5021)
+PORTS=(5010 5011 5012 5014 5015 5016 5017 5018)
 for port in "${PORTS[@]}"; do
     pid=$(lsof -ti:$port 2>/dev/null)
     if [[ -n "$pid" ]]; then

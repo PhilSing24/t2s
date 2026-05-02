@@ -23,7 +23,7 @@ if tmux has-session -t $SESSION 2>/dev/null; then
 fi
 
 # Check critical ports
-PORTS=(5010 5012 5013 5014 5015 5020 5021)
+PORTS=(5010 5011 5012 5014 5015 5016 5017 5018)
 for port in "${PORTS[@]}"; do
     if lsof -ti:$port >/dev/null 2>&1; then
         echo -e "${RED}Error: Port $port already in use${NC}"
@@ -33,39 +33,45 @@ done
 
 echo "Starting t2s pipeline..."
 
-# Window 0: Tickerplant (primary)
+# Window 0: Tickerplant (primary) - port 5010
 tmux new-session -d -s $SESSION -n "tp"
-tmux send-keys -t $SESSION:tp "cd $BASEDIR/kdb && q tp.q" C-m
+tmux send-keys -t $SESSION:tp "cd $BASEDIR/kdb/tick && q tp.q" C-m
 
-# Window 1: WDB (write-only -> HDB)
+# Window 1: WDB (write-only -> HDB) - port 5011
 tmux new-window -t $SESSION -n "wdb"
-tmux send-keys -t $SESSION:wdb "sleep 2 && cd $BASEDIR/kdb && q wdb.q" C-m
+tmux send-keys -t $SESSION:wdb "sleep 2 && cd $BASEDIR/kdb/tick && q wdb.q" C-m
 
-# Window 2: MLE (ML features)
-tmux new-window -t $SESSION -n "mle"
-tmux send-keys -t $SESSION:mle "sleep 5 && cd $BASEDIR/kdb && q mle.q" C-m
-
-# Window 3: Chained TP (batched publisher)
+# Window 2: Chained TP (batched publisher) - port 5014
+# Must start before SIG (SIG publishes positions to CTP)
 tmux new-window -t $SESSION -n "ctp"
-tmux send-keys -t $SESSION:ctp "sleep 6 && cd $BASEDIR/kdb && q chained_tp.q" C-m
+tmux send-keys -t $SESSION:ctp "sleep 3 && cd $BASEDIR/kdb/tick && q chained_tp.q" C-m
 
-# Window 4: RTE (real-time analytics)
+# Window 3: SIG (signal generator) - port 5012
+# Subscribes to TP, publishes to CTP
+tmux new-window -t $SESSION -n "sig"
+tmux send-keys -t $SESSION:sig "sleep 5 && cd $BASEDIR/kdb/analytics && q sig.q" C-m
+
+# Window 4: RTE (real-time analytics) - port 5015
 tmux new-window -t $SESSION -n "rte"
-tmux send-keys -t $SESSION:rte "sleep 5 && cd $BASEDIR/kdb && q rte.q" C-m
+tmux send-keys -t $SESSION:rte "sleep 5 && cd $BASEDIR/kdb/analytics && q rte.q" C-m
 
-# Window 5: TEL (telemetry)
+# Window 5: TEL (telemetry) - port 5016
 tmux new-window -t $SESSION -n "tel"
-tmux send-keys -t $SESSION:tel "sleep 5 && cd $BASEDIR/kdb && q tel.q" C-m
+tmux send-keys -t $SESSION:tel "sleep 5 && cd $BASEDIR/kdb/analytics && q tel.q" C-m
 
-# Window 6: RDB (user queries)
+# Window 6: RDB (user queries) - port 5017
 tmux new-window -t $SESSION -n "rdb"
-tmux send-keys -t $SESSION:rdb "sleep 7 && cd $BASEDIR/kdb && q rdb.q" C-m
+tmux send-keys -t $SESSION:rdb "sleep 6 && cd $BASEDIR/kdb/tick && q rdb.q" C-m
 
-# Window 7: Trade Feed Handler
+# Window 7: PNL (P&L monitoring) - port 5018
+tmux new-window -t $SESSION -n "pnl"
+tmux send-keys -t $SESSION:pnl "sleep 6 && cd $BASEDIR/kdb/analytics && q pnl.q" C-m
+
+# Window 8: Trade Feed Handler
 tmux new-window -t $SESSION -n "trade-fh"
 tmux send-keys -t $SESSION:trade-fh "sleep 8 && cd $BASEDIR && ./build/trade_feed_handler" C-m
 
-# Window 8: Quote Feed Handler
+# Window 9: Quote Feed Handler
 tmux new-window -t $SESSION -n "quote-fh"
 tmux send-keys -t $SESSION:quote-fh "sleep 9 && cd $BASEDIR && ./build/quote_feed_handler" C-m
 
@@ -75,13 +81,14 @@ tmux select-window -t $SESSION:tp
 echo -e "${GREEN}✓ Pipeline starting${NC}"
 echo ""
 echo "Architecture:"
-echo "  TP:5010 -> WDB:5012, RTE:5013, MLE:5015, TEL:5014"
-echo "  TP:5010 -> Chained TP:5020 -> RDB:5021"
+echo "  Primary TP:5010 -> WDB:5011, SIG:5012"
+echo "  Primary TP:5010 -> Chained TP:5014 -> RTE:5015, TEL:5016, RDB:5017, PNL:5018"
+echo "  SIG:5012 -> Chained TP:5014 (positions)"
 echo ""
 echo "Navigation:"
 echo "  Ctrl+B N       next window"
 echo "  Ctrl+B P       previous window"
-echo "  Ctrl+B 0-8     jump to window"
+echo "  Ctrl+B 0-9     jump to window"
 echo "  Ctrl+B D       detach (keeps running)"
 echo ""
 echo "Reattach: tmux attach -t $SESSION"

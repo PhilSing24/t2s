@@ -1,5 +1,6 @@
 / chained_tp.q - Chained Tickerplant with batched publishing
-/ Subscribes to primary TP, batches updates, publishes to downstream RDB
+/ Subscribes to primary TP, batches updates, publishes to downstream
+/ Also receives positions from SIG and forwards immediately
 / No logging (primary TP handles durability)
 
 / -------------------------------------------------------
@@ -89,6 +90,15 @@ health_feed_handler:([]
   symbolCount:`int$()
   );
 
+/ Positions from SIG (forwarded immediately, not batched)
+positions:([]
+  time:`timestamp$();
+  sym:`symbol$();
+  side:`int$();
+  qty:`float$();
+  tradedPrice:`float$()
+  );
+
 / -------------------------------------------------------
 / Pub/Sub - KDB-X module (must be named 'pubsub' for IPC)
 / -------------------------------------------------------
@@ -108,6 +118,7 @@ pubsub.init[]
 .ctp.stats.tradeCount:0j;
 .ctp.stats.quoteCount:0j;
 .ctp.stats.healthCount:0j;
+.ctp.stats.positionsCount:0j;
 .ctp.stats.lastFlush:.z.p;
 
 / -------------------------------------------------------
@@ -198,7 +209,7 @@ pubsub.init[]
   };
 
 / -------------------------------------------------------
-/ Update handling (receive from primary TP)
+/ Update handling (receive from primary TP and SIG)
 / -------------------------------------------------------
 
 upd:{[tbl;data]
@@ -208,6 +219,9 @@ upd:{[tbl;data]
     [`.ctp.buf.quote insert data;.ctp.stats.quoteCount+:$[0h=type data;count data;1]];
     tbl=`health_feed_handler;
     [pubsub.publish[`health_feed_handler;data];.ctp.stats.healthCount+:1];
+    tbl=`positions;
+    [pubsub.publish[`positions;data];.ctp.stats.positionsCount+:1;
+     -1 "CTP: Position received and forwarded - ",string[data 1]];
     ()
   ];
   };
@@ -239,7 +253,7 @@ upd:{[tbl;data]
        .ctp.conn.state = `connecting; `degraded;
        `disconnected];
   
-  `process`port`uptime`status`connState`retryCount`memMB`trades`quotes`health`flushes`bufTrades`bufQuotes!(
+  `process`port`uptime`status`connState`retryCount`memMB`trades`quotes`health`positions`flushes`bufTrades`bufQuotes!(
     `ctp;
     .ctp.cfg.port;
     `second$.z.p - .proc.startTime;
@@ -250,6 +264,7 @@ upd:{[tbl;data]
     .ctp.stats.tradeCount;
     .ctp.stats.quoteCount;
     .ctp.stats.healthCount;
+    .ctp.stats.positionsCount;
     .ctp.stats.flushCount;
     count .ctp.buf.trade;
     count .ctp.buf.quote
@@ -277,9 +292,11 @@ endofday:{[]
   pubsub.callendofday[];
   delete from`trade_binance;
   delete from`quote_binance;
+  delete from`positions;
   .ctp.stats.tradeCount:0j;
   .ctp.stats.quoteCount:0j;
   .ctp.stats.healthCount:0j;
+  .ctp.stats.positionsCount:0j;
   .ctp.stats.flushCount:0j;
   -1 "CTP: EOD complete";
   };
@@ -289,10 +306,10 @@ endofday:{[]
 / -------------------------------------------------------
 
 .ctp.status:{[]
-  `port`primaryTP`batchMs`connected`connState`retryCount`flushes`trades`quotes`health`lastFlush`bufTrades`bufQuotes!
+  `port`primaryTP`batchMs`connected`connState`retryCount`flushes`trades`quotes`health`positions`lastFlush`bufTrades`bufQuotes!
   (.ctp.cfg.port;.ctp.cfg.primaryTP;.ctp.cfg.batchMs;.ctp.conn.state = `connected;
    .ctp.conn.state;.ctp.conn.retryCount;
-   .ctp.stats.flushCount;.ctp.stats.tradeCount;.ctp.stats.quoteCount;.ctp.stats.healthCount;
+   .ctp.stats.flushCount;.ctp.stats.tradeCount;.ctp.stats.quoteCount;.ctp.stats.healthCount;.ctp.stats.positionsCount;
    .ctp.stats.lastFlush;count .ctp.buf.trade;count .ctp.buf.quote)
   };
 
@@ -313,7 +330,11 @@ system "p ",string .ctp.cfg.port;
 -1 "  Base retry delay: ",string[.ctp.conn.cfg.baseDelayMs],"ms";
 -1 "  Max retry delay: ",string[.ctp.conn.cfg.maxDelayMs],"ms";
 -1 "";
--1 "Tables: trade_binance quote_binance health_feed_handler";
+-1 "Tables: trade_binance quote_binance health_feed_handler positions";
+-1 "";
+-1 "Data Sources:";
+-1 "  Primary TP: trades, quotes, health";
+-1 "  SIG: positions (direct publish)";
 -1 "";
 
 / Attempt initial connection (non-blocking)

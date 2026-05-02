@@ -53,7 +53,7 @@
   if[not .hdb.loaded; -1 "ERROR: No HDB loaded"; :()];
   if[not tab in .hdb.tables[]; -1 "ERROR: Table not found: ", string tab; :()];
   dates: date where (date >= startDt) & (date <= endDt);
-  counts: {[t; sf; d] count ?[t; ((=; `date; d); (=; `sym; sf)); 0b; ()]}[tab; symFilter;] each dates;
+  counts: {[t; sf; d] count ?[t; ((=; `date; d); (in; `sym; enlist sf)); 0b; ()]}[tab; symFilter;] each dates;
   flip `date`sym`rows ! (dates; count[dates]#symFilter; counts)
  };
 
@@ -91,12 +91,23 @@
   res
  };
 
+// Load table into memory for date range, filtered by sym
+.hdb.loadBySym: {[tab; symFilter; startDt; endDt]
+  if[not .hdb.loaded; -1 "ERROR: No HDB loaded"; :()];
+  if[not tab in .hdb.tables[]; -1 "ERROR: Table not found: ", string tab; :()];
+  res: ?[tab; ((>=; `date; startDt); (<=; `date; endDt); (in; `sym; enlist symFilter)); 0b; ()];
+  -1 "Loaded ", (string count res), " rows from ", (string tab), " for sym ", string symFilter;
+  res
+ };
+
 // Example usage:
 // .hdb.use `:/home/philippe/t2s/hdb
-// .hdb.use `:/home/philippe/t2s/binancedata
+// .hdb.use `:/home/philippe/t2s/hdb_binancedata
 // .hdb.current[]
 // .hdb.tables[]
 // .hdb.dateRange[]
 // .hdb.rowCounts[`trade_binance; 2026.01.01; 2026.01.15]
 // .hdb.compression[`trade; 2026.01.18; 2026.01.23]
 // myTrade: .hdb.load[`trade; 2026.01.20; 2026.01.22]
+// myTradeBySym: .hdb.loadBySym[`trade; `BTCUSDT; 2026.01.20; 2026.01.22]
+// infoCount: .hdb.rowCountsBySym[`trade; `BTCUSDT; 2026.01.20; 2026.01.22]

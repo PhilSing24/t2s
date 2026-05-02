@@ -2,32 +2,46 @@
 build/
 cpp/build/
 
+# C++ build artifacts (escaped from build dirs)
+*.o
+*.a
+*.so
+*.dylib
+
 # Logs (keep folder structure, ignore contents)
 logs/*.log
 logs/processes/*.log
+kdb/logs/
+
+# Runtime scratch
+tmp/
+tmp.*/
+
+# HDB (runtime data, not source)
+hdb/
+hdb_binancedata/
+
+# kdb+ artifacts
+*.qdb
+
+# Core dumps
+core
+core.*
+
+# Python / Jupyter
+.venv/
+__pycache__/
+.ipynb_checkpoints/
+
+# Local config overrides
+config/*.local.json
 
 # Editor
 .vscode/
+.idea/
 *.swp
 *.swo
 
 # OS
 .DS_Store
-Thumbs.db
-
-# kdb+ artifacts
-*.qdb
-.venv/
-__pycache__/
-.ipynb_checkpoints/
-tmp.*/
-hdb/
-kdb/logs/
-kdb/logs/
-
-#hdb
-hdb/
-hdb_binancedata/
-
-# Jupyter notebooks
-notebooks/
+Thumbs.dbkdb/tick/logs/

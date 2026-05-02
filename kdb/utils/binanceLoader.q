@@ -2,7 +2,7 @@
 
 // Configuration
 .cfg.downloadDir: "/home/philippe/BinanceMarketData/";
-.cfg.partitionDir: `:/home/philippe/t2s/binancedata;
+.cfg.partitionDir: `:/home/philippe/t2s/hdb_binancedata;
 .cfg.baseUrl: "https://data.binance.vision/data/spot/daily/trades/";
 
 // Date formatting helper: 2026.01.17 -> "2026-01-17"
@@ -54,11 +54,11 @@ extractAndClean: {[sym; dt]
 
 // Load trades from CSV (enhanced version of original)
 loadTrades: {[filepath]
-  epochOffset: neg "j"$1970.01.01D0;
+  epochOffset: "j"$1970.01.01D0;
   sym: `$first "-" vs last "/" vs string filepath;
   raw: flip `tradeId`price`qty`quoteQty`exchTradeTimeMs`buyerIsMaker`ignore ! ("JFFFJSS"; ",") 0: filepath;
   select 
-    exchTradeTs: `timestamp$epochOffset + 1000 * exchTradeTimeMs,
+    exchTradeTs: `timestamp$(1000 * exchTradeTimeMs) + epochOffset,
     exchTradeTimeMs,
     sym,
     tradeId,
