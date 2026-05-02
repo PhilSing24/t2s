@@ -1,5 +1,6 @@
 // HDB Utilities
-// Location: /home/philippe/t2s/kdb/utils/hdbUtils.q
+// Helpers to switch between HDBs, list tables, query date ranges, and load
+// data into memory. Use .hdb.use to point at any HDB directory.
 
 // Current HDB state
 .hdb.path: `;
@@ -101,8 +102,8 @@
  };
 
 // Example usage:
-// .hdb.use `:/home/philippe/t2s/hdb
-// .hdb.use `:/home/philippe/t2s/hdb_binancedata
+// .hdb.use `:hdb
+// .hdb.use `:hdb_binancedata
 // .hdb.current[]
 // .hdb.tables[]
 // .hdb.dateRange[]

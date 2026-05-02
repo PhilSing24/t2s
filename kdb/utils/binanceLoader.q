@@ -1,8 +1,11 @@
 \c 50 300
 
 // Configuration
-.cfg.downloadDir: "/home/philippe/BinanceMarketData/";
-.cfg.partitionDir: `:/home/philippe/t2s/hdb_binancedata;
+// Paths read from environment with sensible defaults (relative to project root).
+// Override at launch time, e.g.:
+//   BINANCE_DOWNLOAD_DIR=/data/binance HDB_BINANCE_DIR=/data/hdb q binanceLoader.q
+.cfg.downloadDir: $[count v:getenv `BINANCE_DOWNLOAD_DIR; v; "BinanceMarketData/"];
+.cfg.partitionDir: hsym `$ $[count v:getenv `HDB_BINANCE_DIR; v; "hdb_binancedata"];
 .cfg.baseUrl: "https://data.binance.vision/data/spot/daily/trades/";
 
 // Date formatting helper: 2026.01.17 -> "2026-01-17"
