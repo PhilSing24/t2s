@@ -35,58 +35,14 @@ system "g 0";
 .rdb.stats.lastCleanup:0Np;
 
 / -------------------------------------------------------
-/ Table schema
+/ Table schemas (loaded from shared definition)
+/ RDB receives data from CTP with TP's stamp, then appends its own.
 / -------------------------------------------------------
 
-trade_binance:([]
-  time:`timestamp$();
-  sym:`symbol$();
-  tradeId:`long$();
-  price:`float$();
-  qty:`float$();
-  buyerIsMaker:`boolean$();
-  exchEventTimeMs:`long$();
-  exchTradeTimeMs:`long$();
-  fhRecvTimeUtcNs:`long$();
-  fhParseUs:`long$();
-  fhSendUs:`long$();
-  fhSeqNo:`long$();
-  tpRecvTimeUtcNs:`long$();
-  rdbRecvTimeUtcNs:`long$()
-  );
+\l ../schemas.q
 
-quote_binance:([]
-  time:`timestamp$();
-  sym:`symbol$();
-  bidPrice1:`float$();
-  bidPrice2:`float$();
-  bidPrice3:`float$();
-  bidPrice4:`float$();
-  bidPrice5:`float$();
-  bidQty1:`float$();
-  bidQty2:`float$();
-  bidQty3:`float$();
-  bidQty4:`float$();
-  bidQty5:`float$();
-  askPrice1:`float$();
-  askPrice2:`float$();
-  askPrice3:`float$();
-  askPrice4:`float$();
-  askPrice5:`float$();
-  askQty1:`float$();
-  askQty2:`float$();
-  askQty3:`float$();
-  askQty4:`float$();
-  askQty5:`float$();
-  isValid:`boolean$();
-  exchEventTimeMs:`long$();
-  fhRecvTimeUtcNs:`long$();
-  fhParseUs:`long$();
-  fhSendUs:`long$();
-  fhSeqNo:`long$();
-  tpRecvTimeUtcNs:`long$();
-  rdbRecvTimeUtcNs:`long$()
-  );
+trade_binance:.schema.extend[.schema.trade; `tpRecvTimeUtcNs`rdbRecvTimeUtcNs];
+quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`rdbRecvTimeUtcNs];
 
 / -------------------------------------------------------
 / Connection Management (Resilient)

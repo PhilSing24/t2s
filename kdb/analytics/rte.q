@@ -42,6 +42,30 @@ system "g 0";
 .rte.stats.quotesProcessed:0j;
 
 / =============================================================================
+/ Schema and derived field indices
+/ =============================================================================
+/ RTE declares local trade/quote schemas matching what CTP forwards (with TP's
+/ receive timestamp). Field positions are derived from the schemas as
+/ name->index dictionaries, so column reordering is automatically picked up.
+
+\l ../schemas.q
+
+trade_binance:.schema.extend[.schema.trade; enlist `tpRecvTimeUtcNs];
+quote_binance:.schema.extend[.schema.quote; enlist `tpRecvTimeUtcNs];
+
+.rte.idx.trade:(cols trade_binance)!til count cols trade_binance;
+.rte.idx.quote:(cols quote_binance)!til count cols quote_binance;
+
+/ Pre-compute composite index lists used in the hot path
+.rte.idx.bidQtyAll:.rte.idx.quote each `bidQty1`bidQty2`bidQty3`bidQty4`bidQty5;
+.rte.idx.askQtyAll:.rte.idx.quote each `askQty1`askQty2`askQty3`askQty4`askQty5;
+.rte.idx.bookAll:.rte.idx.quote each
+  `bidPrice1`bidPrice2`bidPrice3`bidPrice4`bidPrice5,
+  `bidQty1`bidQty2`bidQty3`bidQty4`bidQty5,
+  `askPrice1`askPrice2`askPrice3`askPrice4`askPrice5,
+  `askQty1`askQty2`askQty3`askQty4`askQty5;
+
+/ =============================================================================
 / State Initialization
 / =============================================================================
 
@@ -281,10 +305,10 @@ vol_history:([]
 / =============================================================================
 
 .rte.updBook:{[s;data;time]
-  / Expect data in format: time, sym, bid1-5, bidQty1-5, ask1-5, askQty1-5
-  / Indices: bid1=2, bid2=3...bid5=6, bidQty1=7...bidQty5=11
-  /          ask1=12...ask5=16, askQty1=17...askQty5=21
-  .rte.st.book[s]:data 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21;
+  / Capture L5 book using derived field positions (see .rte.idx.bookAll above).
+  / Internal book layout: bid1-5, bidQty1-5, ask1-5, askQty1-5 (20 elements).
+  / This layout is then read back by .rte.getOrderBook and .rte.getSpread.
+  .rte.st.book[s]:data .rte.idx.bookAll;
   };
 
 .rte.getOrderBook:{[s]
@@ -410,22 +434,21 @@ upd:{[tbl;data]
   ];
   
   if[tbl = `trade_binance;
-    time:data 0;
-    s:data 1;
-    price:data 3;
-    qty:data 4;
+    time :data .rte.idx.trade`time;
+    s    :data .rte.idx.trade`sym;
+    price:data .rte.idx.trade`price;
+    qty  :data .rte.idx.trade`qty;
     .rte.updVwap[s; price; qty];
     .rte.updVol[s; time; price];
     .rte.stats.tradesProcessed+:1;
   ];
   
   if[tbl = `quote_binance;
-    time:data 0;
-    s:data 1;
+    time:data .rte.idx.quote`time;
+    s   :data .rte.idx.quote`sym;
     .rte.updBook[s; data; time];
-    / bidQty1-5 at indices 7-11, askQty1-5 at indices 17-21
-    bidDepth:sum data 7 8 9 10 11;
-    askDepth:sum data 17 18 19 20 21;
+    bidDepth:sum data .rte.idx.bidQtyAll;
+    askDepth:sum data .rte.idx.askQtyAll;
     .rte.updOBI[s; bidDepth; askDepth; time];
     .rte.stats.quotesProcessed+:1;
   ];

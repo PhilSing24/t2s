@@ -30,22 +30,28 @@ system "g 0";
 .tel.cfg.retentionNs:.tel.cfg.retentionMin * 60 * 1000000000j;
 
 / =============================================================================
-/ Schema Field Indices
+/ Schema and derived field indices
 / =============================================================================
-/ These indices correspond to the schema defined in tp.q
-/ If schema changes, update these indices accordingly
+/ TEL declares local trade/quote schemas matching what CTP forwards (with TP's
+/ receive timestamp). All field indices are derived from these schemas, so
+/ adding a column to schemas.q automatically updates indices on next restart.
 
-.tel.idx.trade.sym:1;
-.tel.idx.trade.fhParseUs:9;
-.tel.idx.trade.fhSendUs:10;
+\l ../schemas.q
 
-.tel.idx.quote.sym:1;
-.tel.idx.quote.fhParseUs:25;
-.tel.idx.quote.fhSendUs:26;
+trade_binance:.schema.extend[.schema.trade; enlist `tpRecvTimeUtcNs];
+quote_binance:.schema.extend[.schema.quote; enlist `tpRecvTimeUtcNs];
 
-/ Expected field counts (for validation)
-.tel.idx.trade.expectedFields:13;
-.tel.idx.quote.expectedFields:29;
+.tel.idx.trade.sym       :(cols trade_binance)?`sym;
+.tel.idx.trade.fhParseUs :(cols trade_binance)?`fhParseUs;
+.tel.idx.trade.fhSendUs  :(cols trade_binance)?`fhSendUs;
+
+.tel.idx.quote.sym       :(cols quote_binance)?`sym;
+.tel.idx.quote.fhParseUs :(cols quote_binance)?`fhParseUs;
+.tel.idx.quote.fhSendUs  :(cols quote_binance)?`fhSendUs;
+
+/ Expected field counts (also derived) - used by schema validators below
+.tel.idx.trade.expectedFields:count cols trade_binance;
+.tel.idx.quote.expectedFields:count cols quote_binance;
 
 / =============================================================================
 / Schema Validation

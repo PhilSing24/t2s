@@ -36,22 +36,12 @@ system "g 0";
 / Tables
 / -------------------------------------------------------
 
-trade_binance:([]
-    time:`timestamp$();
-    sym:`symbol$();
-    tradeId:`long$();
-    price:`float$();
-    qty:`float$();
-    buyerIsMaker:`boolean$();
-    exchEventTimeMs:`long$();
-    exchTradeTimeMs:`long$();
-    fhRecvTimeUtcNs:`long$();
-    fhParseUs:`long$();
-    fhSendUs:`long$();
-    fhSeqNo:`long$();
-    tpRecvTimeUtcNs:`long$()
-    );
+\l ../schemas.q
 
+/ Trade data from primary TP (with TP's receive timestamp)
+trade_binance:.schema.extend[.schema.trade; enlist `tpRecvTimeUtcNs];
+
+/ SIG-specific tables (not part of shared schema)
 signals:([] sym:`symbol$(); rsi:`float$(); exposure:`int$());
 positions:([] time:`timestamp$(); sym:`symbol$(); side:`int$(); qty:`float$(); tradedPrice:`float$());
 pnl:([] time:`timestamp$(); pnl:`float$());

@@ -14,69 +14,16 @@ system "g 0";
 .proc.startTime:.z.p;
 
 / -------------------------------------------------------
-/ Table schema (must exist before pubsub init)
+/ Table schemas (loaded from shared definition)
+/ Must exist before pubsub init.
+/ TP appends its own receive timestamp to trade and quote.
 / -------------------------------------------------------
 
-trade_binance:([]
-  time:`timestamp$();
-  sym:`symbol$();
-  tradeId:`long$();
-  price:`float$();
-  qty:`float$();
-  buyerIsMaker:`boolean$();
-  exchEventTimeMs:`long$();
-  exchTradeTimeMs:`long$();
-  fhRecvTimeUtcNs:`long$();
-  fhParseUs:`long$();
-  fhSendUs:`long$();
-  fhSeqNo:`long$();
-  tpRecvTimeUtcNs:`long$()
-  );
+\l ../schemas.q
 
-quote_binance:([]
-  time:`timestamp$();
-  sym:`symbol$();
-  bidPrice1:`float$();
-  bidPrice2:`float$();
-  bidPrice3:`float$();
-  bidPrice4:`float$();
-  bidPrice5:`float$();
-  bidQty1:`float$();
-  bidQty2:`float$();
-  bidQty3:`float$();
-  bidQty4:`float$();
-  bidQty5:`float$();
-  askPrice1:`float$();
-  askPrice2:`float$();
-  askPrice3:`float$();
-  askPrice4:`float$();
-  askPrice5:`float$();
-  askQty1:`float$();
-  askQty2:`float$();
-  askQty3:`float$();
-  askQty4:`float$();
-  askQty5:`float$();
-  isValid:`boolean$();
-  exchEventTimeMs:`long$();
-  fhRecvTimeUtcNs:`long$();
-  fhParseUs:`long$();
-  fhSendUs:`long$();
-  fhSeqNo:`long$();
-  tpRecvTimeUtcNs:`long$()
-  );
-
-health_feed_handler:([]
-  time:`timestamp$();
-  handler:`symbol$();
-  startTimeUtc:`timestamp$();
-  uptimeSec:`long$();
-  msgsReceived:`long$();
-  msgsPublished:`long$();
-  lastMsgTimeUtc:`timestamp$();
-  lastPubTimeUtc:`timestamp$();
-  connState:`symbol$();
-  symbolCount:`int$()
-  );
+trade_binance:.schema.extend[.schema.trade; enlist `tpRecvTimeUtcNs];
+quote_binance:.schema.extend[.schema.quote; enlist `tpRecvTimeUtcNs];
+health_feed_handler:.schema.health;
 
 / -------------------------------------------------------
 / Pub/Sub - KDB-X module (must be named 'pubsub' for IPC)
@@ -132,8 +79,11 @@ pubsub.init[]
 / Gap Detection
 / -------------------------------------------------------
 
-/ Field index for fhSeqNo (0-indexed, before TP adds timestamp)
-.tp.idx.tradeSeq:11;   / trade_binance: 12th field
+/ Field index for fhSeqNo - derived from schema (single source of truth).
+/ Note: trade_binance includes tpRecvTimeUtcNs as the last column,
+/ but the FH sends rows without it (TP appends in upd), so the index
+/ here matches the position in the incoming data list.
+.tp.idx.tradeSeq:(cols trade_binance)?`fhSeqNo;
 
 / State: last seen sequence
 .tp.seq.trade:0N;      / null = not yet initialized

@@ -28,24 +28,13 @@ system "g 0";
 / Tables
 / -------------------------------------------------------
 
-/ Trades - kept for historical queries (KX Dashboard)
-trade_binance:([]
-    time:`timestamp$();
-    sym:`symbol$();
-    tradeId:`long$();
-    price:`float$();
-    qty:`float$();
-    buyerIsMaker:`boolean$();
-    exchEventTimeMs:`long$();
-    exchTradeTimeMs:`long$();
-    fhRecvTimeUtcNs:`long$();
-    fhParseUs:`long$();
-    fhSendUs:`long$();
-    fhSeqNo:`long$();
-    tpRecvTimeUtcNs:`long$()
-    );
+\l ../schemas.q
 
-/ Positions from SIG (side: 1=long, -1=short)
+/ Trades - kept for historical queries (KX Dashboard)
+/ Comes from CTP with TP's receive timestamp.
+trade_binance:.schema.extend[.schema.trade; enlist `tpRecvTimeUtcNs];
+
+/ Positions from SIG (side: 1=long, -1=short) - PNL-specific
 positions:([]
     time:`timestamp$();
     sym:`symbol$();
@@ -54,7 +43,7 @@ positions:([]
     tradedPrice:`float$()
     );
 
-/ P&L history
+/ P&L history - PNL-specific
 pnl_history:([]
     time:`timestamp$();
     totalPnL:`float$()

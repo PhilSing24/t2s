@@ -46,3 +46,4 @@ config/*.local.json
 .DS_Store
 Thumbs.db
 kdb/tick/logs/
+*:Zone.Identifier
