@@ -44,4 +44,5 @@ config/*.local.json
 
 # OS
 .DS_Store
-Thumbs.dbkdb/tick/logs/
+Thumbs.db
+kdb/tick/logs/
