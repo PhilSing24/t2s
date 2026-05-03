@@ -1,6 +1,7 @@
 #!/bin/bash
-# run_tests.sh - Run all q tests under tests/test_*.q
-# Each test runs in its own q process. Bash runner aggregates results.
+# run_tests.sh - Run all test files under tests/test_*.{q,sh}
+# .q files run directly with q. .sh files run as bash scripts.
+# Each test file runs in its own process; bash runner aggregates results.
 #
 # Usage (from project root):
 #   ./tests/run_tests.sh
@@ -32,14 +33,13 @@ cd "$PROJECT_ROOT"
 if [[ $# -gt 0 ]]; then
     TESTS=("$@")
 else
-    # Glob can fail if no tests exist; check first
     shopt -s nullglob
-    TESTS=(tests/test_*.q)
+    TESTS=(tests/test_*.q tests/test_*.sh)
     shopt -u nullglob
 fi
 
 if [[ ${#TESTS[@]} -eq 0 ]]; then
-    echo "${YELLOW}No test files found matching tests/test_*.q${NC}"
+    echo "${YELLOW}No test files found matching tests/test_*.{q,sh}${NC}"
     exit 1
 fi
 
@@ -58,9 +58,18 @@ for test_file in "${TESTS[@]}"; do
         continue
     fi
 
-    # Run the test. The q process exits 0/1 via .t.finish[].
-    # Capture output so we can show it on failure.
-    output=$(q "$test_file" 2>&1 < /dev/null)
+    case "$test_file" in
+        *.q)
+            output=$(q "$test_file" 2>&1 < /dev/null)
+            ;;
+        *.sh)
+            output=$(bash "$test_file" 2>&1 < /dev/null)
+            ;;
+        *)
+            echo "${YELLOW}Unknown test type: $test_file${NC}"
+            continue
+            ;;
+    esac
     exit_code=$?
 
     if [[ $exit_code -eq 0 ]]; then

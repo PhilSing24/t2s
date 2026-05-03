@@ -241,131 +241,34 @@ upd:{[tbl;data]
   };
 
 / -------------------------------------------------------
-/ End-of-Day Handler
+/ End-of-Day Helpers (separate functions, no closures over locals)
 / -------------------------------------------------------
 
-endofday:{[]
-  / Closing date = yesterday
-  d:-1 + .z.d;
-  -1"WDB: EOD processing for ",string[d];
-
-  / Capture current TMPSAVE before we reset it
-  closingTmp:TMPSAVE;
-  closingTmpStr:1_string closingTmp;   / strip leading colon for shell
-
-  / Get tables with sym column
-  t:tables`.;
-  t@:where 11h=type each t@\:`sym;
-  -1"WDB: Tables to process: ",", "sv string t;
-
-  / -----------------------------------------------------------
-  / Step 1: Final buffer flush to temp partition
-  / -----------------------------------------------------------
-  flushOk:1b;
-  {[t]
-    if[0 < count value t;
-      cnt:count value t;
-      -1"WDB: Flushing final ",string[t]," (",string[cnt]," rows)";
-      r:@[{[t;tmp]
-        .[` sv tmp,t,`;();,;.Q.en[.wdb.cfg.hdbDir]`. t];
-        1b
-      }[t;closingTmp]; ::; {[t;err] -1 "WDB: ERROR flushing ",string[t]," - ",err; 0b}[t]];
-      if[r;
-        .wdb.stats.rowsWritten+:cnt;
-        @[`.;t;0#];
-      ];
-      if[not r; flushOk:0b];
-    ];
-  } each t;
-
-  if[not flushOk;
-    -1 "WDB: ABORTING EOD - flush failures detected, data preserved in ",string[closingTmp];
-    -1 "WDB: Investigate ",string[closingTmp]," manually before next EOD";
-    :();
+/ Flush one table to TMPSAVE; return 1b on success, 0b on failure.
+/ Reads TMPSAVE and .wdb.cfg.hdbDir as globals (avoids closure-capture issues).
+.wdb.eod.flushTable:{[t]
+  cnt:count value t;
+  if[0 = cnt; :1b];
+  -1 .wdb.eod.msg ("Flushing final "; string t; " ("; string cnt; " rows)");
+  ok:@[{[t]
+    .[` sv TMPSAVE,t,`;();,;.Q.en[.wdb.cfg.hdbDir]`. t];
+    1b
+  }; t; {[t;err] -1 .wdb.eod.msg ("ERROR flushing "; string t; " - "; err); 0b}[t]];
+  if[ok;
+    .wdb.stats.rowsWritten+:cnt;
+    @[`.;t;0#];
   ];
-
-  / -----------------------------------------------------------
-  / Step 2: Pre-flight - verify temp partition exists with data
-  / -----------------------------------------------------------
-  if[() ~ key closingTmp;
-    -1 "WDB: No temp partition to move (no data flushed today) - skipping HDB write";
-    -1 "WDB: This is normal if WDB started after midnight UTC with empty buffers";
-    TMPSAVE::.wdb.getTmpSave .z.d;
-    .wdb.stats.flushCount:0j;
-    .wdb.stats.rowsWritten:0j;
-    .wdb.stats.tradesReceived:0j;
-    .wdb.stats.quotesReceived:0j;
-    .wdb.endofday.resubscribe[];
-    -1"WDB: EOD complete (no data)";
-    :();
-  ];
-
-  / -----------------------------------------------------------
-  / Step 3: Sort on disk by sym, set `p# attribute
-  / -----------------------------------------------------------
-  -1"WDB: Sorting on disk...";
-  sortOk:all {[tmp;t]
-    @[{disksort[` sv x,y,`;`sym;`p#]; 1b}[tmp]; t;
-      {[t;err] -1 "WDB: ERROR sorting ",string[t]," - ",err; 0b}[t]]
-  }[closingTmp;] each t;
-
-  if[not sortOk;
-    -1 "WDB: ABORTING EOD - sort failures, data preserved in ",string[closingTmp];
-    -1 "WDB: Investigate manually; do NOT attempt manual move until sort verified";
-    :();
-  ];
-
-  / -----------------------------------------------------------
-  / Step 4: Move temp partition into HDB (the part that was buggy)
-  / -----------------------------------------------------------
-  / Future hardening: stage to .staging.<date> then atomic rename for crash safety.
-  dest:.Q.par[.wdb.cfg.hdbDir;d;`];
-  destStr:-1_1_string dest;   / strip leading colon and trailing slash
-
-  -1"WDB: Moving ",closingTmpStr," -> ",destStr;
-
-  / Pre-flight: refuse to move if destination already exists
-  if[not () ~ key dest;
-    -1 "WDB: ERROR destination ",destStr," already exists - aborting move";
-    -1 "WDB: Manual intervention required: either delete ",destStr," or merge ",closingTmpStr;
-    :();
-  ];
-
-  / Use mv (universally available) instead of the non-existent r
-  moveOk:@[{[src;dst] system "mv ",src," ",dst; 1b}[closingTmpStr;destStr];
-    ::;
-    {[err] -1 "WDB: ERROR moving partition - ",err; 0b}];
-
-  if[not moveOk;
-    -1 "WDB: ABORTING EOD - move failed, data preserved in ",closingTmpStr;
-    :();
-  ];
-
-  / Post-flight: verify destination now exists and source is gone
-  if[() ~ key dest;
-    -1 "WDB: ERROR move appeared to succeed but destination missing - ",destStr;
-    -1 "WDB: Source state: ",$[() ~ key closingTmp; "also gone (data lost?)"; "still present"];
-    :();
-  ];
-
-  -1"WDB: HDB partition created: ",destStr;
-
-  / -----------------------------------------------------------
-  / Step 5: Reset for new day, resubscribe
-  / -----------------------------------------------------------
-  TMPSAVE::.wdb.getTmpSave .z.d;
-  .wdb.stats.flushCount:0j;
-  .wdb.stats.rowsWritten:0j;
-  .wdb.stats.tradesReceived:0j;
-  .wdb.stats.quotesReceived:0j;
-
-  .wdb.endofday.resubscribe[];
-
-  -1"WDB: EOD complete";
+  ok
   };
 
-/ Resubscribe helper (extracted so it can be called from both EOD paths)
-.wdb.endofday.resubscribe:{[]
+.wdb.eod.sortTable:{[t]
+  ok:@[{[t] disksort[` sv TMPSAVE,t,`;`sym;`p#]; 1b};
+       t;
+       {[t;err] -1 .wdb.eod.msg ("ERROR sorting "; string t; " - "; err); 0b}[t]];
+  ok
+  };
+
+.wdb.eod.resubscribe:{[]
   if[null .wdb.conn.handle; :()];
   @[{[h]
     h(`pubsub.subscribe;`trade_binance;`);
@@ -373,6 +276,93 @@ endofday:{[]
     h(`pubsub.subscribe;`quote_binance;`);
     -1 "WDB: Resubscribed to quote_binance";
   }; .wdb.conn.handle; {[err] -1 "WDB: Resubscription failed - ",err}];
+  };
+
+/ raze-based message builder, robust against KDB-X 5.0 string-of-atom quirk
+.wdb.eod.msg:{[pieces] "WDB: ",raze pieces};
+
+.wdb.eod.resetForNewDay:{[]
+  TMPSAVE::.wdb.getTmpSave .z.d;
+  .wdb.stats.flushCount:0j;
+  .wdb.stats.rowsWritten:0j;
+  .wdb.stats.tradesReceived:0j;
+  .wdb.stats.quotesReceived:0j;
+  };
+
+/ -------------------------------------------------------
+/ End-of-Day Handler
+/ -------------------------------------------------------
+
+endofday:{[]
+  d:-1 + .z.d;
+  -1 .wdb.eod.msg ("EOD processing for "; string d);
+
+  / Capture closing TMPSAVE before any reset
+  closingTmp:TMPSAVE;
+  closingTmpStr:1_string closingTmp;
+
+  / Tables with sym column
+  t:tables`.;
+  t@:where 11h=type each t@\:`sym;
+  -1 .wdb.eod.msg ("Tables to process: "; ", " sv string t);
+
+  / Step 1: flush remaining buffers
+  flushOk:all .wdb.eod.flushTable each t;
+  if[not flushOk;
+    -1 .wdb.eod.msg ("ABORTING EOD - flush failures, data preserved in "; closingTmpStr);
+    :();
+  ];
+
+  / Step 2: pre-flight - did anything actually get written?
+  if[() ~ key closingTmp;
+    -1 "WDB: No temp partition to move (no data flushed today) - skipping HDB write";
+    .wdb.eod.resetForNewDay[];
+    .wdb.eod.resubscribe[];
+    -1 "WDB: EOD complete (no data)";
+    :();
+  ];
+
+  / Step 3: sort on disk by sym, set `p# attribute
+  -1 "WDB: Sorting on disk...";
+  sortOk:all .wdb.eod.sortTable each t;
+  if[not sortOk;
+    -1 .wdb.eod.msg ("ABORTING EOD - sort failures, data preserved in "; closingTmpStr);
+    :();
+  ];
+
+  / Step 4: move temp partition into HDB partition
+  dest:.Q.par[.wdb.cfg.hdbDir;d;`];
+  destStr:-1_1_string dest;
+
+  -1 .wdb.eod.msg ("Moving "; closingTmpStr; " -> "; destStr);
+
+  if[not () ~ key dest;
+    -1 .wdb.eod.msg ("ERROR destination "; destStr; " already exists - aborting move");
+    :();
+  ];
+
+  moveCmd:"mv ",closingTmpStr," ",destStr;
+  moveOk:@[{[cmd] system cmd; 1b};
+           moveCmd;
+           {[err] -1 "WDB: ERROR moving partition - ",err; 0b}];
+
+  if[not moveOk;
+    -1 .wdb.eod.msg ("ABORTING EOD - move failed, data preserved in "; closingTmpStr);
+    :();
+  ];
+
+  if[() ~ key dest;
+    -1 .wdb.eod.msg ("ERROR move appeared to succeed but destination missing - "; destStr);
+    :();
+  ];
+
+  -1 .wdb.eod.msg ("HDB partition created: "; destStr);
+
+  / Step 5: reset for new day, resubscribe
+  .wdb.eod.resetForNewDay[];
+  .wdb.eod.resubscribe[];
+
+  -1 "WDB: EOD complete";
   };
 
 / -------------------------------------------------------
