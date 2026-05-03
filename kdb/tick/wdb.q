@@ -246,54 +246,133 @@ upd:{[tbl;data]
 
 endofday:{[]
   / Closing date = yesterday
-  d:-1 + .z.d; 
+  d:-1 + .z.d;
   -1"WDB: EOD processing for ",string[d];
-  
+
+  / Capture current TMPSAVE before we reset it
+  closingTmp:TMPSAVE;
+  closingTmpStr:1_string closingTmp;   / strip leading colon for shell
+
   / Get tables with sym column
   t:tables`.;
   t@:where 11h=type each t@\:`sym;
-  
   -1"WDB: Tables to process: ",", "sv string t;
-  
-  / Flush remaining data to disk
-  {
-    if[0 < count value x;
-      -1"WDB: Flushing final ",string[x]," (",string[count value x]," rows)";
-      .[` sv TMPSAVE,x,`;();,;.Q.en[.wdb.cfg.hdbDir]`. x];
-      .wdb.stats.rowsWritten+:count value x;
+
+  / -----------------------------------------------------------
+  / Step 1: Final buffer flush to temp partition
+  / -----------------------------------------------------------
+  flushOk:1b;
+  {[t]
+    if[0 < count value t;
+      cnt:count value t;
+      -1"WDB: Flushing final ",string[t]," (",string[cnt]," rows)";
+      r:@[{[t;tmp]
+        .[` sv tmp,t,`;();,;.Q.en[.wdb.cfg.hdbDir]`. t];
+        1b
+      }[t;closingTmp]; ::; {[t;err] -1 "WDB: ERROR flushing ",string[t]," - ",err; 0b}[t]];
+      if[r;
+        .wdb.stats.rowsWritten+:cnt;
+        @[`.;t;0#];
+      ];
+      if[not r; flushOk:0b];
     ];
-    @[`.;x;0#];
   } each t;
-  
-  / Sort on disk by sym and set `p# attribute
+
+  if[not flushOk;
+    -1 "WDB: ABORTING EOD - flush failures detected, data preserved in ",string[closingTmp];
+    -1 "WDB: Investigate ",string[closingTmp]," manually before next EOD";
+    :();
+  ];
+
+  / -----------------------------------------------------------
+  / Step 2: Pre-flight - verify temp partition exists with data
+  / -----------------------------------------------------------
+  if[() ~ key closingTmp;
+    -1 "WDB: No temp partition to move (no data flushed today) - skipping HDB write";
+    -1 "WDB: This is normal if WDB started after midnight UTC with empty buffers";
+    TMPSAVE::.wdb.getTmpSave .z.d;
+    .wdb.stats.flushCount:0j;
+    .wdb.stats.rowsWritten:0j;
+    .wdb.stats.tradesReceived:0j;
+    .wdb.stats.quotesReceived:0j;
+    .wdb.endofday.resubscribe[];
+    -1"WDB: EOD complete (no data)";
+    :();
+  ];
+
+  / -----------------------------------------------------------
+  / Step 3: Sort on disk by sym, set `p# attribute
+  / -----------------------------------------------------------
   -1"WDB: Sorting on disk...";
-  {disksort[` sv TMPSAVE,x,`;`sym;`p#]} each t;
-  
-  / Move from tmp to HDB partition
-  -1"WDB: Moving to HDB partition...";
+  sortOk:all {[tmp;t]
+    @[{disksort[` sv x,y,`;`sym;`p#]; 1b}[tmp]; t;
+      {[t;err] -1 "WDB: ERROR sorting ",string[t]," - ",err; 0b}[t]]
+  }[closingTmp;] each t;
+
+  if[not sortOk;
+    -1 "WDB: ABORTING EOD - sort failures, data preserved in ",string[closingTmp];
+    -1 "WDB: Investigate manually; do NOT attempt manual move until sort verified";
+    :();
+  ];
+
+  / -----------------------------------------------------------
+  / Step 4: Move temp partition into HDB (the part that was buggy)
+  / -----------------------------------------------------------
+  / Future hardening: stage to .staging.<date> then atomic rename for crash safety.
   dest:.Q.par[.wdb.cfg.hdbDir;d;`];
-  system"r ",(1_string TMPSAVE)," ",-1_1_string dest;
-  
-  / Reset TMPSAVE for new day which is current day
+  destStr:-1_1_string dest;   / strip leading colon and trailing slash
+
+  -1"WDB: Moving ",closingTmpStr," -> ",destStr;
+
+  / Pre-flight: refuse to move if destination already exists
+  if[not () ~ key dest;
+    -1 "WDB: ERROR destination ",destStr," already exists - aborting move";
+    -1 "WDB: Manual intervention required: either delete ",destStr," or merge ",closingTmpStr;
+    :();
+  ];
+
+  / Use mv (universally available) instead of the non-existent r
+  moveOk:@[{[src;dst] system "mv ",src," ",dst; 1b}[closingTmpStr;destStr];
+    ::;
+    {[err] -1 "WDB: ERROR moving partition - ",err; 0b}];
+
+  if[not moveOk;
+    -1 "WDB: ABORTING EOD - move failed, data preserved in ",closingTmpStr;
+    :();
+  ];
+
+  / Post-flight: verify destination now exists and source is gone
+  if[() ~ key dest;
+    -1 "WDB: ERROR move appeared to succeed but destination missing - ",destStr;
+    -1 "WDB: Source state: ",$[() ~ key closingTmp; "also gone (data lost?)"; "still present"];
+    :();
+  ];
+
+  -1"WDB: HDB partition created: ",destStr;
+
+  / -----------------------------------------------------------
+  / Step 5: Reset for new day, resubscribe
+  / -----------------------------------------------------------
   TMPSAVE::.wdb.getTmpSave .z.d;
-  
-  / Reset statistics for new day
   .wdb.stats.flushCount:0j;
   .wdb.stats.rowsWritten:0j;
   .wdb.stats.tradesReceived:0j;
   .wdb.stats.quotesReceived:0j;
 
-  / RESUBSCRIBE - pubsub subscription was cleared by callendofday
-  if[not null .wdb.conn.handle;
-    @[{[h]
-      h(`pubsub.subscribe;`trade_binance;`);
-      -1 "WDB: Resubscribed to trade_binance";
-      h(`pubsub.subscribe;`quote_binance;`);
-      -1 "WDB: Resubscribed to quote_binance";
-    }; .wdb.conn.handle; {[err] -1 "WDB: Resubscription failed - ",err}];
-  ];
-  
+  .wdb.endofday.resubscribe[];
+
   -1"WDB: EOD complete";
+  };
+
+/ Resubscribe helper (extracted so it can be called from both EOD paths)
+.wdb.endofday.resubscribe:{[]
+  if[null .wdb.conn.handle; :()];
+  @[{[h]
+    h(`pubsub.subscribe;`trade_binance;`);
+    -1 "WDB: Resubscribed to trade_binance";
+    h(`pubsub.subscribe;`quote_binance;`);
+    -1 "WDB: Resubscribed to quote_binance";
+  }; .wdb.conn.handle; {[err] -1 "WDB: Resubscription failed - ",err}];
   };
 
 / -------------------------------------------------------
