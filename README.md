@@ -72,7 +72,7 @@ t2s/
 │   │   ├── init.q
 │   │   └── pubsub.q
 │   └── utils/                # Operational tooling
-│       ├── binanceLoader.q   # Historical data loader
+│       ├── tradeLoader.q     # Historical trade loader (single-date or date range, interactive or scripted)
 │       ├── hdbUtils.q        # HDB switching, queries
 │       └── logmgr.q          # Durability log management
 ├── tests/                    # Test suite (bash + q + C++)
@@ -210,13 +210,24 @@ Import into KX Dashboards and point each panel at the appropriate process port.
 
 The historical side of the project supports offline analysis and ML research against partitioned trade data.
 
-**Loading historical data.** `kdb/utils/binanceLoader.q` downloads daily trade ZIPs from `data.binance.vision` and loads them into a date-partitioned HDB at `hdb_binancedata/`. Paths are read from `BINANCE_DOWNLOAD_DIR` and `HDB_BINANCE_DIR` environment variables (with relative-path fallbacks), so the loader is portable across machines:
+**Loading historical data.** `kdb/utils/tradeLoader.q` downloads daily trade ZIPs from `data.binance.vision` and loads them into a date-partitioned HDB at the path defined by `HDB_BINANCE_DIR`. Paths come from `BINANCE_DOWNLOAD_DIR` and `HDB_BINANCE_DIR` (set in the Runtime Paths section above) with relative-path fallbacks. Two ways to use it:
 
 ```bash
-export BINANCE_DOWNLOAD_DIR=/path/to/binance-downloads/
-export HDB_BINANCE_DIR=/path/to/hdb_binancedata
-q kdb/utils/binanceLoader.q
+# Interactive: defines functions, drops into REPL
+q kdb/utils/tradeLoader.q
 ```
+
+```q
+downloadAndLoad[2026.01.17; `BTCUSDT`ETHUSDT`SOLUSDT]
+downloadAndLoadRange[2026.01.10; 2026.01.20; `BTCUSDT`ETHUSDT]
+```
+
+```bash
+# Scripted: runs the range non-interactively, exits when done
+q kdb/utils/tradeLoader.q -range 2026.01.10 2026.01.20 BTCUSDT,ETHUSDT
+```
+
+Range mode skips dates whose partition already exists (so backfills are idempotent), polite-sleeps between downloads to respect Binance rate limits, continues on per-date failures, and prints a summary of loaded/skipped/failed dates at the end.
 
 **Querying the HDB.** `kdb/utils/hdbUtils.q` provides switch-and-query helpers:
 
