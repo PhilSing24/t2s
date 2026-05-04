@@ -1,7 +1,8 @@
 #!/bin/bash
-# run_tests.sh - Run all test files under tests/test_*.{q,sh}
-# .q files run directly with q. .sh files run as bash scripts.
-# Each test file runs in its own process; bash runner aggregates results.
+# run_tests.sh - Run all test files under tests/test_*.{q,sh} and
+# compiled test binaries under build/test_*.
+# .q runs with q. .sh runs with bash. Bare executables run directly.
+# Each test runs in its own process; bash runner aggregates results.
 #
 # Usage (from project root):
 #   ./tests/run_tests.sh
@@ -9,7 +10,7 @@
 #
 # Exit code: 0 if all pass, 1 if any fail.
 
-set -u  # error on unset vars (but NOT -e: we want to continue on test failure)
+set -u
 
 # Colors (disabled if not on a TTY)
 if [[ -t 1 ]]; then
@@ -35,11 +36,17 @@ if [[ $# -gt 0 ]]; then
 else
     shopt -s nullglob
     TESTS=(tests/test_*.q tests/test_*.sh)
+    # Also pick up any compiled test binary at build/test_*
+    for bin in build/test_*; do
+        if [[ -x "$bin" && -f "$bin" ]]; then
+            TESTS+=("$bin")
+        fi
+    done
     shopt -u nullglob
 fi
 
 if [[ ${#TESTS[@]} -eq 0 ]]; then
-    echo "${YELLOW}No test files found matching tests/test_*.{q,sh}${NC}"
+    echo "${YELLOW}No test files found matching tests/test_*.{q,sh} or build/test_*${NC}"
     exit 1
 fi
 
@@ -64,6 +71,9 @@ for test_file in "${TESTS[@]}"; do
             ;;
         *.sh)
             output=$(bash "$test_file" 2>&1 < /dev/null)
+            ;;
+        build/test_*)
+            output=$("$test_file" 2>&1 < /dev/null)
             ;;
         *)
             echo "${YELLOW}Unknown test type: $test_file${NC}"

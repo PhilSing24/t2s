@@ -14,6 +14,7 @@ find_package(spdlog REQUIRED)
 # Include directories
 set(INCLUDE_DIR ${PROJECT_SOURCE_DIR}/cpp/include)
 set(KDB_DIR ${PROJECT_SOURCE_DIR}/cpp/third_party/kdb)
+set(CATCH2_DIR ${PROJECT_SOURCE_DIR}/cpp/third_party/catch2)
 
 # Common libraries linked by every binary that uses the FH classes
 set(COMMON_LIBS
@@ -27,10 +28,6 @@ set(COMMON_LIBS
 
 # ---------------------------------------------------------------------------
 # Static library: feed handler classes
-#
-# Contains the implementations of TradeFeedHandler and QuoteFeedHandler
-# (and their dependencies). Both production binaries link this lib, and
-# future test binaries can link it too without dragging in a main().
 # ---------------------------------------------------------------------------
 add_library(t2s_fh STATIC
     cpp/src/trade_feed_handler.cpp
@@ -61,3 +58,29 @@ add_executable(quote_feed_handler
 )
 
 target_link_libraries(quote_feed_handler PRIVATE t2s_fh)
+
+# ---------------------------------------------------------------------------
+# Test binary: order book unit tests
+#
+# Built only when Catch2 amalgamation files are present at
+# cpp/third_party/catch2/. See tests/README or the project README for
+# download instructions.
+#
+# OrderBookManager is header-only, so this test does not link the
+# t2s_fh lib - it just includes the header directly.
+# ---------------------------------------------------------------------------
+if(EXISTS ${CATCH2_DIR}/catch_amalgamated.cpp)
+    add_executable(test_order_book
+        tests/test_order_book.cpp
+        ${CATCH2_DIR}/catch_amalgamated.cpp
+    )
+
+    target_include_directories(test_order_book PRIVATE
+        ${INCLUDE_DIR}
+        ${CATCH2_DIR}
+    )
+else()
+    message(STATUS "Catch2 not found at ${CATCH2_DIR} - skipping test_order_book target")
+    message(STATUS "  Download catch_amalgamated.hpp/.cpp from")
+    message(STATUS "  https://github.com/catchorg/Catch2/releases (v3.x)")
+endif()
