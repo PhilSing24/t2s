@@ -19,7 +19,7 @@
 //
 // USAGE - NON-INTERACTIVE (script mode)
 //   Args: -range START END SYMS [DELAY]
-//     START, END  YYYY.MM.DD format (q date literal)
+//     START, END  YYYY.MM.DD format
 //     SYMS        comma-separated, uppercase (e.g. BTCUSDT,ETHUSDT)
 //     DELAY       optional seconds between dates (default 2)
 //
@@ -32,6 +32,11 @@
 //   downloadAndLoadRangeOpts[start; end; syms; opts]   range with opts dict
 //   downloadOnly[date; syms]                      fetch CSVs, no kdb load
 //   loadAndSave[date; syms]                       load existing CSVs only
+//
+// NOTE on KDB-X 5.0 string concat
+//   In KDB-X 5.0, `string` of an atom returns an enlist'd char list, which
+//   breaks chained `,` concatenation due to right-associative parsing.
+//   Throughout this file we use `raze (a;b;c;...)` which flattens reliably.
 // ============================================================================
 
 // ----------------------------------------------------------------------------
@@ -52,16 +57,19 @@
 formatDate: {[dt] "-" sv "." vs string dt};
 
 buildUrl: {[sym; dt]
-  s: string sym;
-  d: formatDate dt;
-  .cfg.baseUrl, s, "/", s, "-trades-", d, ".zip"
+  raze (.cfg.baseUrl; string sym; "/"; string sym; "-trades-"; formatDate dt; ".zip")
  };
 
-zipPath: {[sym; dt] .cfg.downloadDir, (string sym), "-trades-", (formatDate dt), ".zip"};
-csvPath: {[sym; dt] .cfg.downloadDir, (string sym), "-trades-", (formatDate dt), ".csv"};
+zipPath: {[sym; dt]
+  raze (.cfg.downloadDir; string sym; "-trades-"; formatDate dt; ".zip")
+ };
+
+csvPath: {[sym; dt]
+  raze (.cfg.downloadDir; string sym; "-trades-"; formatDate dt; ".csv")
+ };
 
 partitionExists: {[dt]
-  p: (1 _ string .cfg.partitionDir), "/", string dt;
+  p: raze ((1 _ string .cfg.partitionDir); "/"; string dt);
   not () ~ key hsym `$p
  };
 
@@ -77,10 +85,10 @@ anyFileExists: {[syms; dt]
 downloadZip: {[sym; dt]
   url: buildUrl[sym; dt];
   zp: zipPath[sym; dt];
-  cmd: "curl -s -f -o \"", zp, "\" \"", url, "\"";
+  cmd: raze ("curl -s -f -o \""; zp; "\" \""; url; "\"");
   system cmd;
   if[() ~ key hsym `$zp;
-    -1 "ERROR: Failed to download ", url;
+    -1 raze ("ERROR: Failed to download "; url);
     :0b
   ];
   1b
@@ -88,7 +96,7 @@ downloadZip: {[sym; dt]
 
 extractAndClean: {[sym; dt]
   zp: zipPath[sym; dt];
-  system "unzip -o ", zp, " -d ", .cfg.downloadDir;
+  system raze ("unzip -o "; zp; " -d "; .cfg.downloadDir);
   hdel hsym `$zp;
  };
 
@@ -115,13 +123,11 @@ loadTrades: {[filepath]
 // Per-date primitives (used by both single and range workflows)
 // ----------------------------------------------------------------------------
 
-// Download all symbol ZIPs for one date and extract.
-// Returns 1b on success, 0b on any download failure.
 .dl.fetchOneDate: {[dt; syms]
-  -1 "  Downloading ", (string count syms), " files for ", string dt, "...";
+  -1 raze ("  Downloading "; string count syms; " files for "; string dt; "...");
   results: downloadZip[; dt] each syms;
   if[not all results;
-    -1 "  ERROR: Some downloads failed for ", string dt;
+    -1 raze ("  ERROR: Some downloads failed for "; string dt);
     :0b
   ];
   -1 "  Extracting...";
@@ -129,22 +135,18 @@ loadTrades: {[filepath]
   1b
  };
 
-// Load CSVs for one date, save partition. Returns row count, or 0N on failure.
 .dl.loadOneDate: {[dt; syms]
   paths: {[s; d] hsym `$(csvPath[s; d])}[; dt] each syms;
   missing: paths where () ~/: key each paths;
   if[count missing;
-    -1 "  ERROR: Missing CSV files: ", ", " sv string missing;
+    -1 raze ("  ERROR: Missing CSV files: "; ", " sv string missing);
     :0N
   ];
   -1 "  Loading CSVs...";
-  // Local var to avoid leaking `trade` into the global namespace, which
-  // would cause stale state between range iterations.
   t: raze loadTrades each paths;
   t: `sym`exchTradeTs xasc t;
   -1 "  Saving partition...";
   .z.zd: (17; 5; 1);
-  // .Q.dpft requires the table at a top-level name; assign and clean up.
   `trade set t;
   .Q.dpft[.cfg.partitionDir; dt; `sym; `trade];
   delete trade from `.;
@@ -157,38 +159,38 @@ loadTrades: {[filepath]
 
 downloadAndLoad: {[dt; syms]
   if[partitionExists dt;
-    -1 "ERROR: Partition already exists for ", string dt;
+    -1 raze ("ERROR: Partition already exists for "; string dt);
     :()
   ];
   if[anyFileExists[syms; dt];
-    -1 "ERROR: CSV file(s) already exist for ", string dt;
+    -1 raze ("ERROR: CSV file(s) already exist for "; string dt);
     :()
   ];
   if[not .dl.fetchOneDate[dt; syms]; :()];
   n: .dl.loadOneDate[dt; syms];
   if[null n; :()];
-  -1 "Done. Loaded ", (string n), " trades for ", string dt;
+  -1 raze ("Done. Loaded "; string n; " trades for "; string dt);
   n
  };
 
 downloadOnly: {[dt; syms]
   if[anyFileExists[syms; dt];
-    -1 "ERROR: CSV file(s) already exist for ", string dt;
+    -1 raze ("ERROR: CSV file(s) already exist for "; string dt);
     :()
   ];
   if[not .dl.fetchOneDate[dt; syms]; :()];
-  -1 "Done. CSVs saved to ", .cfg.downloadDir;
+  -1 raze ("Done. CSVs saved to "; .cfg.downloadDir);
   csvPath[; dt] each syms
  };
 
 loadAndSave: {[dt; syms]
   if[partitionExists dt;
-    -1 "ERROR: Partition already exists for ", string dt;
+    -1 raze ("ERROR: Partition already exists for "; string dt);
     :()
   ];
   n: .dl.loadOneDate[dt; syms];
   if[null n; :()];
-  -1 "Done. Loaded ", (string n), " trades for ", string dt;
+  -1 raze ("Done. Loaded "; string n; " trades for "; string dt);
   n
  };
 
@@ -196,19 +198,17 @@ loadAndSave: {[dt; syms]
 // Date-range public API
 // ----------------------------------------------------------------------------
 
-// Download and load a contiguous date range. Per-date failure does not abort
-// the range; the loop tracks loaded/skipped/failed and prints a summary.
 .dl.range: {[startDt; endDt; syms; opts]
   if[startDt > endDt;
-    -1 "ERROR: startDate (", string startDt, ") > endDate (", string endDt, ")";
+    -1 raze ("ERROR: startDate ("; string startDt; ") > endDate ("; string endDt; ")");
     :()
   ];
   defaults: `delaySec`skipExisting!(.cfg.defaultDelaySec; .cfg.defaultSkipExisting);
   opts: defaults, opts;
 
   dates: startDt + til 1 + `int$endDt - startDt;
-  -1 "Range: ", string[startDt], " to ", string[endDt], " (", string[count dates], " dates)";
-  -1 "Symbols: ", " " sv string syms;
+  -1 raze ("Range: "; string startDt; " to "; string endDt; " ("; string count dates; " dates)");
+  -1 raze ("Symbols: "; " " sv string syms);
   -1 "";
 
   ok: ();
@@ -219,12 +219,11 @@ loadAndSave: {[dt; syms]
   i: 0;
   while[i < count dates;
     dt: dates i;
-    -1 "[", string[dt], "] (", string[i+1], "/", string[count dates], ")";
+    -1 raze ("["; string dt; "] ("; string i+1; "/"; string count dates; ")");
 
     skipDate: 0b;
     failedDate: 0b;
 
-    // Skip-existing handling
     if[partitionExists dt;
       $[opts `skipExisting;
         [-1 "  Partition exists - skipping"; skipped: skipped, dt; skipDate: 1b];
@@ -233,9 +232,8 @@ loadAndSave: {[dt; syms]
     ];
 
     if[not skipDate;
-      // Clean leftover CSVs from prior failed runs
       if[anyFileExists[syms; dt];
-        -1 "  Cleaning leftover CSVs for ", string dt;
+        -1 raze ("  Cleaning leftover CSVs for "; string dt);
         paths: {[s; d] hsym `$(csvPath[s; d])}[; dt] each syms;
         {[p] if[not () ~ key p; hdel p]} each paths;
       ];
@@ -252,17 +250,15 @@ loadAndSave: {[dt; syms]
           failedDate: 1b;
         ];
         if[not failedDate;
-          -1 "  Loaded ", string[n], " trades";
+          -1 raze ("  Loaded "; string n; " trades");
           ok: ok, dt;
           totalRows+: n;
         ];
       ];
     ];
 
-    // Polite delay before next download (skip after a skipped date and after
-    // the last date).
     if[(not skipDate) & (i < (count dates) - 1);
-      system "sleep ", string opts `delaySec;
+      system raze ("sleep "; string opts `delaySec);
     ];
     i+: 1;
   ];
@@ -270,10 +266,12 @@ loadAndSave: {[dt; syms]
   -1 "";
   -1 "============================================";
   -1 "Range complete";
-  -1 "  Loaded:  ", string[count ok], " dates, ", string[totalRows], " trades total";
-  -1 "  Skipped: ", string[count skipped], " dates";
-  -1 "  Failed:  ", string[count failed], " dates";
-  if[count failed; -1 "  Failed dates: ", " " sv string failed];
+  -1 raze ("  Loaded:  "; string count ok; " dates, "; string totalRows; " trades total");
+  -1 raze ("  Skipped: "; string count skipped; " dates");
+  -1 raze ("  Failed:  "; string count failed; " dates");
+  if[count failed;
+    -1 raze ("  Failed dates: "; " " sv string failed)
+  ];
   -1 "============================================";
   `loaded`skipped`failed`totalRows!(ok; skipped; failed; totalRows)
  };
@@ -287,10 +285,9 @@ downloadAndLoadRangeOpts: {[startDt; endDt; syms; opts]
  };
 
 // ----------------------------------------------------------------------------
-// Non-interactive entry: parse argv, run a command, exit.
+// Non-interactive entry
 // ----------------------------------------------------------------------------
 
-// Validate "YYYY.MM.DD" string and return the parsed date or 0Nd on failure.
 .dl.parseDate: {[s]
   if[not 10 = count s; :0Nd];
   if[not all s[(4 7)] = "."; :0Nd];
@@ -341,14 +338,13 @@ downloadAndLoadRangeOpts: {[startDt; endDt; syms; opts]
   if[4 = count args;
     raw: args 3;
     if[not all raw in .Q.n;
-      -2 "ERROR: DELAY must be a non-negative integer, got: ", raw;
+      -2 raze ("ERROR: DELAY must be a non-negative integer, got: "; raw);
       exit 1
     ];
     delaySec: "J"$raw;
   ];
 
   result: .dl.range[startDt; endDt; syms; `delaySec`skipExisting!(delaySec;1b)];
-  // Exit non-zero if any date failed
   $[count result `failed; exit 2; exit 0]
  };
 
@@ -357,14 +353,12 @@ downloadAndLoadRangeOpts: {[startDt; endDt; syms; opts]
 // ----------------------------------------------------------------------------
 
 if[count .z.x;
-  // Argument-driven: run and exit
   .dl.runFromArgs .z.x;
  ];
 
-// Interactive: print banner, define functions, return to REPL
 -1 "tradeLoader loaded.";
--1 "  Download dir:  ", .cfg.downloadDir;
--1 "  Partition dir: ", 1 _ string .cfg.partitionDir;
+-1 raze ("  Download dir:  "; .cfg.downloadDir);
+-1 raze ("  Partition dir: "; 1 _ string .cfg.partitionDir);
 -1 "";
 -1 "Usage:";
 -1 "  downloadAndLoad[2026.01.17; `BTCUSDT`ETHUSDT`SOLUSDT]";
