@@ -8,7 +8,9 @@
 
 .wdb.cfg.port:5011;
 .wdb.cfg.tpPort:5010;
-.wdb.cfg.hdbDir:`$":../hdb";
+/ HDB directory: read from env var, fall back to a relative path.
+/ Override at launch with T2S_HDB_DIR=/path/to/hdb (recommended: absolute path).
+.wdb.cfg.hdbDir:hsym `$ $[count v:getenv `T2S_HDB_DIR; v; "../hdb"];
 .wdb.cfg.maxRows:50000;
 
 / Enable compression for HDB writes
@@ -40,9 +42,12 @@ system "g 0";
 
 / -------------------------------------------------------
 / TMPSAVE - temporary directory for intraday writes
+/ Read tmp dir prefix from env var, fall back to a relative path.
+/ Override with T2S_TMP_DIR=/path/to/tmp/ (trailing slash; absolute recommended).
 / -------------------------------------------------------
 
-.wdb.getTmpSave:{`$":../tmp.",string[.z.i],".",string x}
+.wdb.tmpDir:$[count v:getenv `T2S_TMP_DIR; v; "../"];
+.wdb.getTmpSave:{`$":",.wdb.tmpDir,"tmp.",string[.z.i],".",string x}
 TMPSAVE:.wdb.getTmpSave .z.d
 
 / -------------------------------------------------------
