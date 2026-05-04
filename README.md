@@ -26,7 +26,7 @@ Binance Depth Stream ──WS──► Quote FH ──┘            │
                                (queries)    (analytics)   (latency)  (P&L)
 ```
 
-Each downstream process auto-reconnects with exponential backoff. The TP writes a durability log per day; subscribers can replay it on restart.
+Each downstream process auto-reconnects with exponential backoff. The TP writes a durability log per day; subscribers can replay it on restart. Feed handler TLS connections to Binance are fully verified (peer cert + hostname), use TCP keepalive plus a 30s WebSocket idle timeout to detect dead connections within ~90s, and TP tracks per-stream sequence-number gaps so missed messages are surfaced rather than silent.
 
 ## Components
 
@@ -75,18 +75,17 @@ t2s/
 │       ├── binanceLoader.q   # Historical data loader
 │       ├── hdbUtils.q        # HDB switching, queries
 │       └── logmgr.q          # Durability log management
-├── tests/                    # Test suite (bash + q)
-│   ├── run_tests.sh          # Test runner — discovers tests/test_*.{q,sh}
+├── tests/                    # Test suite (bash + q + C++)
+│   ├── run_tests.sh          # Test runner - dispatches .q, .sh, and build/test_* binaries
 │   ├── t_lib.q               # Shared assertion + sandbox helpers
 │   ├── test_schemas.q        # Schema integrity assertions
 │   ├── test_smoke.sh         # Per-process load + .health[] smoke test
 │   ├── test_wdb_eod.sh       # End-to-end WDB EOD persistence test
-│   └── wdb_eod_body.q        # Q assertions invoked by test_wdb_eod.sh
+│   ├── wdb_eod_body.q        # Q assertions invoked by test_wdb_eod.sh
+│   └── test_order_book.cpp   # C++ unit tests for OrderBookManager (Catch2)
 ├── config/                   # Feed handler JSON configs
 ├── dashboards/               # KX Dashboards (Analytics, DataFlow, FH, Trades/Quotes)
-├── hdb/                      # Live HDB partitions (gitignored, populated at EOD)
-├── tmp/                      # WDB intraday writedown directory (gitignored)
-├── hdb_binancedata/          # Historical research HDB (gitignored)
+├── hdb_binancedata/          # Partitioned historical trades (gitignored)
 ├── notebooks/                # Jupyter research notebooks
 ├── markdown_docs/            # Design notes, guides
 ├── CMakeLists.txt
@@ -111,26 +110,6 @@ cmake --build build
 ```
 
 This produces two binaries: `trade_feed_handler` and `quote_feed_handler`.
-
-## Runtime Paths
-
-The pipeline reads several filesystem paths from environment variables. Set these in your shell profile (e.g. `~/.bashrc`):
-
-```bash
-# Live pipeline
-export T2S_HDB_DIR=/home/philippe/t2s/hdb            # WDB writes EOD partitions here
-export T2S_TMP_DIR=/home/philippe/t2s/tmp/           # WDB intraday writedown (note trailing slash)
-
-# Research / historical data loader (binanceLoader.q)
-export BINANCE_DOWNLOAD_DIR=/home/philippe/BinanceMarketData/
-export HDB_BINANCE_DIR=/home/philippe/t2s/hdb_binancedata
-```
-
-All four variables have relative-path fallbacks for portability, but absolute paths are recommended to avoid working-directory ambiguity. The directories `hdb/` and `tmp/` should exist before starting the pipeline:
-
-```bash
-mkdir -p ~/t2s/hdb ~/t2s/tmp
-```
 
 ## Run
 
@@ -181,11 +160,12 @@ Run the full suite from the project root:
 ./tests/run_tests.sh
 ```
 
-The runner discovers `tests/test_*.q` and `tests/test_*.sh` files and reports pass/fail per file. Current coverage:
+The runner discovers `tests/test_*.q`, `tests/test_*.sh`, and any compiled binaries at `build/test_*`, then reports pass/fail per file. Current coverage:
 
 - **`test_schemas.q`** — schemas.q column counts, types, and derived index positions. Catches accidental schema changes that would break the rest of the pipeline.
 - **`test_smoke.sh`** — starts each q process (tp, ctp, rdb, wdb, sig, pnl, rte, tel) in isolation against test ports, asserts `.health[]` returns a sane response. Catches load-time errors and missing `.health[]` interface.
 - **`test_wdb_eod.sh`** — full TP→WDB integration test: publishes synthetic data, forces EOD, verifies a partition lands in the sandbox HDB with correct row counts. Validates the EOD persistence path end-to-end.
+- **`build/test_order_book`** — C++ unit tests (Catch2) for `OrderBookManager`: state machine (INIT→SYNCING→VALID→INVALID), snapshot truncation/padding, delta semantics (insert/update/delete via qty=0), sequence-gap detection, multi-symbol independence. Built when `cpp/third_party/catch2/catch_amalgamated.{hpp,cpp}` are present (download from https://github.com/catchorg/Catch2/releases).
 
 Tests run on isolated ports (production + 10000) so they're safe to run while the live pipeline is up. Sandbox state goes under `tests/sandbox/` and is auto-cleaned on success, preserved on failure for inspection.
 
@@ -230,9 +210,11 @@ Import into KX Dashboards and point each panel at the appropriate process port.
 
 The historical side of the project supports offline analysis and ML research against partitioned trade data.
 
-**Loading historical data.** `kdb/utils/binanceLoader.q` downloads daily trade ZIPs from `data.binance.vision` and loads them into a date-partitioned HDB at the path defined by `HDB_BINANCE_DIR`:
+**Loading historical data.** `kdb/utils/binanceLoader.q` downloads daily trade ZIPs from `data.binance.vision` and loads them into a date-partitioned HDB at `hdb_binancedata/`. Paths are read from `BINANCE_DOWNLOAD_DIR` and `HDB_BINANCE_DIR` environment variables (with relative-path fallbacks), so the loader is portable across machines:
 
 ```bash
+export BINANCE_DOWNLOAD_DIR=/path/to/binance-downloads/
+export HDB_BINANCE_DIR=/path/to/hdb_binancedata
 q kdb/utils/binanceLoader.q
 ```
 
@@ -246,8 +228,6 @@ q kdb/utils/binanceLoader.q
 .hdb.rowCounts[`trade; 2026.01.14; 2026.01.20]
 .hdb.loadBySym[`trade; `BTCUSDT; 2026.01.14; 2026.01.20]
 ```
-
-The live HDB at `T2S_HDB_DIR` (populated by WDB at EOD) and the research HDB at `HDB_BINANCE_DIR` (populated by `binanceLoader.q`) are independent stores with their own `sym` files. Use `.hdb.use` to switch between them.
 
 **ML feature pipeline (in progress).** `kdb/ml/` contains an in-progress implementation of feature engineering primitives from López de Prado's *Advances in Financial Machine Learning*. Currently includes dollar-imbalance bars (`afml.q`, `features.q`) — see `markdown_docs/dollar_imbalance_bars_guide.md` for design notes. Expect breaking changes.
 
@@ -263,9 +243,9 @@ The live HDB at `T2S_HDB_DIR` (populated by WDB at EOD) and the research HDB at 
 
 The ML pipeline (`kdb/ml/`) is actively developed and APIs may change. The live tick pipeline is the stable, primary deliverable.
 
-C++ feed handlers do not yet have unit tests. The order book reconciliation logic in `OrderBookManager` is exercised end-to-end in production but lacks isolated test coverage. This is the next planned testing milestone.
+The quote feed handler fetches REST snapshots synchronously from inside the WebSocket read loop. With many symbols all needing snapshots after a reconnect, this can cause the FH to fall behind on delta processing. Async snapshot fetching is planned.
 
-C++ feed handlers do not currently detect dead websocket connections quickly when the host system suspends. TCP keepalive and read-deadline hardening is on the backlog.
+C++ unit tests currently cover `OrderBookManager` (state machine, snapshot/delta semantics, gap detection). Feed handler classes don't yet have isolated tests; they're exercised end-to-end via the live pipeline.
 
 ## License
 
