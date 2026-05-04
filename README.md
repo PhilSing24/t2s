@@ -18,11 +18,11 @@ Binance Depth Stream ──WS──► Quote FH ──┘            │
            WDB:5011          SIG:5012            MLE:5032          CTP:5014
            (HDB writer)      (RSI signals)       (ML features)     (1s batches)
                                 │ positions                            │
-                                └────────────────────────────► ────────┤
+                                └──────────────────────────────────────┤
                                                                        │
-                                  ┌─────────────┬─────────────┬────────┘
-                                  ▼             ▼             ▼          ▼
-                               RDB:5017     RTE:5015      TEL:5016   PNL:5018
+                                  ┌─────────────┬─────────────┬────────┤
+                                  ▼             ▼             ▼        ▼
+                               RDB:5017     RTE:5015      TEL:5016  PNL:5018
                                (queries)    (analytics)   (latency)  (P&L)
 ```
 
