@@ -84,7 +84,9 @@ t2s/
 │   └── wdb_eod_body.q        # Q assertions invoked by test_wdb_eod.sh
 ├── config/                   # Feed handler JSON configs
 ├── dashboards/               # KX Dashboards (Analytics, DataFlow, FH, Trades/Quotes)
-├── hdb_binancedata/          # Partitioned historical trades (gitignored)
+├── hdb/                      # Live HDB partitions (gitignored, populated at EOD)
+├── tmp/                      # WDB intraday writedown directory (gitignored)
+├── hdb_binancedata/          # Historical research HDB (gitignored)
 ├── notebooks/                # Jupyter research notebooks
 ├── markdown_docs/            # Design notes, guides
 ├── CMakeLists.txt
@@ -109,6 +111,26 @@ cmake --build build
 ```
 
 This produces two binaries: `trade_feed_handler` and `quote_feed_handler`.
+
+## Runtime Paths
+
+The pipeline reads several filesystem paths from environment variables. Set these in your shell profile (e.g. `~/.bashrc`):
+
+```bash
+# Live pipeline
+export T2S_HDB_DIR=/home/philippe/t2s/hdb            # WDB writes EOD partitions here
+export T2S_TMP_DIR=/home/philippe/t2s/tmp/           # WDB intraday writedown (note trailing slash)
+
+# Research / historical data loader (binanceLoader.q)
+export BINANCE_DOWNLOAD_DIR=/home/philippe/BinanceMarketData/
+export HDB_BINANCE_DIR=/home/philippe/t2s/hdb_binancedata
+```
+
+All four variables have relative-path fallbacks for portability, but absolute paths are recommended to avoid working-directory ambiguity. The directories `hdb/` and `tmp/` should exist before starting the pipeline:
+
+```bash
+mkdir -p ~/t2s/hdb ~/t2s/tmp
+```
 
 ## Run
 
@@ -208,11 +230,9 @@ Import into KX Dashboards and point each panel at the appropriate process port.
 
 The historical side of the project supports offline analysis and ML research against partitioned trade data.
 
-**Loading historical data.** `kdb/utils/binanceLoader.q` downloads daily trade ZIPs from `data.binance.vision` and loads them into a date-partitioned HDB at `hdb_binancedata/`. Paths are read from `BINANCE_DOWNLOAD_DIR` and `HDB_BINANCE_DIR` environment variables (with relative-path fallbacks), so the loader is portable across machines:
+**Loading historical data.** `kdb/utils/binanceLoader.q` downloads daily trade ZIPs from `data.binance.vision` and loads them into a date-partitioned HDB at the path defined by `HDB_BINANCE_DIR`:
 
 ```bash
-export BINANCE_DOWNLOAD_DIR=/path/to/binance-downloads/
-export HDB_BINANCE_DIR=/path/to/hdb_binancedata
 q kdb/utils/binanceLoader.q
 ```
 
@@ -226,6 +246,8 @@ q kdb/utils/binanceLoader.q
 .hdb.rowCounts[`trade; 2026.01.14; 2026.01.20]
 .hdb.loadBySym[`trade; `BTCUSDT; 2026.01.14; 2026.01.20]
 ```
+
+The live HDB at `T2S_HDB_DIR` (populated by WDB at EOD) and the research HDB at `HDB_BINANCE_DIR` (populated by `binanceLoader.q`) are independent stores with their own `sym` files. Use `.hdb.use` to switch between them.
 
 **ML feature pipeline (in progress).** `kdb/ml/` contains an in-progress implementation of feature engineering primitives from López de Prado's *Advances in Financial Machine Learning*. Currently includes dollar-imbalance bars (`afml.q`, `features.q`) — see `markdown_docs/dollar_imbalance_bars_guide.md` for design notes. Expect breaking changes.
 
@@ -242,6 +264,8 @@ q kdb/utils/binanceLoader.q
 The ML pipeline (`kdb/ml/`) is actively developed and APIs may change. The live tick pipeline is the stable, primary deliverable.
 
 C++ feed handlers do not yet have unit tests. The order book reconciliation logic in `OrderBookManager` is exercised end-to-end in production but lacks isolated test coverage. This is the next planned testing milestone.
+
+C++ feed handlers do not currently detect dead websocket connections quickly when the host system suspends. TCP keepalive and read-deadline hardening is on the backlog.
 
 ## License
 
