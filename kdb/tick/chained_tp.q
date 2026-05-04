@@ -161,10 +161,14 @@ pubsub.init[]
 / -------------------------------------------------------
 
 upd:{[tbl;data]
+  / Counter logic: if data is a table (type 98h, e.g. replayed batch),
+  / count rows. Otherwise it's a single row (a generic list, type 0h),
+  / count as 1. The previous check used 0h which incorrectly matched
+  / single rows and inflated counters by the number of fields per row.
   $[tbl=`trade_binance;
-    [`.ctp.buf.trade insert data;.ctp.stats.tradeCount+:$[0h=type data;count data;1]];
+    [`.ctp.buf.trade insert data;.ctp.stats.tradeCount+:$[98h=type data;count data;1]];
     tbl=`quote_binance;
-    [`.ctp.buf.quote insert data;.ctp.stats.quoteCount+:$[0h=type data;count data;1]];
+    [`.ctp.buf.quote insert data;.ctp.stats.quoteCount+:$[98h=type data;count data;1]];
     tbl=`health_feed_handler;
     [pubsub.publish[`health_feed_handler;data];.ctp.stats.healthCount+:1];
     tbl=`positions;

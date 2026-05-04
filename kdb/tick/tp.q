@@ -171,7 +171,7 @@ upd:{[tbl;data]
 
 / Compact status as dictionary (for programmatic use)
 .tp.statusDict:{[]
-  `port`uptime`logChunks`trades`quotes`tradeGaps`tradeMissed!(.tp.cfg.port;`second$.z.p-.proc.startTime;.tp.logCount;count trade_binance;count quote_binance;.tp.gaps.trade;.tp.missed.trade)
+  `port`uptime`logChunks`tradeGaps`tradeMissed!(.tp.cfg.port;`second$.z.p-.proc.startTime;.tp.logCount;.tp.gaps.trade;.tp.missed.trade)
   };
 
 / Log status (unchanged for compatibility)
