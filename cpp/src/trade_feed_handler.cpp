@@ -8,10 +8,8 @@
 #include <rapidjson/document.h>
 #include <spdlog/spdlog.h>
 
-#include <iostream>
 #include <chrono>
 #include <thread>
-#include <csignal>
 
 // ============================================================================
 // CONSTRUCTION / DESTRUCTION
@@ -346,73 +344,3 @@ void TradeFeedHandler::publishHealth() {
         uptimeSec, msgsReceived_, msgsPublished_, connState_);
 }
 
-// ============================================================================
-// CONFIGURATION
-// ============================================================================
-
-#include "config.hpp"
-#include "logger.hpp"
-
-static const std::string DEFAULT_CONFIG_PATH = "config/trade_feed_handler.json";
-
-// ============================================================================
-// SIGNAL HANDLING
-// ============================================================================
-
-// Global pointer for signal handler access
-static TradeFeedHandler* g_handler = nullptr;
-
-static void signalHandler(int signum) {
-    const char* sigName = (signum == SIGINT) ? "SIGINT" : 
-                          (signum == SIGTERM) ? "SIGTERM" : "UNKNOWN";
-    spdlog::info("Received {} ({})", sigName, signum);
-    
-    if (g_handler) {
-        g_handler->stop();
-    }
-}
-
-// ============================================================================
-// MAIN
-// ============================================================================
-
-int main(int argc, char* argv[]) {
-    std::cout << "=== Binance Trade Feed Handler ===\n";
-    
-    // Determine config path (from argument or default)
-    std::string configPath = DEFAULT_CONFIG_PATH;
-    if (argc > 1) {
-        configPath = argv[1];
-    }
-    
-    // Load configuration
-    FeedHandlerConfig config;
-    if (!config.load(configPath)) {
-        std::cerr << "Failed to load config, exiting\n";
-        return 1;
-    }
-    
-    if (config.symbols.empty()) {
-        std::cerr << "No symbols configured, exiting\n";
-        return 1;
-    }
-    
-    // Initialize logger
-    initLogger("Trade FH", config.logLevel, config.logFile);
-    
-    // Install signal handlers
-    std::signal(SIGINT, signalHandler);
-    std::signal(SIGTERM, signalHandler);
-    spdlog::info("Signal handlers installed (Ctrl+C to shutdown)");
-    
-    // Create and run handler
-    TradeFeedHandler handler(config.symbols, config.tpHost, config.tpPort);
-    g_handler = &handler;
-    
-    handler.run();
-    
-    g_handler = nullptr;
-    spdlog::info("Exiting");
-    shutdownLogger();
-    return 0;
-}
