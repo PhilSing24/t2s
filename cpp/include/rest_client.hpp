@@ -17,6 +17,7 @@
 #include <boost/asio/connect.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/ssl/context.hpp>
+#include <boost/asio/ssl/host_name_verification.hpp>
 
 #include <rapidjson/document.h>
 
@@ -50,7 +51,11 @@ struct SnapshotData {
 class RestClient {
 public:
     RestClient() : ctx_(ssl::context::tlsv12_client) {
+        // Enable certificate validation. Without set_verify_mode the
+        // default (verify_none) accepts any cert, which means encryption
+        // works but there's no proof we're talking to Binance.
         ctx_.set_default_verify_paths();
+        ctx_.set_verify_mode(ssl::verify_peer);
     }
 
     /**
@@ -80,13 +85,18 @@ public:
             tcp::resolver resolver(ioc);
             beast::ssl_stream<beast::tcp_stream> stream(ioc, ctx_);
 
-            // Set SNI hostname
+            // Set SNI hostname (required for Binance TLS)
             if (!SSL_set_tlsext_host_name(stream.native_handle(), host.c_str())) {
                 throw beast::system_error(
                     beast::error_code(static_cast<int>(::ERR_get_error()),
                                       net::error::get_ssl_category()),
                     "Failed to set SNI hostname");
             }
+
+            // Verify the cert's CN/SAN matches the hostname we asked to connect to.
+            // Together with set_verify_mode(verify_peer) in the constructor, this
+            // makes a MITM with any valid TLS cert fail the handshake.
+            stream.set_verify_callback(ssl::host_name_verification(host));
 
             // Resolve and connect
             auto const results = resolver.resolve(host, port);

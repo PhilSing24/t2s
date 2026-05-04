@@ -22,6 +22,7 @@
 #include <boost/asio/connect.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/ssl/context.hpp>
+#include <boost/asio/ssl/host_name_verification.hpp>
 
 #include <string>
 #include <vector>

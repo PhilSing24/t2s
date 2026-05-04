@@ -165,10 +165,21 @@ void QuoteFeedHandler::runWebSocketLoop() {
     net::io_context ioc;
     ssl::context ctx{ssl::context::tlsv12_client};
     ctx.set_default_verify_paths();
+    ctx.set_verify_mode(ssl::verify_peer);
     
     // Resolve and connect
     tcp::resolver resolver{ioc};
     websocket::stream<beast::ssl_stream<tcp::socket>> ws{ioc, ctx};
+    
+    // Set SNI hostname so Binance serves the right cert and so we can
+    // verify the cert's CN/SAN matches what we asked to connect to.
+    if (!SSL_set_tlsext_host_name(ws.next_layer().native_handle(), BINANCE_HOST)) {
+        throw beast::system_error(
+            beast::error_code(static_cast<int>(::ERR_get_error()),
+                              net::error::get_ssl_category()),
+            "Failed to set SNI hostname");
+    }
+    ws.next_layer().set_verify_callback(ssl::host_name_verification(BINANCE_HOST));
     
     auto const results = resolver.resolve(BINANCE_HOST, BINANCE_PORT);
     net::connect(ws.next_layer().next_layer(), results.begin(), results.end());
