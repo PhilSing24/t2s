@@ -423,10 +423,15 @@ void QuoteFeedHandler::requestSnapshot(int symIdx) {
 // ============================================================================
 
 void QuoteFeedHandler::maybePublish(int symIdx, long long fhRecvTimeUtcNs) {
-    ++fhSeqNo_;
-    L5Quote quote = bookMgr_->getL5(symIdx, fhRecvTimeUtcNs, fhSeqNo_);
-    
+    // Build a candidate quote with a tentative seq, then only commit
+    // (increment fhSeqNo, publish) if shouldPublish accepts it.
+    // Bumping fhSeqNo unconditionally caused TP to see "gaps" whenever
+    // shouldPublish filtered an unchanged L5.
+    L5Quote quote = bookMgr_->getL5(symIdx, fhRecvTimeUtcNs, fhSeqNo_ + 1);
+
     if (bookMgr_->shouldPublish(symIdx, quote)) {
+        ++fhSeqNo_;
+        quote.fhSeqNo = fhSeqNo_;
         publishL5(quote);
         bookMgr_->recordPublish(symIdx, quote);
     }

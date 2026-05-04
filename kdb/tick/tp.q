@@ -76,46 +76,50 @@ pubsub.init[]
   };
 
 / -------------------------------------------------------
-/ Gap Detection
+/ Gap Detection (per-table, parameterized)
 / -------------------------------------------------------
 
-/ Field index for fhSeqNo - derived from schema (single source of truth).
-/ Note: trade_binance includes tpRecvTimeUtcNs as the last column,
-/ but the FH sends rows without it (TP appends in upd), so the index
-/ here matches the position in the incoming data list.
+/ Field indices for fhSeqNo - derived from the schema so they stay
+/ correct if columns are reordered. The FH sends rows without
+/ tpRecvTimeUtcNs (TP appends it in upd), so these indices match
+/ the position in the incoming data list.
 .tp.idx.tradeSeq:(cols trade_binance)?`fhSeqNo;
+.tp.idx.quoteSeq:(cols quote_binance)?`fhSeqNo;
 
-/ State: last seen sequence
-.tp.seq.trade:0N;      / null = not yet initialized
+/ Per-table sequence state. Null = not yet initialized.
+.tp.seq.trade:0N;
+.tp.seq.quote:0N;
 
-/ Counters: total gaps and total missed messages
-.tp.gaps.trade:0j;     / number of gap events
-.tp.missed.trade:0j;   / total messages missed
-
-/ FH restart counter (sequence went backwards)
+/ Per-table counters: gap events, missed messages, FH restarts.
+.tp.gaps.trade:0j;
+.tp.gaps.quote:0j;
+.tp.missed.trade:0j;
+.tp.missed.quote:0j;
 .tp.restarts.trade:0j;
+.tp.restarts.quote:0j;
 
-/ Check trade sequence and update gap counters
-/ Returns: 1b if OK, 0b if gap detected (still processes message)
-.tp.checkSeq:{[seq]
-  lastSeq:.tp.seq.trade;
+/ Check incoming sequence number against last-seen for the given table.
+/ side: `trade or `quote
+/ Returns: 1b if OK, 0b if gap detected (still processes message).
+.tp.checkSeq:{[side;seq]
+  lastSeq:.tp.seq side;
   / First message - initialize
-  if[null lastSeq; .tp.seq.trade:seq; :1b];
+  if[null lastSeq; .tp.seq[side]:seq; :1b];
   / Normal case - sequential
-  if[seq = lastSeq + 1; .tp.seq.trade:seq; :1b];
+  if[seq = lastSeq + 1; .tp.seq[side]:seq; :1b];
   / Gap detected - missed messages
   if[seq > lastSeq + 1;
     missed:seq - lastSeq - 1;
-    .tp.gaps.trade+:1;
-    .tp.missed.trade+:missed;
-    -1 "TP: Trade gap - expected ",string[lastSeq+1]," got ",string[seq]," (missed ",string[missed],")";
-    .tp.seq.trade:seq;
+    .tp.gaps[side]+:1;
+    .tp.missed[side]+:missed;
+    -1 "TP: ",string[side]," gap - expected ",string[lastSeq+1]," got ",string[seq]," (missed ",string[missed],")";
+    .tp.seq[side]:seq;
     :0b
   ];
   / Sequence went backwards or duplicate - FH restart
-  .tp.restarts.trade+:1;
-  -1 "TP: Trade FH restart detected - seq reset from ",string[lastSeq]," to ",string[seq];
-  .tp.seq.trade:seq;
+  .tp.restarts[side]+:1;
+  -1 "TP: ",string[side]," FH restart detected - seq reset from ",string[lastSeq]," to ",string[seq];
+  .tp.seq[side]:seq;
   1b
   };
 
@@ -132,8 +136,9 @@ upd:{[tbl;data]
     :();
   ];
   
-  / Check sequence for gap detection (trades only)
-  if[tbl=`trade_binance; .tp.checkSeq[data .tp.idx.tradeSeq]];
+  / Check sequence for gap detection (trades and quotes have separate seq spaces)
+  if[tbl=`trade_binance; .tp.checkSeq[`trade;data .tp.idx.tradeSeq]];
+  if[tbl=`quote_binance; .tp.checkSeq[`quote;data .tp.idx.quoteSeq]];
   
   / Add TP receive timestamp
   data:data,.tp.tsToNs[.z.p];
@@ -152,7 +157,8 @@ upd:{[tbl;data]
 
 / Standardized health check (consistent across all processes)
 .health:{[]
-  st:$[.tp.gaps.trade > 0; `degraded; `ok];
+  / Degraded if either trade or quote stream has seen gaps.
+  st:$[any (.tp.gaps.trade;.tp.gaps.quote) > 0; `degraded; `ok];
   `process`port`uptime`status`memMB`msgsIn`msgsOut!(
     `tp;
     .tp.cfg.port;
@@ -165,13 +171,13 @@ upd:{[tbl;data]
 
 .tp.status:{[]
   flip `metric`value!(
-    `port`uptime`logFile`logChunks`logSizeMB`tradeGaps`tradeMissed`tradeRestarts`lastTradeSeq;
-    (.tp.cfg.port;`second$.z.p-.proc.startTime;.tp.logFile;.tp.logCount;0.01*`long$100*(@[hcount;.tp.logFile;0j])%1e6;.tp.gaps.trade;.tp.missed.trade;.tp.restarts.trade;.tp.seq.trade))
+    `port`uptime`logFile`logChunks`logSizeMB`tradeGaps`tradeMissed`tradeRestarts`lastTradeSeq`quoteGaps`quoteMissed`quoteRestarts`lastQuoteSeq;
+    (.tp.cfg.port;`second$.z.p-.proc.startTime;.tp.logFile;.tp.logCount;0.01*`long$100*(@[hcount;.tp.logFile;0j])%1e6;.tp.gaps.trade;.tp.missed.trade;.tp.restarts.trade;.tp.seq.trade;.tp.gaps.quote;.tp.missed.quote;.tp.restarts.quote;.tp.seq.quote))
   };
 
 / Compact status as dictionary (for programmatic use)
 .tp.statusDict:{[]
-  `port`uptime`logChunks`tradeGaps`tradeMissed!(.tp.cfg.port;`second$.z.p-.proc.startTime;.tp.logCount;.tp.gaps.trade;.tp.missed.trade)
+  `port`uptime`logChunks`tradeGaps`tradeMissed`quoteGaps`quoteMissed!(.tp.cfg.port;`second$.z.p-.proc.startTime;.tp.logCount;.tp.gaps.trade;.tp.missed.trade;.tp.gaps.quote;.tp.missed.quote)
   };
 
 / Log status (unchanged for compatibility)
@@ -184,17 +190,20 @@ upd:{[tbl;data]
 / -------------------------------------------------------
 
 .tp.endOfDay:{[]
-  -1"TP: EOD - chunks:",string[.tp.logCount]," tradeGaps:",string[.tp.gaps.trade];
+  -1"TP: EOD - chunks:",string[.tp.logCount]," tradeGaps:",string[.tp.gaps.trade]," quoteGaps:",string[.tp.gaps.quote];
   pubsub.callendofday[];
   .tp.rotate[];
   delete from`trade_binance;
   delete from`quote_binance;
   delete from`health_feed_handler;
   .tp.logCount:0j;
-  / Reset gap counters for new day
+  / Reset gap counters for new day (both sides)
   .tp.gaps.trade:0j;
+  .tp.gaps.quote:0j;
   .tp.missed.trade:0j;
+  .tp.missed.quote:0j;
   .tp.restarts.trade:0j;
+  .tp.restarts.quote:0j;
   / Keep last seq (FH doesn't reset on EOD)
   };
 
