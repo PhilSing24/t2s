@@ -7,6 +7,7 @@
  */
 
 #include "quote_feed_handler.hpp"
+#include "socket_utils.hpp"
 
 #include <rapidjson/document.h>
 #include <spdlog/spdlog.h>
@@ -183,13 +184,30 @@ void QuoteFeedHandler::runWebSocketLoop() {
     
     auto const results = resolver.resolve(BINANCE_HOST, BINANCE_PORT);
     net::connect(ws.next_layer().next_layer(), results.begin(), results.end());
-    
+
+    // Configure aggressive TCP keepalive so dead connections (e.g. after
+    // host suspend or upstream LB drop) are detected within ~90 seconds
+    // instead of relying on Linux kernel defaults (2 hours before first probe).
+    t2s::applyKeepalive(ws.next_layer().next_layer());
+
     // TLS handshake
     ws.next_layer().handshake(ssl::stream_base::client);
     
     // WebSocket handshake
     ws.handshake(BINANCE_HOST, target);
-    
+
+    // Configure idle timeout: if no message arrives for 30s, ws.read()
+    // throws, which the outer try/catch treats as a disconnect and
+    // triggers reconnect. Combined with keep_alive_pings (Beast sends
+    // ws ping frames during quiet periods), this catches hung connections
+    // that pass TCP keepalive but stop delivering data.
+    {
+        auto timeout = websocket::stream_base::timeout::suggested(beast::role_type::client);
+        timeout.idle_timeout = std::chrono::seconds(30);
+        timeout.keep_alive_pings = true;
+        ws.set_option(timeout);
+    }
+
     spdlog::info("Connected to Binance ({} symbols)", symbolsLower_.size());
     connState_ = "connected";
     
