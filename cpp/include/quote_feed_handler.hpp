@@ -40,6 +40,7 @@
 
 #include "order_book_manager.hpp"
 #include "rest_client.hpp"
+#include "snapshot_worker.hpp"
 
 extern "C" {
 #include "k.h"
@@ -171,6 +172,16 @@ private:
     
     /// REST client for snapshots
     RestClient restClient_;
+
+    /// Async worker that performs snapshot fetches off the WebSocket thread.
+    /// The handler enqueues requests and polls for results at the start of
+    /// each WebSocket loop iteration. See snapshot_worker.hpp for design.
+    std::unique_ptr<t2s::SnapshotWorker<RestClient>> snapshotWorker_;
+
+    /// Latest request id submitted per symbol. Used to discard stale results
+    /// (e.g. if the symbol was reset and re-requested while a previous
+    /// snapshot was still in flight).
+    std::vector<std::uint64_t> latestRequestId_;
     
     // ========================================================================
     // HEALTH TRACKING
@@ -219,8 +230,16 @@ private:
     /// Handle delta based on current book state
     void handleDelta(int symIdx, const BufferedDelta& delta, long long fhRecvTimeUtcNs);
     
-    /// Request and apply snapshot for a symbol
+    /// Enqueue an async snapshot request via the SnapshotWorker. Returns
+    /// immediately; the WebSocket loop continues reading deltas (which the
+    /// book manager buffers) until the snapshot result lands.
     void requestSnapshot(int symIdx);
+
+    /// Drain any completed snapshot results from the worker and apply them.
+    /// Stale results (where a newer request has been submitted for the same
+    /// symbol) are discarded. Called at the start of each WebSocket loop
+    /// iteration.
+    void applySnapshotResults();
     
     /// Maybe publish L5 for a symbol
     void maybePublish(int symIdx, long long fhRecvTimeUtcNs);

@@ -79,6 +79,24 @@ if(EXISTS ${CATCH2_DIR}/catch_amalgamated.cpp)
         ${INCLUDE_DIR}
         ${CATCH2_DIR}
     )
+
+    add_executable(test_snapshot_worker
+        tests/test_snapshot_worker.cpp
+        ${CATCH2_DIR}/catch_amalgamated.cpp
+    )
+
+    target_include_directories(test_snapshot_worker PRIVATE
+        ${INCLUDE_DIR}
+        ${CATCH2_DIR}
+    )
+
+    target_link_libraries(test_snapshot_worker PRIVATE
+        Threads::Threads
+        spdlog::spdlog
+        Boost::system
+        OpenSSL::SSL
+        OpenSSL::Crypto
+    )
 else()
     message(STATUS "Catch2 not found at ${CATCH2_DIR} - skipping test_order_book target")
     message(STATUS "  Download catch_amalgamated.hpp/.cpp from")

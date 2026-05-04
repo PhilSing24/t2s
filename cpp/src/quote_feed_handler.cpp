@@ -39,6 +39,15 @@ QuoteFeedHandler::QuoteFeedHandler(const std::vector<std::string>& symbols,
     
     // Create book manager with uppercase symbols
     bookMgr_ = std::make_unique<OrderBookManager>(symbolsUpper_);
+
+    // Per-symbol "latest request id" tracking, used to discard stale
+    // snapshot results when the symbol gets reset and re-requested.
+    latestRequestId_.assign(symbolsUpper_.size(), 0);
+
+    // Async snapshot worker. Starts a background thread that pulls from
+    // an internal queue and calls restClient_.fetchSnapshot. Constructed
+    // here so it's available immediately; thread is started in run().
+    snapshotWorker_ = std::make_unique<t2s::SnapshotWorker<RestClient>>(restClient_);
 }
 
 QuoteFeedHandler::~QuoteFeedHandler() {
@@ -55,10 +64,16 @@ QuoteFeedHandler::~QuoteFeedHandler() {
 void QuoteFeedHandler::run() {
     spdlog::info("Starting L5 Quote Feed Handler...");
     spdlog::info("Symbols: {}", fmt::join(symbolsLower_, " "));
-    
+
+    // Spin up the async snapshot worker thread. This must be running
+    // before runWebSocketLoop() can enqueue requests.
+    snapshotWorker_->start();
+    spdlog::info("Snapshot worker thread started");
+
     // Connect to tickerplant
     if (!connectToTP()) {
         spdlog::warn("Shutdown before TP connection established");
+        snapshotWorker_->stop();
         return;
     }
     
@@ -81,6 +96,9 @@ void QuoteFeedHandler::run() {
     
     // Cleanup
     spdlog::info("Cleaning up...");
+    snapshotWorker_->stop();
+    spdlog::info("Snapshot worker stopped");
+
     if (tpHandle_ > 0) {
         kclose(tpHandle_);
         tpHandle_ = -1;
@@ -219,6 +237,12 @@ void QuoteFeedHandler::runWebSocketLoop() {
     
     // Message loop
     while (running_) {
+        // Drain any snapshot results from the async worker and apply them.
+        // Done at the top of the loop so the book is fresh before we read
+        // the next delta. Cheap when nothing is pending (just a mutex grab
+        // on an empty deque).
+        applySnapshotResults();
+
         beast::flat_buffer buffer;
         ws.read(buffer);
         
@@ -373,48 +397,72 @@ void QuoteFeedHandler::handleDelta(int symIdx, const BufferedDelta& delta, long 
 }
 
 // ============================================================================
-// SNAPSHOT HANDLING
+// SNAPSHOT HANDLING (async via SnapshotWorker)
 // ============================================================================
 
 void QuoteFeedHandler::requestSnapshot(int symIdx) {
     const std::string& sym = bookMgr_->getSymbol(symIdx);
-    spdlog::info("Requesting snapshot for {}", sym);
-    
+
+    // Mark requested at the book level so the existing INIT-state guard
+    // (needsSnapshot returns false while one is in flight) prevents us
+    // from spamming requests for the same symbol.
     bookMgr_->setSnapshotRequested(symIdx, true);
-    
-    // Fetch snapshot (blocking)
-    SnapshotData snapshot = restClient_.fetchSnapshot(sym, SNAPSHOT_DEPTH);
-    
-    if (!snapshot.success) {
-        spdlog::error("Snapshot failed for {}: {}", sym, snapshot.error);
-        bookMgr_->invalidate(symIdx, "Snapshot fetch failed");
-        return;
-    }
-    
-    // Apply snapshot
-    bookMgr_->applySnapshot(symIdx, snapshot.lastUpdateId, snapshot.bids, snapshot.asks);
-    
-    spdlog::debug("{} snapshot applied, lastUpdateId={}", sym, snapshot.lastUpdateId);
-    
-    // Apply buffered deltas
-    auto& buffer = bookMgr_->getDeltaBuffer(symIdx);
-    spdlog::debug("Applying {} buffered deltas for {}", buffer.size(), sym);
-    
-    while (!buffer.empty()) {
-        const auto& delta = buffer.front();
-        if (!bookMgr_->applyDelta(symIdx, delta.firstUpdateId, delta.finalUpdateId,
-                                  delta.bids, delta.asks, delta.eventTimeMs)) {
-            spdlog::warn("{} failed during buffered delta replay", sym);
-            break;
+
+    // Enqueue and remember the request id. When the result eventually
+    // arrives, applySnapshotResults compares its id against this one and
+    // discards anything older - this happens if we reset and re-requested
+    // while a previous fetch was still in flight.
+    std::uint64_t id = snapshotWorker_->enqueueRequest(symIdx, sym);
+    latestRequestId_[symIdx] = id;
+
+    spdlog::info("Snapshot enqueued for {} (id {}, queue depth: {})",
+                 sym, id, snapshotWorker_->pendingRequests());
+}
+
+void QuoteFeedHandler::applySnapshotResults() {
+    auto results = snapshotWorker_->drainResults();
+    for (auto& r : results) {
+        const std::string& sym = r.sym;
+        int symIdx = r.symIdx;
+
+        // Stale-detection: drop results whose request id is older than the
+        // latest one we've issued for this symbol. Bumped on every reset
+        // path that re-enqueues, so we only ever apply the freshest result.
+        if (r.requestId < latestRequestId_[symIdx]) {
+            spdlog::debug("Discarding stale snapshot result for {} (id {} < {})",
+                          sym, r.requestId, latestRequestId_[symIdx]);
+            continue;
         }
-        buffer.pop_front();
-    }
-    
-    // Clear remaining buffer
-    buffer.clear();
-    
-    if (bookMgr_->isValid(symIdx)) {
-        spdlog::info("{} is now VALID", sym);
+
+        if (!r.data.success) {
+            spdlog::error("Snapshot fetch failed for {}: {}", sym, r.data.error);
+            bookMgr_->setSnapshotRequested(symIdx, false);
+            bookMgr_->invalidate(symIdx, "Snapshot fetch failed");
+            continue;
+        }
+
+        // Apply snapshot
+        bookMgr_->applySnapshot(symIdx, r.data.lastUpdateId, r.data.bids, r.data.asks);
+        bookMgr_->setSnapshotRequested(symIdx, false);
+        spdlog::debug("{} snapshot applied, lastUpdateId={}", sym, r.data.lastUpdateId);
+
+        // Apply buffered deltas that arrived during the fetch
+        auto& buffer = bookMgr_->getDeltaBuffer(symIdx);
+        spdlog::debug("Applying {} buffered deltas for {}", buffer.size(), sym);
+        while (!buffer.empty()) {
+            const auto& delta = buffer.front();
+            if (!bookMgr_->applyDelta(symIdx, delta.firstUpdateId, delta.finalUpdateId,
+                                      delta.bids, delta.asks, delta.eventTimeMs)) {
+                spdlog::warn("{} failed during buffered delta replay", sym);
+                break;
+            }
+            buffer.pop_front();
+        }
+        buffer.clear();
+
+        if (bookMgr_->isValid(symIdx)) {
+            spdlog::info("{} is now VALID", sym);
+        }
     }
 }
 
