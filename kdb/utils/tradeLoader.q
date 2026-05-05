@@ -86,9 +86,18 @@ downloadZip: {[sym; dt]
   url: buildUrl[sym; dt];
   zp: zipPath[sym; dt];
   cmd: raze ("curl -s -f -o \""; zp; "\" \""; url; "\"");
-  system cmd;
+  / curl -f returns non-zero on HTTP errors (e.g. 404 for not-yet-published
+  / archives), which makes q's `system` throw 'os. Wrap in protected eval
+  / so we can return false cleanly and let the caller continue.
+  ok: @[{system x; 1b}; cmd; {[err] 0b}];
+  if[not ok;
+    -1 raze ("ERROR: Failed to download "; url; " (file may not be published yet)");
+    / Clean up any zero-byte file curl may have left behind
+    if[not () ~ key hsym `$zp; hdel hsym `$zp];
+    :0b
+  ];
   if[() ~ key hsym `$zp;
-    -1 raze ("ERROR: Failed to download "; url);
+    -1 raze ("ERROR: Download succeeded but file missing: "; zp);
     :0b
   ];
   1b
