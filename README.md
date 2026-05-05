@@ -1,8 +1,8 @@
 # Tick to Signal
 
-A real-time Binance market data pipeline built with C++ and kdb+/KDB-X. Dual feed handlers (trades + L5 order book) stream into a tickerplant-fanout architecture with batched analytics, real-time signals, P&L tracking, and durability-log replay. A historical data store (`hdb_binancedata/`) supports offline research and an in-progress ML feature pipeline based on López de Prado's *Advances in Financial Machine Learning*.
+A real-time Binance market data pipeline built with C++ and KDB-X. Dual feed handlers (trades + L5 order book) stream into a tickerplant-fanout architecture with batched analytics, RSI-based signal generation, simulated P&L tracking, and durability-log replay (WDB recovers from disconnects). A historical data store (`hdb_binancedata/`) supports offline research and feature-engineering primitives drawn from López de Prado's *Advances in Financial Machine Learning*.
 
-Inspired by *Building Real-Time Event-Driven KDB-X Systems* by Data Intellect.
+Architecture patterns originally inspired by *Building Real-Time Event-Driven KDB-X Systems* by Data Intellect; extended with TLS-verified WS/REST, TCP keepalive and dead-connection detection, per-stream sequence-gap surfacing, async snapshot fetching, replay-on-reconnect, and a multi-language test suite.
 
 ## Architecture
 
