@@ -50,8 +50,22 @@ Each downstream process auto-reconnects with exponential backoff. The TP writes 
 t2s/
 ├── cpp/                      # Feed handlers (C++)
 │   ├── include/              # Public headers
-│   ├── src/                  # Implementations + main()s
-│   └── third_party/kdb/      # k.h
+│   │   ├── config.hpp                # JSON config loader for FH binaries
+│   │   ├── logger.hpp                # spdlog setup helper
+│   │   ├── order_book_manager.hpp    # L5 book reconstruction + state machine
+│   │   ├── quote_feed_handler.hpp    # Quote FH class declaration
+│   │   ├── rest_client.hpp           # HTTPS client for Binance REST (snapshots)
+│   │   ├── snapshot_worker.hpp       # Async snapshot fetcher (worker thread + bounded queue)
+│   │   ├── socket_utils.hpp          # TCP keepalive helper
+│   │   └── trade_feed_handler.hpp    # Trade FH class declaration
+│   ├── src/                  # Implementations + main entry points
+│   │   ├── quote_feed_handler.cpp    # Quote FH class implementation
+│   │   ├── quote_fh_main.cpp         # Quote FH binary entry point
+│   │   ├── trade_feed_handler.cpp    # Trade FH class implementation
+│   │   └── trade_fh_main.cpp         # Trade FH binary entry point
+│   └── third_party/
+│       ├── catch2/                   # Vendored Catch2 v3 amalgamation (C++ tests)
+│       └── kdb/                      # k.h and c.o for kdb+ IPC
 ├── kdb/
 │   ├── schemas.q             # Shared table schemas (single source of truth)
 │   ├── tick/                 # Tickerplant chain
@@ -73,6 +87,7 @@ t2s/
 │   │   └── pubsub.q          # subscribe/publish primitives + utilities (sub clear, EOD/EOP broadcast)
 │   └── utils/                # Operational tooling
 │       ├── tradeLoader.q     # Historical trade loader (single-date or date range, interactive or scripted)
+│       ├── fundingLoader.q   # Funding rate loader (incremental, paginated, splayed)
 │       ├── hdbUtils.q        # HDB switching, queries
 │       └── logmgr.q          # Durability log management
 ├── tests/                    # Test suite (bash + q + C++)
@@ -82,14 +97,18 @@ t2s/
 │   ├── test_smoke.sh         # Per-process load + .health[] smoke test
 │   ├── test_wdb_eod.sh       # End-to-end WDB EOD persistence test
 │   ├── wdb_eod_body.q        # Q assertions invoked by test_wdb_eod.sh
-│   └── test_order_book.cpp   # C++ unit tests for OrderBookManager (Catch2)
+│   ├── test_order_book.cpp   # C++ unit tests for OrderBookManager (Catch2)
+│   └── test_snapshot_worker.cpp  # C++ unit tests for SnapshotWorker (Catch2)
 ├── config/                   # Feed handler JSON configs
 ├── dashboards/               # KX Dashboards (Analytics, DataFlow, FH, Trades/Quotes)
-├── hdb_binancedata/          # Partitioned historical trades (gitignored)
+├── hdb/                      # Live HDB partitions (gitignored, populated at EOD)
+├── tmp/                      # WDB intraday writedown directory (gitignored)
+├── hdb_binancedata/          # Historical research HDB (gitignored)
 ├── notebooks/                # Jupyter research notebooks
 ├── markdown_docs/            # Design notes, guides
 ├── CMakeLists.txt
 ├── install_kdb.sh
+├── check_eod.sh              # Post-midnight verification script (HDB partition + WDB logs)
 ├── start.sh                  # Start all (tmux)
 └── stop.sh                   # Stop all
 ```
