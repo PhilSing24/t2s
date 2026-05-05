@@ -290,4 +290,4 @@ WDB replay-on-reconnect (Phase 4) reads only the current day's durability log. D
 
 ## License
 
-Private repository.
+MIT — see [LICENSE](LICENSE) file.
