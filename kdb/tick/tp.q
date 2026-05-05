@@ -267,6 +267,11 @@ upd:{[tbl;data]
   $[null s; 0; s]
  };
 
+/ Current monotonic tpSeqNo. Used by subscribers at reconnect time to
+/ capture a clean cutoff between replay (everything <= cutoff) and live
+/ (everything > cutoff), so the replay/live boundary is well-defined.
+.tp.currentSeqNo:{[] .tp.tpSeqNo}
+
 / Replay support: read the durability log and return rows for `tbl`
 / with tpSeqNo >= fromSeq. Used by subscribers (WDB) on reconnect to
 / catch up on data missed during disconnect before subscribing live.
@@ -470,6 +475,7 @@ system "t 1000";   / Check every 1 second
 -1"Phase 4 API (acks/replay):";
 -1"  .tp.lastAccepted[`trade]   / Highest fhSeqNo accepted for trades";
 -1"  .tp.lastAccepted[`quote]   / Highest fhSeqNo accepted for quotes";
+-1"  .tp.currentSeqNo[]         / Current monotonic tpSeqNo (replay cutoff)";
 -1"  .tp.replayFrom[`trade_binance; fromSeq]   / Replay subset from log";
 -1"";
 -1"Operations:";

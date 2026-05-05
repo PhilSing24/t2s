@@ -41,6 +41,41 @@ system "g 0";
 .wdb.stats.quotesReceived:0j;
 
 / -------------------------------------------------------
+/ Phase 4: Replay-on-reconnect state
+/ -------------------------------------------------------
+/ WDB persists the highest tpSeqNo it has successfully flushed to disk.
+/ On reconnect, it asks TP to replay everything since that point. This
+/ closes the gap between TP's durability log and WDB's HDB partition
+/ across disconnects (TP restart, WDB restart, network blip).
+
+/ Checkpoint file: small file persisted alongside the tmp directory.
+/ Uses T2S_TMP_DIR if set (same env var as TMPSAVE) for consistency.
+.wdb.cfg.checkpointFile:hsym `$ raze ($[count v:getenv `T2S_TMP_DIR; v; "../"]; "wdb.lastTpSeqNo");
+
+/ Highest tpSeqNo successfully flushed to disk. Loaded from checkpoint
+/ on startup, advanced after each flush, persisted on each successful flush.
+.wdb.lastTpSeqNo:0j;
+
+/ Phase 4 stats (separate from the existing stats group)
+.wdb.stats.replayRowsApplied:0j;
+.wdb.stats.replayDuplicatesFiltered:0j;
+
+/ Buffers used during reconnect window: between subscribing live and
+/ finishing replay, incoming live messages accumulate here so they
+/ aren't lost while we're catching up. Cleared after drain.
+.wdb.replayLiveBuffer.trade_binance:();
+.wdb.replayLiveBuffer.quote_binance:();
+
+/ True while in the replay-and-catchup phase. While true, upd() stashes
+/ messages into replayLiveBuffer instead of processing them. Cleared by
+/ .wdb.runReplay once replay completes.
+.wdb.replayMode:0b;
+
+/ Cutoff captured at reconnect time. Live messages with tpSeqNo <= cutoff
+/ are duplicates of replay output and get filtered when draining the buffer.
+.wdb.replayCutoff:0j;
+
+/ -------------------------------------------------------
 / TMPSAVE - temporary directory for intraday writes
 / Read tmp dir prefix from env var, fall back to a relative path.
 / Override with T2S_TMP_DIR=/path/to/tmp/ (trailing slash; absolute recommended).
@@ -61,10 +96,51 @@ trade_binance:.schema.extend[.schema.trade; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
 quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeUtcNs];
 
 / -------------------------------------------------------
+/ Phase 4: Field positions (computed from cols at startup)
+/ -------------------------------------------------------
+/ When upd() receives a row from TP it has 14 elements (TP stamps
+/ tpRecvTimeUtcNs and tpSeqNo, but our wdbRecvTimeUtcNs hasn't been added
+/ yet at that point). The position of tpSeqNo in our 15-column table is
+/ the same as the position in the incoming 14-element row, since
+/ wdbRecvTimeUtcNs is appended at the end.
+/ Both schemas have tpSeqNo at the same relative position so we use trade.
+.wdb.idx.tpSeqNo:(cols trade_binance)?`tpSeqNo;
+
+/ -------------------------------------------------------
 / Utility Functions
 / -------------------------------------------------------
 
 .wdb.tsToNs:{[ts] .wdb.epochOffset+"j"$ts};
+
+/ -------------------------------------------------------
+/ Phase 4: Checkpoint persistence
+/ -------------------------------------------------------
+
+/ Load checkpoint from disk. Returns 0 if no checkpoint exists yet.
+.wdb.loadCheckpoint:{[]
+  if[() ~ key .wdb.cfg.checkpointFile;
+    -1 "WDB: no checkpoint file, starting from tpSeqNo=0";
+    :0j
+  ];
+  v: @[get; .wdb.cfg.checkpointFile; {[err]
+    -1 raze ("WDB: ERROR reading checkpoint - "; err);
+    0j
+  }];
+  -1 raze ("WDB: loaded checkpoint tpSeqNo="; string v);
+  v
+ };
+
+/ Persist checkpoint atomically. Writes to a temp file then renames so
+/ a crash mid-write doesn't corrupt the checkpoint file.
+.wdb.saveCheckpoint:{[seq]
+  tmpFile: ` sv (.wdb.cfg.checkpointFile; `tmp);
+  @[{x set y}; (tmpFile; seq); {[err]
+    -1 raze ("WDB: ERROR writing checkpoint tmp - "; err);
+  }];
+  / Atomic rename via shell mv (kdb has no rename primitive)
+  cmd: raze ("mv "; 1 _ string tmpFile; " "; 1 _ string .wdb.cfg.checkpointFile);
+  @[system; cmd; {[err] -1 raze ("WDB: ERROR renaming checkpoint - "; err)}];
+ };
 
 / -------------------------------------------------------
 / Connection Management (Resilient)
@@ -82,6 +158,112 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
   elapsed:`long$(.z.p - .wdb.conn.lastAttempt) % 1000000;  / ms
   elapsed >= .wdb.conn.getDelay[]
   };
+
+/ -------------------------------------------------------
+/ Phase 4: Replay-on-reconnect logic
+/ -------------------------------------------------------
+/ The replay protocol runs once per connect. It catches up the WDB on
+/ messages persisted in TP's durability log that we missed during a
+/ disconnect (TP restart, WDB restart, network blip).
+/ ----
+/ Protocol (called from .wdb.connect after subscribe):
+/   1. Capture TP's current tpSeqNo as cutoff (separates replay from live)
+/   2. Ask TP to replay rows with tpSeqNo > lastTpSeqNo (our checkpoint)
+/   3. Apply each replayed row through append() - fills tables, advances
+/      checkpoint via flush
+/   4. Drain replayLiveBuffer (live messages that arrived during steps 1-3),
+/      filtering out any with tpSeqNo <= cutoff (those are duplicates)
+/   5. Clear replayMode so future upd() calls go through the normal path
+
+/ Apply a replayed row. Same as live upd() but accepts pre-shaped row data.
+/ Stamps wdbRecvTimeUtcNs at replay-time (we don't have the original).
+.wdb.applyReplayRow:{[tbl;row]
+  row: row, .wdb.tsToNs[.z.p];
+  .wdb.stats.replayRowsApplied+: 1;
+  $[tbl = `trade_binance; .wdb.stats.tradesReceived+:1;
+    tbl = `quote_binance; .wdb.stats.quotesReceived+:1;
+    ()];
+  append[tbl;row];
+ };
+
+/ Drain the live-buffer accumulated during replay window. Each entry is a
+/ pre-WDB-stamp row (14 elements). Filter out duplicates of replay output
+/ (tpSeqNo <= replayCutoff) and apply the rest as new live messages.
+.wdb.drainLiveBuffer:{[tbl]
+  buf: .wdb.replayLiveBuffer[tbl];
+  if[0 = count buf; :()];
+
+  / Extract tpSeqNo from each row and split duplicates from new
+  bufSeqs: {x[.wdb.idx.tpSeqNo]} each buf;
+  isDup: bufSeqs <= .wdb.replayCutoff;
+  dupCount: sum isDup;
+  newRows: buf where not isDup;
+
+  -1 raze ("WDB: drained "; string count buf; " buffered "; string tbl;
+           " (filtered "; string dupCount; " dups, "; string count newRows; " new)");
+
+  .wdb.stats.replayDuplicatesFiltered+: dupCount;
+
+  / Apply new rows via the normal live path (adds wdbRecvTimeUtcNs)
+  {[tbl; row]
+    row: row, .wdb.tsToNs[.z.p];
+    $[tbl = `trade_binance; .wdb.stats.tradesReceived+:1;
+      tbl = `quote_binance; .wdb.stats.quotesReceived+:1;
+      ()];
+    append[tbl; row];
+  } [tbl;] each newRows;
+
+  / Clear the buffer
+  .wdb.replayLiveBuffer[tbl]: ();
+ };
+
+/ Run the full replay protocol against an open TP handle. Called by
+/ .wdb.connect AFTER the subscribe completes.
+.wdb.runReplay:{[h]
+  -1 raze ("WDB: starting replay from tpSeqNo "; string .wdb.lastTpSeqNo + 1);
+
+  / Capture cutoff. Live messages already arriving (since we subscribed)
+  / are stashed in replayLiveBuffer; on drain, any with tpSeqNo > cutoff
+  / are new and processed, others are duplicates of replay output.
+  .wdb.replayCutoff: h ".tp.currentSeqNo[]";
+  -1 raze ("WDB: replay cutoff = "; string .wdb.replayCutoff);
+
+  if[.wdb.replayCutoff < .wdb.lastTpSeqNo + 1;
+    -1 "WDB: nothing to replay (TP seqno is behind our checkpoint - probably TP restart with no log)";
+  ];
+
+  if[.wdb.replayCutoff >= .wdb.lastTpSeqNo + 1;
+    {[h; tbl]
+      replayRows: h(`.tp.replayFrom; tbl; .wdb.lastTpSeqNo + 1);
+      n: count replayRows;
+      -1 raze ("WDB: replaying "; string n; " "; string tbl; " rows");
+      / Each iteration of the table yields a dict row; convert to list
+      / via `value` to match the shape live upd() receives.
+      {[tbl; rowDict] .wdb.applyReplayRow[tbl; value rowDict]} [tbl;] each replayRows;
+    }[h;] each `trade_binance`quote_binance;
+  ];
+
+  / Drain live buffer (filtering duplicates against cutoff)
+  .wdb.drainLiveBuffer each `trade_binance`quote_binance;
+
+  / Clear replay mode - normal upd() resumes
+  .wdb.replayMode: 0b;
+  .wdb.replayCutoff: 0j;
+
+  -1 "WDB: replay complete, switching to live mode";
+ };
+
+/ Status helper for observability
+.wdb.replayStatus:{[]
+  `lastTpSeqNo`replayMode`replayCutoff`replayRowsApplied`replayDupsFiltered`bufferTrades`bufferQuotes!(
+    .wdb.lastTpSeqNo;
+    .wdb.replayMode;
+    .wdb.replayCutoff;
+    .wdb.stats.replayRowsApplied;
+    .wdb.stats.replayDuplicatesFiltered;
+    count .wdb.replayLiveBuffer.trade_binance;
+    count .wdb.replayLiveBuffer.quote_binance)
+ };
 
 / Main connection function - NEVER THROWS
 .wdb.connect:{[]
@@ -108,14 +290,25 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
     :0b
   ];
   
-  / Connection successful - now subscribe
+  / Connection successful - subscribe and replay (Phase 4)
+  / Order matters:
+  /   1. Set replayMode=true so live messages get buffered (not processed)
+  /   2. Subscribe (live messages start arriving; they're buffered)
+  /   3. Run replay protocol (capture cutoff, replay missed range, drain buffer)
+  /   4. runReplay clears replayMode; normal processing resumes
   subResult:@[{[h]
+    .wdb.replayMode:: 1b;
     res:h(`pubsub.subscribe;`trade_binance;`);
     -1 "WDB: Subscribed to ",string first first res;
     res:h(`pubsub.subscribe;`quote_binance;`);
     -1 "WDB: Subscribed to ",string first first res;
+    .wdb.runReplay[h];
     1b
-  }; h; {[err] -1 "WDB: Subscription failed - ",err; 0b}];
+  }; h; {[err]
+    .wdb.replayMode:: 0b;
+    -1 "WDB: Subscription/replay failed - ",err;
+    0b
+  }];
   
   if[not subResult;
     @[hclose; h; {}];  / Clean up failed connection
@@ -171,13 +364,31 @@ append:{[t;data]
   t insert data;
   if[.wdb.cfg.maxRows<count value t;
     -1"WDB: Flushing ",string[t]," to disk (",string[count value t]," rows)";
-    / Append enumerated buffer to disk
-    .[` sv TMPSAVE,t,`;();,;.Q.en[.wdb.cfg.hdbDir]`. t];
-    / Track statistics
-    .wdb.stats.flushCount+:1;
-    .wdb.stats.rowsWritten+:count value t;
-    / Clear buffer
-    @[`.;t;0#];
+
+    / Phase 4: capture max tpSeqNo BEFORE flushing so we can advance the
+    / checkpoint after a successful flush.
+    maxSeq: max value[t]`tpSeqNo;
+
+    / Append enumerated buffer to disk. Phase 4 also addresses review issue #6
+    / (unprotected intraday flush) - wrap in protected eval so a write failure
+    / (disk full, permissions, etc.) doesn't tear down the process and leaves
+    / the in-memory buffer intact for retry on the next append call.
+    flushOk:@[{
+        .[` sv TMPSAVE,x,`;();,;.Q.en[.wdb.cfg.hdbDir]`. x];
+        1b
+      }; t; {[err] -1 raze ("WDB: ERROR intraday flush - "; err); 0b}];
+
+    if[flushOk;
+      .wdb.stats.flushCount+:1;
+      .wdb.stats.rowsWritten+:count value t;
+      / Phase 4: advance and persist checkpoint after successful flush
+      if[maxSeq > .wdb.lastTpSeqNo;
+        .wdb.lastTpSeqNo: maxSeq;
+        .wdb.saveCheckpoint[maxSeq];
+      ];
+      / Clear buffer
+      @[`.;t;0#];
+    ];
   ]};
 
 / -------------------------------------------------------
@@ -185,14 +396,25 @@ append:{[t;data]
 / -------------------------------------------------------
 
 upd:{[tbl;data]
+  / Phase 4: during replay-mode, stash live messages into a buffer to be
+  / drained after replay completes. This prevents losing live data that
+  / arrives during the replay window.
+  if[.wdb.replayMode;
+    if[tbl in `trade_binance`quote_binance;
+      .wdb.replayLiveBuffer[tbl],: enlist data;
+    ];
+    :();
+  ];
+
+  / Normal live processing
   / Add WDB receive timestamp
   data:data,.wdb.tsToNs[.z.p];
-  
+
   / Track statistics
   $[tbl = `trade_binance; .wdb.stats.tradesReceived+:1;
     tbl = `quote_binance; .wdb.stats.quotesReceived+:1;
     ()];
-  
+
   / Append (will flush to disk if needed)
   append[tbl;data];
   };
@@ -449,7 +671,10 @@ system"p ",string .wdb.cfg.port;
 -1"  Max retry delay: ",string[.wdb.conn.cfg.maxDelayMs],"ms";
 -1"";
 
-/ Attempt initial connection (non-blocking)
+/ Phase 4: load checkpoint before connecting so replay knows where to start
+.wdb.lastTpSeqNo: .wdb.loadCheckpoint[];
+
+/ Attempt initial connection (non-blocking; runReplay fires inside connect)
 connected:.wdb.connect[];
 
 / Start timer for reconnection
@@ -457,9 +682,10 @@ system "t ",string .wdb.cfg.timerMs;
 
 -1"";
 -1"Query Interface:";
--1"  .health[]        / Standardized health check";
--1"  .wdb.status[]    / Full status";
--1"  .wdb.flush[]     / Manual flush to disk";
+-1"  .health[]            / Standardized health check";
+-1"  .wdb.status[]        / Full status";
+-1"  .wdb.replayStatus[]  / Phase 4 replay state";
+-1"  .wdb.flush[]         / Manual flush to disk";
 -1"";
 -1"Tables: trade_binance quote_binance";
 -1"";
