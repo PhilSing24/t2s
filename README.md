@@ -26,7 +26,7 @@ Binance Depth Stream ──WS──► Quote FH ──┘            │
                                (queries)    (analytics)   (latency)  (P&L)
 ```
 
-Each downstream process auto-reconnects with exponential backoff. The TP writes a durability log per day; subscribers can replay it on restart. Feed handler TLS connections to Binance are fully verified (peer cert + hostname), use TCP keepalive plus a 30s WebSocket idle timeout to detect dead connections within ~90s, and TP tracks per-stream sequence-number gaps so missed messages are surfaced rather than silent.
+Each downstream process auto-reconnects with exponential backoff. The TP writes a durability log per day. **WDB persists a checkpoint and replays missed data from the durability log on reconnect** (Phase 4); other subscribers (CTP, RDB, RTE, TEL, SIG, PNL) are best-effort live analytics that may have gaps after disconnect. Feed handler TLS connections to Binance are fully verified (peer cert + hostname), use TCP keepalive plus a 30s WebSocket idle timeout to detect dead connections within ~90s, and TP tracks per-stream sequence-number gaps so missed messages are surfaced rather than silent.
 
 ## Components
 
@@ -207,12 +207,23 @@ select from trade_binance where sym=`BTCUSDT
 // TEL (port 5016) — feed handler latency
 .tel.vsFhStatus[]
 
+// TP (port 5010) — durability log status, sequence tracking, replay
+.tp.statusDict[]              / counters: gaps, dups, tpSeqNo, log chunks
+.tp.lastAccepted[`trade]      / highest fhSeqNo accepted from trade FH
+.tp.currentSeqNo[]            / current monotonic tpSeqNo
+.tp.replayFrom[`trade_binance; fromSeq]   / replay slice from log
+
+// WDB (port 5011) — Phase 4 replay state
+.wdb.replayStatus[]           / lastTpSeqNo, replayMode, replay counters
+
 // PNL (port 5018) — positions and P&L
 // (see kdb/analytics/pnl.q for the query interface)
 
 // All processes — standardized health check
 .health[]
 ```
+
+WDB persists its replay checkpoint to `$T2S_TMP_DIR/wdb.lastTpSeqNo` after every successful flush. On restart, it loads this and asks TP to replay everything since, so disk-persisted data is recoverable across WDB or TP restarts.
 
 ## Dashboards
 
@@ -273,9 +284,9 @@ Range mode skips dates whose partition already exists (so backfills are idempote
 
 The ML pipeline (`kdb/ml/`) is actively developed and APIs may change. The live tick pipeline is the stable, primary deliverable.
 
-The quote feed handler fetches REST snapshots synchronously from inside the WebSocket read loop. With many symbols all needing snapshots after a reconnect, this can cause the FH to fall behind on delta processing. Async snapshot fetching is planned.
+C++ unit tests currently cover `OrderBookManager` (17 cases, 73 assertions) and `SnapshotWorker` (13 cases, 51 assertions). Feed handler classes don't yet have isolated tests; they're exercised end-to-end via the live pipeline.
 
-C++ unit tests currently cover `OrderBookManager` (state machine, snapshot/delta semantics, gap detection). Feed handler classes don't yet have isolated tests; they're exercised end-to-end via the live pipeline.
+WDB replay-on-reconnect (Phase 4) reads only the current day's durability log. Disconnects spanning midnight UTC will not catch up data from the prior day — operationally rare on a single machine, but a known limitation.
 
 ## License
 
