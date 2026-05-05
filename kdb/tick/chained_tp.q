@@ -32,8 +32,8 @@ system "g 0";
 
 \l ../schemas.q
 
-trade_binance:.schema.extend[.schema.trade; enlist `tpRecvTimeUtcNs];
-quote_binance:.schema.extend[.schema.quote; enlist `tpRecvTimeUtcNs];
+trade_binance:.schema.extend[.schema.trade; `tpRecvTimeUtcNs`tpSeqNo];
+quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo];
 
 / Health metrics from feed handlers (forwarded immediately, not batched)
 health_feed_handler:.schema.health;

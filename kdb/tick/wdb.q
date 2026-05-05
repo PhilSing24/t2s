@@ -57,8 +57,8 @@ TMPSAVE:.wdb.getTmpSave .z.d
 
 \l ../schemas.q
 
-trade_binance:.schema.extend[.schema.trade; `tpRecvTimeUtcNs`wdbRecvTimeUtcNs];
-quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`wdbRecvTimeUtcNs];
+trade_binance:.schema.extend[.schema.trade; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeUtcNs];
+quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeUtcNs];
 
 / -------------------------------------------------------
 / Utility Functions

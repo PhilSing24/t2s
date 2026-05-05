@@ -14,16 +14,71 @@ system "g 0";
 .proc.startTime:.z.p;
 
 / -------------------------------------------------------
-/ Table schemas (loaded from shared definition)
-/ Must exist before pubsub init.
-/ TP appends its own receive timestamp to trade and quote.
+/ Table schema (must exist before pubsub init)
 / -------------------------------------------------------
 
-\l ../schemas.q
+trade_binance:([]
+  time:`timestamp$();
+  sym:`symbol$();
+  tradeId:`long$();
+  price:`float$();
+  qty:`float$();
+  buyerIsMaker:`boolean$();
+  exchEventTimeMs:`long$();
+  exchTradeTimeMs:`long$();
+  fhRecvTimeUtcNs:`long$();
+  fhParseUs:`long$();
+  fhSendUs:`long$();
+  fhSeqNo:`long$();
+  tpRecvTimeUtcNs:`long$();
+  tpSeqNo:`long$()         / NEW: monotonic per-TP sequence (Phase 4 - replay support)
+  );
 
-trade_binance:.schema.extend[.schema.trade; enlist `tpRecvTimeUtcNs];
-quote_binance:.schema.extend[.schema.quote; enlist `tpRecvTimeUtcNs];
-health_feed_handler:.schema.health;
+quote_binance:([]
+  time:`timestamp$();
+  sym:`symbol$();
+  bidPrice1:`float$();
+  bidPrice2:`float$();
+  bidPrice3:`float$();
+  bidPrice4:`float$();
+  bidPrice5:`float$();
+  bidQty1:`float$();
+  bidQty2:`float$();
+  bidQty3:`float$();
+  bidQty4:`float$();
+  bidQty5:`float$();
+  askPrice1:`float$();
+  askPrice2:`float$();
+  askPrice3:`float$();
+  askPrice4:`float$();
+  askPrice5:`float$();
+  askQty1:`float$();
+  askQty2:`float$();
+  askQty3:`float$();
+  askQty4:`float$();
+  askQty5:`float$();
+  isValid:`boolean$();
+  exchEventTimeMs:`long$();
+  fhRecvTimeUtcNs:`long$();
+  fhParseUs:`long$();
+  fhSendUs:`long$();
+  fhSeqNo:`long$();
+  tpRecvTimeUtcNs:`long$();
+  tpSeqNo:`long$()         / NEW: monotonic per-TP sequence (Phase 4 - replay support)
+  );
+
+health_feed_handler:([]
+  time:`timestamp$();
+  handler:`symbol$();
+  startTimeUtc:`timestamp$();
+  uptimeSec:`long$();
+  msgsReceived:`long$();
+  msgsPublished:`long$();
+  lastMsgTimeUtc:`timestamp$();
+  lastPubTimeUtc:`timestamp$();
+  connState:`symbol$();
+  symbolCount:`int$()
+  );
 
 / -------------------------------------------------------
 / Pub/Sub - KDB-X module (must be named 'pubsub' for IPC)
@@ -76,80 +131,220 @@ pubsub.init[]
   };
 
 / -------------------------------------------------------
-/ Gap Detection (per-table, parameterized)
+/ Sequence Tracking & Gap Detection (Phase 4)
 / -------------------------------------------------------
 
-/ Field indices for fhSeqNo - derived from the schema so they stay
-/ correct if columns are reordered. The FH sends rows without
-/ tpRecvTimeUtcNs (TP appends it in upd), so these indices match
-/ the position in the incoming data list.
-.tp.idx.tradeSeq:(cols trade_binance)?`fhSeqNo;
-.tp.idx.quoteSeq:(cols quote_binance)?`fhSeqNo;
+/ Field index for fhSeqNo (0-indexed, before TP adds timestamp & tpSeqNo)
+.tp.idx.tradeSeq:11;   / trade_binance: fhSeqNo at position 11 (12th field)
+.tp.idx.quoteSeq:27;   / quote_binance: fhSeqNo at position 27 (28th field)
+                       / NOTE: adjust this if you have the Phase 3 task 3 changes that
+                       /       updated quote schema; verify with cols quote_binance
 
-/ Per-table sequence state. Null = not yet initialized.
+/ Per-side state: last fhSeqNo seen from each FH
 .tp.seq.trade:0N;
 .tp.seq.quote:0N;
 
-/ Per-table counters: gap events, missed messages, FH restarts.
+/ Per-side gap counters
 .tp.gaps.trade:0j;
 .tp.gaps.quote:0j;
 .tp.missed.trade:0j;
 .tp.missed.quote:0j;
+
+/ Per-side restart counters (when fhSeqNo went backwards far enough to look like restart)
 .tp.restarts.trade:0j;
 .tp.restarts.quote:0j;
 
-/ Check incoming sequence number against last-seen for the given table.
-/ side: `trade or `quote
-/ Returns: 1b if OK, 0b if gap detected (still processes message).
-.tp.checkSeq:{[side;seq]
-  lastSeq:.tp.seq side;
-  / First message - initialize
-  if[null lastSeq; .tp.seq[side]:seq; :1b];
-  / Normal case - sequential
-  if[seq = lastSeq + 1; .tp.seq[side]:seq; :1b];
-  / Gap detected - missed messages
-  if[seq > lastSeq + 1;
-    missed:seq - lastSeq - 1;
-    .tp.gaps[side]+:1;
-    .tp.missed[side]+:missed;
-    -1 "TP: ",string[side]," gap - expected ",string[lastSeq+1]," got ",string[seq]," (missed ",string[missed],")";
-    .tp.seq[side]:seq;
-    :0b
+/ Per-side duplicate counters (Phase 4 - bumped when FH heartbeat resends already-seen seqs)
+.tp.dups.trade:0j;
+.tp.dups.quote:0j;
+
+/ Monotonic per-TP sequence number stamped on every accepted message (Phase 4).
+/ Used by subscribers (WDB primarily) to track "what's the latest message I've
+/ processed" and to request replay from a specific point on reconnect.
+.tp.tpSeqNo:0j;
+
+/ Threshold for treating a backward jump as "FH restart" rather than "duplicate".
+/ A duplicate is an in-flight resend of a recent message - typically off by 1-100.
+/ A restart is the FH's own seqno being reset to 0 or 1 (whole-process restart).
+.tp.cfg.restartThresh:1000;
+
+/ Check fhSeqNo for the given side. Returns one of:
+/   `accept           - new in-sequence message, log + publish
+/   `accept_with_gap  - new message but gap detected; still log + publish (we already
+/                       lost the missing ones, accepting this one moves us forward)
+/   `drop_duplicate   - message already seen (FH heartbeat-driven resend); drop silently
+/                       (skip log + publish; just return)
+.tp.checkSeq:{[side; seq]
+  lastSeq: .tp.seq[side];
+
+  / First message - initialize, accept
+  if[null lastSeq;
+    .tp.seq[side]: seq;
+    :`accept
   ];
-  / Sequence went backwards or duplicate - FH restart
-  .tp.restarts[side]+:1;
-  -1 "TP: ",string[side]," FH restart detected - seq reset from ",string[lastSeq]," to ",string[seq];
-  .tp.seq[side]:seq;
-  1b
-  };
+
+  / Normal sequential case
+  if[seq = lastSeq + 1;
+    .tp.seq[side]: seq;
+    :`accept
+  ];
+
+  / Forward jump - gap detected, missed messages
+  if[seq > lastSeq + 1;
+    missed: seq - lastSeq - 1;
+    .tp.gaps[side]+: 1;
+    .tp.missed[side]+: missed;
+    -1 raze ("TP: "; string side; " gap - expected "; string lastSeq+1;
+             " got "; string seq; " (missed "; string missed; ")");
+    .tp.seq[side]: seq;
+    :`accept_with_gap
+  ];
+
+  / Backward jump - either duplicate (small step backward) or FH restart (big jump)
+  / Duplicate: typical case from heartbeat-driven resend, just drop
+  if[(lastSeq - seq) < .tp.cfg.restartThresh;
+    .tp.dups[side]+: 1;
+    :`drop_duplicate
+  ];
+
+  / Big backward jump - assume FH restarted, accept and resync
+  .tp.restarts[side]+: 1;
+  -1 raze ("TP: "; string side; " FH restart detected - seq from ";
+           string lastSeq; " to "; string seq);
+  .tp.seq[side]: seq;
+  `accept
+ };
 
 / -------------------------------------------------------
-/ Update handling
+/ Update handling (Phase 4 - tpSeqNo stamping + dup suppression)
 / -------------------------------------------------------
 
 .tp.tsToNs:{[ts] .tp.epochOffset+"j"$ts};
 
 upd:{[tbl;data]
-  / Health messages - no sequence check, no logging
+  / Health messages bypass sequence checks and durability log entirely.
+  / They are best-effort by design (operational visibility, not durable data).
   if[tbl=`health_feed_handler;
     pubsub.publish[tbl;data];
     :();
   ];
-  
-  / Check sequence for gap detection (trades and quotes have separate seq spaces)
-  if[tbl=`trade_binance; .tp.checkSeq[`trade;data .tp.idx.tradeSeq]];
-  if[tbl=`quote_binance; .tp.checkSeq[`quote;data .tp.idx.quoteSeq]];
-  
-  / Add TP receive timestamp
-  data:data,.tp.tsToNs[.z.p];
-  
-  / Log, insert, publish
+
+  / Sequence check returns one of `accept | `accept_with_gap | `drop_duplicate.
+  / On duplicate, we skip log + publish entirely.
+  result: $[tbl=`trade_binance;
+              .tp.checkSeq[`trade; data .tp.idx.tradeSeq];
+            tbl=`quote_binance;
+              .tp.checkSeq[`quote; data .tp.idx.quoteSeq];
+            `accept];     / unknown tables: just pass through
+
+  if[result = `drop_duplicate; :()];
+
+  / Append TP-side fields: tpRecvTimeUtcNs, tpSeqNo
+  / The schema's last two columns are tpRecvTimeUtcNs and tpSeqNo so they
+  / must be appended to the row in that exact order.
+  .tp.tpSeqNo+: 1;
+  data: data, (.tp.tsToNs[.z.p]; .tp.tpSeqNo);
+
+  / Log first (durability), then publish (best-effort fanout).
+  / If logging throws, we don't publish (consistent durable view).
   .tp.log[tbl;data];
   pubsub.publish[tbl;data];
-  };
+ };
 
 / Alias for feed handlers that call .u.upd
 .u.upd:upd;
+
+/ -------------------------------------------------------
+/ Phase 4 Public API
+/ -------------------------------------------------------
+
+/ Returns the highest fhSeqNo accepted from this FH for the given side.
+/ Returns 0 (not 0N) if no messages received yet, so FH can compare
+/ against its local fhSeqNo_ unambiguously.
+/ Called by FH heartbeat to detect TP-side gaps and trigger resends.
+.tp.lastAccepted:{[side]
+  s: .tp.seq[side];
+  $[null s; 0; s]
+ };
+
+/ Replay support: read the durability log and return rows for `tbl`
+/ with tpSeqNo >= fromSeq. Used by subscribers (WDB) on reconnect to
+/ catch up on data missed during disconnect before subscribing live.
+/ ----
+/ Implementation note: kdb's -11! reads a log file by replaying its
+/ entries via a callable named `upd`. We temporarily redefine upd to
+/ accumulate into a scratch table, run the replay, then restore. The
+/ scratch table is held under .tp.replayScratch to avoid polluting
+/ the global namespace.
+.tp.replayFrom:{[tbl; fromSeq]
+  logFile: .tp.logFilePath[];
+  / If no log exists yet, return an empty table of the right shape
+  if[() ~ key logFile; :0#value tbl];
+
+  / Initialize scratch and stash original upd
+  .tp.replayScratch:: 0#value tbl;
+  oldUpd:: upd;
+  / Only accept rows whose width matches the current schema. Older log
+  / entries from before Phase 4 (no tpSeqNo column) get silently skipped.
+  upd:: {[t;d]
+    if[t = tbl;
+      if[(count d) = count cols value t;
+        .tp.replayScratch,:: enlist d
+      ]
+    ]
+  };
+
+  / Replay - protect so any error restores upd
+  .[{-11!x}; enlist logFile; {[err]
+    -1 raze ("TP: replayFrom error: "; err);
+  }];
+
+  / Restore original upd
+  upd:: oldUpd;
+
+  / Filter to requested seq range and return
+  result: select from .tp.replayScratch where tpSeqNo >= fromSeq;
+  delete replayScratch from `.tp;
+  result
+ };
+
+/ Recover .tp.tpSeqNo from the durability log on startup.
+/ Reads through the log, finds the maximum tpSeqNo across both data tables,
+/ and seeds .tp.tpSeqNo so newly accepted messages continue the sequence.
+/ Critical: must be called BEFORE the log is reopened for new writes,
+/ otherwise the new TP-process's first messages would re-use existing seqs.
+.tp.recoverSeqNo:{[]
+  logFile: .tp.logFilePath[];
+  if[() ~ key logFile;
+    -1 "TP: no existing log, starting tpSeqNo from 0";
+    :()
+  ];
+
+  / Replay log into scratch tables, ignore the result, just walk it for max seq
+  .tp.recoverMax:: 0j;
+  oldUpd:: upd;
+  upd:: {[t;d]
+    / d is a row (list); last element is tpSeqNo (per schema)
+    / If the row predates Phase 4 (no tpSeqNo column), this index would
+    / return something else. Defensive: use cols of the table to verify
+    / the row length matches; if not, skip.
+    if[t in `trade_binance`quote_binance;
+      if[(count d) = count cols value t;
+        seq: last d;
+        if[seq > .tp.recoverMax; .tp.recoverMax:: seq]
+      ]
+    ]
+  };
+
+  .[{-11!x}; enlist logFile; {[err]
+    -1 raze ("TP: recoverSeqNo error: "; err);
+  }];
+
+  upd:: oldUpd;
+  .tp.tpSeqNo: .tp.recoverMax;
+  delete recoverMax from `.tp;
+  -1 raze ("TP: recovered tpSeqNo="; string .tp.tpSeqNo);
+ };
 
 / -------------------------------------------------------
 / Status and Monitoring
@@ -157,27 +352,39 @@ upd:{[tbl;data]
 
 / Standardized health check (consistent across all processes)
 .health:{[]
-  / Degraded if either trade or quote stream has seen gaps.
-  st:$[any (.tp.gaps.trade;.tp.gaps.quote) > 0; `degraded; `ok];
+  st:$[(.tp.gaps.trade > 0) | .tp.gaps.quote > 0; `degraded; `ok];
   `process`port`uptime`status`memMB`msgsIn`msgsOut!(
     `tp;
     .tp.cfg.port;
     `second$.z.p - .proc.startTime;
     st;
     (`long$.Q.w[][`used]) % 1000000;
-    .tp.logCount;      / Total logged messages
-    .tp.logCount)      / Same (no separate tracking)
+    .tp.logCount;
+    .tp.logCount)
   }
 
 .tp.status:{[]
   flip `metric`value!(
-    `port`uptime`logFile`logChunks`logSizeMB`tradeGaps`tradeMissed`tradeRestarts`lastTradeSeq`quoteGaps`quoteMissed`quoteRestarts`lastQuoteSeq;
-    (.tp.cfg.port;`second$.z.p-.proc.startTime;.tp.logFile;.tp.logCount;0.01*`long$100*(@[hcount;.tp.logFile;0j])%1e6;.tp.gaps.trade;.tp.missed.trade;.tp.restarts.trade;.tp.seq.trade;.tp.gaps.quote;.tp.missed.quote;.tp.restarts.quote;.tp.seq.quote))
+    `port`uptime`logFile`logChunks`logSizeMB`tradeGaps`tradeMissed`tradeRestarts`tradeDups`lastTradeSeq`quoteGaps`quoteMissed`quoteRestarts`quoteDups`lastQuoteSeq`tpSeqNo;
+    (.tp.cfg.port;
+     `second$.z.p-.proc.startTime;
+     .tp.logFile;
+     .tp.logCount;
+     0.01*`long$100*(@[hcount;.tp.logFile;0j])%1e6;
+     .tp.gaps.trade; .tp.missed.trade; .tp.restarts.trade; .tp.dups.trade; .tp.seq.trade;
+     .tp.gaps.quote; .tp.missed.quote; .tp.restarts.quote; .tp.dups.quote; .tp.seq.quote;
+     .tp.tpSeqNo))
   };
 
 / Compact status as dictionary (for programmatic use)
 .tp.statusDict:{[]
-  `port`uptime`logChunks`tradeGaps`tradeMissed`quoteGaps`quoteMissed!(.tp.cfg.port;`second$.z.p-.proc.startTime;.tp.logCount;.tp.gaps.trade;.tp.missed.trade;.tp.gaps.quote;.tp.missed.quote)
+  `port`uptime`logChunks`tradeGaps`tradeMissed`tradeDups`quoteGaps`quoteMissed`quoteDups`tpSeqNo!
+   (.tp.cfg.port;
+    `second$.z.p-.proc.startTime;
+    .tp.logCount;
+    .tp.gaps.trade; .tp.missed.trade; .tp.dups.trade;
+    .tp.gaps.quote; .tp.missed.quote; .tp.dups.quote;
+    .tp.tpSeqNo)
   };
 
 / Log status (unchanged for compatibility)
@@ -190,22 +397,30 @@ upd:{[tbl;data]
 / -------------------------------------------------------
 
 .tp.endOfDay:{[]
-  -1"TP: EOD - chunks:",string[.tp.logCount]," tradeGaps:",string[.tp.gaps.trade]," quoteGaps:",string[.tp.gaps.quote];
+  -1 raze ("TP: EOD - chunks:"; string .tp.logCount;
+           " tradeGaps:"; string .tp.gaps.trade;
+           " quoteGaps:"; string .tp.gaps.quote;
+           " tpSeqNo:"; string .tp.tpSeqNo);
   pubsub.callendofday[];
   .tp.rotate[];
-  delete from`trade_binance;
-  delete from`quote_binance;
-  delete from`health_feed_handler;
+  delete from `trade_binance;
+  delete from `quote_binance;
+  delete from `health_feed_handler;
   .tp.logCount:0j;
-  / Reset gap counters for new day (both sides)
+  / Reset per-day operational counters
   .tp.gaps.trade:0j;
-  .tp.gaps.quote:0j;
   .tp.missed.trade:0j;
-  .tp.missed.quote:0j;
   .tp.restarts.trade:0j;
+  .tp.dups.trade:0j;
+  .tp.gaps.quote:0j;
+  .tp.missed.quote:0j;
   .tp.restarts.quote:0j;
-  / Keep last seq (FH doesn't reset on EOD)
-  };
+  .tp.dups.quote:0j;
+  / Keep last fhSeqNo for each side (FH doesn't reset on EOD).
+  / Keep .tp.tpSeqNo monotonic across days so subscribers' cursors remain
+  / valid across midnight. Note: replayFrom currently reads only today's
+  / log; cross-midnight replay is not supported in v1 (TODO Phase 5).
+ };
 
 / -------------------------------------------------------
 / EOD - Midnight UTC Detection
@@ -232,6 +447,11 @@ upd:{[tbl;data]
 
 system"p ",string .tp.cfg.port;
 
+/ Phase 4: recover tpSeqNo from existing log BEFORE opening for new writes,
+/ so newly accepted messages continue the sequence rather than re-using
+/ existing seq numbers.
+.tp.recoverSeqNo[];
+
 .tp.openLog[];
 
 system "t 1000";   / Check every 1 second
@@ -242,10 +462,15 @@ system "t 1000";   / Check every 1 second
 -1"Tables: trade_binance quote_binance health_feed_handler";
 -1"";
 -1"Monitoring:";
--1"  .health[]        / Standardized health check";
--1"  .tp.status[]     / Full status table";
--1"  .tp.statusDict[] / Status as dictionary";
--1"  .tp.logStatus[]  / Log file status";
+-1"  .health[]            / Standardized health check";
+-1"  .tp.status[]         / Full status table";
+-1"  .tp.statusDict[]     / Status as dictionary";
+-1"  .tp.logStatus[]      / Log file status";
+-1"";
+-1"Phase 4 API (acks/replay):";
+-1"  .tp.lastAccepted[`trade]   / Highest fhSeqNo accepted for trades";
+-1"  .tp.lastAccepted[`quote]   / Highest fhSeqNo accepted for quotes";
+-1"  .tp.replayFrom[`trade_binance; fromSeq]   / Replay subset from log";
 -1"";
 -1"Operations:";
 -1"  .tp.endOfDay[]    / Trigger end-of-day";

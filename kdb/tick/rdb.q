@@ -41,8 +41,8 @@ system "g 0";
 
 \l ../schemas.q
 
-trade_binance:.schema.extend[.schema.trade; `tpRecvTimeUtcNs`rdbRecvTimeUtcNs];
-quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`rdbRecvTimeUtcNs];
+trade_binance:.schema.extend[.schema.trade; `tpRecvTimeUtcNs`tpSeqNo`rdbRecvTimeUtcNs];
+quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`rdbRecvTimeUtcNs];
 
 / -------------------------------------------------------
 / Connection Management (Resilient)

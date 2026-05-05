@@ -50,8 +50,8 @@ system "g 0";
 
 \l ../schemas.q
 
-trade_binance:.schema.extend[.schema.trade; enlist `tpRecvTimeUtcNs];
-quote_binance:.schema.extend[.schema.quote; enlist `tpRecvTimeUtcNs];
+trade_binance:.schema.extend[.schema.trade; `tpRecvTimeUtcNs`tpSeqNo];
+quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo];
 
 .rte.idx.trade:(cols trade_binance)!til count cols trade_binance;
 .rte.idx.quote:(cols quote_binance)!til count cols quote_binance;

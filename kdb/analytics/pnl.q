@@ -32,7 +32,7 @@ system "g 0";
 
 / Trades - kept for historical queries (KX Dashboard)
 / Comes from CTP with TP's receive timestamp.
-trade_binance:.schema.extend[.schema.trade; enlist `tpRecvTimeUtcNs];
+trade_binance:.schema.extend[.schema.trade; `tpRecvTimeUtcNs`tpSeqNo];
 
 / Positions from SIG (side: 1=long, -1=short) - PNL-specific
 positions:([]

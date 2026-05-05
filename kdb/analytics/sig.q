@@ -39,7 +39,7 @@ system "g 0";
 \l ../schemas.q
 
 / Trade data from primary TP (with TP's receive timestamp)
-trade_binance:.schema.extend[.schema.trade; enlist `tpRecvTimeUtcNs];
+trade_binance:.schema.extend[.schema.trade; `tpRecvTimeUtcNs`tpSeqNo];
 
 / SIG-specific tables (not part of shared schema)
 signals:([] sym:`symbol$(); rsi:`float$(); exposure:`int$());
