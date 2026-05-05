@@ -286,13 +286,16 @@ upd:{[tbl;data]
   / If no log exists yet, return an empty table of the right shape
   if[() ~ key logFile; :0#value tbl];
 
-  / Initialize scratch and stash original upd
+  / Initialize scratch + stash target table in globals so the inner upd
+  / lambda below can see them (q lambdas do not capture local closures,
+  / so we cannot reference outer-scope `tbl` inside the inner function).
   .tp.replayScratch:: 0#value tbl;
+  .tp.replayTarget:: tbl;
   oldUpd:: upd;
   / Only accept rows whose width matches the current schema. Older log
   / entries from before Phase 4 (no tpSeqNo column) get silently skipped.
   upd:: {[t;d]
-    if[t = tbl;
+    if[t = .tp.replayTarget;
       if[(count d) = count cols value t;
         .tp.replayScratch,:: enlist d
       ]
@@ -310,6 +313,7 @@ upd:{[tbl;data]
   / Filter to requested seq range and return
   result: select from .tp.replayScratch where tpSeqNo >= fromSeq;
   delete replayScratch from `.tp;
+  delete replayTarget from `.tp;
   result
  };
 

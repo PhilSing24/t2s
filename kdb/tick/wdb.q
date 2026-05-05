@@ -133,12 +133,22 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
 / Persist checkpoint atomically. Writes to a temp file then renames so
 / a crash mid-write doesn't corrupt the checkpoint file.
 .wdb.saveCheckpoint:{[seq]
-  tmpFile: ` sv (.wdb.cfg.checkpointFile; `tmp);
-  @[{x set y}; (tmpFile; seq); {[err]
+  / Build the temp file path by appending ".tmp" to the checkpoint path.
+  / Cannot use ` sv (...; `tmp) - that treats the checkpoint as a directory.
+  tmpStr: 1 _ string .wdb.cfg.checkpointFile;
+  tmpFile: hsym `$ raze (tmpStr; ".tmp");
+  / Use .[func; argList; errHandler] for multi-arg protected eval.
+  / @[func; arg; errHandler] is the SINGLE-arg form and would treat
+  / our (tmpFile; seq) as a single list arg to set.
+  / Sentinel: error handler returns the symbol `error`; success path
+  / returns whatever set returns (the seq value). We check by type.
+  result: .[set; (tmpFile; seq); {[err]
     -1 raze ("WDB: ERROR writing checkpoint tmp - "; err);
+    `error
   }];
+  if[result ~ `error; :()];
   / Atomic rename via shell mv (kdb has no rename primitive)
-  cmd: raze ("mv "; 1 _ string tmpFile; " "; 1 _ string .wdb.cfg.checkpointFile);
+  cmd: raze ("mv "; tmpStr; ".tmp "; tmpStr);
   @[system; cmd; {[err] -1 raze ("WDB: ERROR renaming checkpoint - "; err)}];
  };
 
@@ -628,17 +638,30 @@ endofday:{[]
   -1 "WDB: Manual flush requested";
   t:tables `.;
   t@:where 11h=type each t@\:`sym;
-  
+
   {
     if[0 < count value x;
+      / Phase 4: capture max tpSeqNo before flushing so we can advance
+      / the checkpoint after a successful flush, same as the auto-flush
+      / path in append.
+      maxSeq: max value[x]`tpSeqNo;
       -1 "WDB: Flushing ",string[x]," (",string[count value x]," rows)";
-      .[` sv TMPSAVE,x,`;();,;.Q.en[.wdb.cfg.hdbDir]`. x];
-      .wdb.stats.flushCount+:1;
-      .wdb.stats.rowsWritten+:count value x;
-      @[`.;x;0#];
+      flushOk:@[{
+          .[` sv TMPSAVE,x,`;();,;.Q.en[.wdb.cfg.hdbDir]`. x];
+          1b
+        }; x; {[err] -1 raze ("WDB: ERROR manual flush - "; err); 0b}];
+      if[flushOk;
+        .wdb.stats.flushCount+:1;
+        .wdb.stats.rowsWritten+:count value x;
+        if[maxSeq > .wdb.lastTpSeqNo;
+          .wdb.lastTpSeqNo: maxSeq;
+          .wdb.saveCheckpoint[maxSeq];
+        ];
+        @[`.;x;0#];
+      ];
     ];
   } each t;
-  
+
   -1 "WDB: Manual flush complete";
   };
 
