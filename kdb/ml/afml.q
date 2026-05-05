@@ -12,7 +12,7 @@
 / Configuration
 / =============================================================================
 
-.afml.cfg.hdb:`$":/home/philippe/t2s/hdb_binancedata";
+.afml.cfg.hdb:hsym `$ $[count v:getenv `HDB_BINANCE_DIR; v; "hdb_binancedata"];
 .afml.cfg.syms:enlist `BTCUSDT;
 .afml.cfg.target:200;
 .afml.cfg.span:100;

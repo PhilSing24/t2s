@@ -69,8 +69,8 @@ t2s/
 │   │   ├── afml.q            # AFML primitives
 │   │   └── features.q        # Feature engineering
 │   ├── pubsub/               # KDB-X di.pubsub module
-│   │   ├── init.q
-│   │   └── pubsub.q
+│   │   ├── init.q            # Module bootstrap: defines subscribable tables, fetches schemas
+│   │   └── pubsub.q          # subscribe/publish primitives + utilities (sub clear, EOD/EOP broadcast)
 │   └── utils/                # Operational tooling
 │       ├── tradeLoader.q     # Historical trade loader (single-date or date range, interactive or scripted)
 │       ├── hdbUtils.q        # HDB switching, queries
