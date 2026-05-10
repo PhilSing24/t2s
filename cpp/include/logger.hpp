@@ -56,6 +56,8 @@ inline void initLogger(const std::string& component,
     
     // Register as default logger
     spdlog::set_default_logger(logger);
+
+    logger->flush_on(spdlog::level::info);
     
     spdlog::info("Logger initialized (level: {})", level);
 }

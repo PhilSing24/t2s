@@ -47,3 +47,4 @@ config/*.local.json
 Thumbs.db
 kdb/tick/logs/
 *:Zone.Identifier
+kdb/tick/baseline
