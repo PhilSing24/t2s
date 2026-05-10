@@ -328,3 +328,113 @@ TEST_CASE("Symbols maintain independent state", "[ordrbook][multi]") {
     REQUIRE(qBtc.bidPrice1 == 50000.0);
     REQUIRE(qEth.bidPrice1 == 2000.0);
 }
+
+// ============================================================================
+// Sequence overlap and stale-event handling (Binance spec compliance)
+// ============================================================================
+//
+// Binance Spot Diff Depth Stream allows events that overlap with the last
+// applied update id, or that are entirely stale (u < lastUpdateId). The
+// spec only mandates re-sync when U > lastUpdateId + 1 (true gap). These
+// tests pin down the VALID-state continuity check's behavior in those cases.
+
+TEST_CASE("VALID accepts overlapping delta (U <= lastUpdateId)", "[ordrbook][gap]") {
+    OrderBookManager mgr({"BTCUSDT"});
+    mgr.applySnapshot(0, 100, bids5(50000.0), asks5(50001.0));
+    REQUIRE(mgr.applyDelta(0, 101, 105, {}, {}, 1700000000000LL));  // -> VALID, lastUpdateId=105
+
+    // Overlap: U=103 <= 105 (lastUpdateId), u=110 > 105.
+    // Per spec this should apply, NOT invalidate.
+    bool ok = mgr.applyDelta(0, 103, 110,
+                             {pl(50000.0, 7.5)},  // change best bid qty
+                             {},
+                             1700000001000LL);
+
+    REQUIRE(ok);
+    REQUIRE(mgr.getState(0) == BookState::VALID);  // not invalidated
+
+    L5Quote q = mgr.getL5(0, 0, 0);
+    REQUIRE(q.bidQty1 == 7.5);  // overwrite was applied
+}
+
+TEST_CASE("VALID accepts boundary overlap (U == lastUpdateId)", "[ordrbook][gap]") {
+    OrderBookManager mgr({"BTCUSDT"});
+    mgr.applySnapshot(0, 100, bids5(50000.0), asks5(50001.0));
+    REQUIRE(mgr.applyDelta(0, 101, 105, {}, {}, 1700000000000LL));
+
+    // Minimum overlap: U == lastUpdateId.
+    bool ok = mgr.applyDelta(0, 105, 108, {}, {}, 1700000001000LL);
+
+    REQUIRE(ok);
+    REQUIRE(mgr.getState(0) == BookState::VALID);
+}
+
+TEST_CASE("VALID silently skips entirely-stale delta (u < lastUpdateId)", "[ordrbook][gap]") {
+    OrderBookManager mgr({"BTCUSDT"});
+    mgr.applySnapshot(0, 100, bids5(50000.0), asks5(50001.0));
+    REQUIRE(mgr.applyDelta(0, 101, 105, {}, {}, 1700000000000LL));
+
+    // Stale: u=90 < 105 (lastUpdateId). Spec: "If u < lastUpdateId, ignore."
+    // The delta tries to change a price level - that change MUST NOT apply.
+    bool ok = mgr.applyDelta(0, 80, 90,
+                             {pl(50000.0, 99.0)},  // would-be poison if applied
+                             {},
+                             1700000001000LL);
+
+    REQUIRE(ok);  // returns true (not a failure)
+    REQUIRE(mgr.getState(0) == BookState::VALID);
+
+    L5Quote q = mgr.getL5(0, 0, 0);
+    REQUIRE(q.bidQty1 == 1.0);  // unchanged - poison correctly ignored
+}
+
+TEST_CASE("VALID applies boundary u == lastUpdateId", "[ordrbook][gap]") {
+    OrderBookManager mgr({"BTCUSDT"});
+    mgr.applySnapshot(0, 100, bids5(50000.0), asks5(50001.0));
+    REQUIRE(mgr.applyDelta(0, 101, 105, {}, {}, 1700000000000LL));
+
+    // Boundary: u == lastUpdateId. Spec uses strict < for the stale rule,
+    // so this is NOT stale - it should apply (harmlessly overwriting
+    // levels with their state as of update 105, which is what we have).
+    bool ok = mgr.applyDelta(0, 80, 105, {}, {}, 1700000001000LL);
+
+    REQUIRE(ok);
+    REQUIRE(mgr.getState(0) == BookState::VALID);
+}
+
+TEST_CASE("VALID invalidates on minimal gap (U == lastUpdateId + 2)", "[ordrbook][gap]") {
+    OrderBookManager mgr({"BTCUSDT"});
+    mgr.applySnapshot(0, 100, bids5(50000.0), asks5(50001.0));
+    REQUIRE(mgr.applyDelta(0, 101, 105, {}, {}, 1700000000000LL));
+
+    // Smallest gap: U=107 = lastUpdateId(105) + 2. Spec mandates invalidation.
+    bool ok = mgr.applyDelta(0, 107, 110, {}, {}, 1700000001000LL);
+
+    REQUIRE_FALSE(ok);
+    REQUIRE(mgr.getState(0) == BookState::INVALID);
+}
+
+TEST_CASE("Buffered replay tolerates overlapping deltas after snapshot", "[ordrbook][gap]") {
+    // Regression: after snapshot lands, the FH replays buffered deltas via
+    // applyDelta in order. The first hits SYNCING (correct). The 2nd-Nth
+    // hit VALID. If any of those overlap, the pre-fix strict-equality check
+    // would abort replay halfway. This test simulates that flow.
+    OrderBookManager mgr({"BTCUSDT"});
+    mgr.applySnapshot(0, 100, bids5(50000.0), asks5(50001.0));
+
+    // Delta 1 (SYNCING -> VALID, lastUpdateId 100 -> 105)
+    REQUIRE(mgr.applyDelta(0, 101, 105, {}, {}, 1700000000000LL));
+    REQUIRE(mgr.isValid(0));
+
+    // Delta 2 - overlaps delta 1's final (would have aborted pre-fix)
+    REQUIRE(mgr.applyDelta(0, 104, 110, {}, {}, 1700000000100LL));
+    REQUIRE(mgr.isValid(0));
+
+    // Delta 3 - overlaps delta 2's final
+    REQUIRE(mgr.applyDelta(0, 108, 115, {}, {}, 1700000000200LL));
+    REQUIRE(mgr.isValid(0));
+
+    // Delta 4 - contiguous from delta 3
+    REQUIRE(mgr.applyDelta(0, 116, 120, {}, {}, 1700000000300LL));
+    REQUIRE(mgr.isValid(0));
+}

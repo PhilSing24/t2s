@@ -302,8 +302,17 @@ public:
             states_[idx] = BookState::VALID;
         }
         else if (state == BookState::VALID) {
-            // Normal operation: expect consecutive sequence
-            if (firstUpdateId != lastUpdateIds_[idx] + 1) {
+            // Per Binance spec (How to manage a local order book correctly):
+            //   - u < lastUpdateId    -> stale, ignore (don't apply, don't advance)
+            //   - U > lastUpdateId+1  -> true gap, invalidate and re-snapshot
+            //   - otherwise (overlap or contiguous) -> apply; the event
+            //     payload is the absolute final state for those price levels
+            //     at update id u, so overwriting levels we've already seen
+            //     is safe.
+            if (finalUpdateId < lastUpdateIds_[idx]) {
+                return true;  // stale, no state change
+            }
+            if (firstUpdateId > lastUpdateIds_[idx] + 1) {
                 invalidate(idx, "Sequence gap");
                 return false;
             }
