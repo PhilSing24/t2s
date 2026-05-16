@@ -5,6 +5,7 @@
 
 #include "trade_feed_handler.hpp"
 #include "socket_utils.hpp"
+#include "k_object.hpp"
 
 #include <rapidjson/document.h>
 #include <spdlog/spdlog.h>
@@ -199,8 +200,9 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
     // Increment sequence number
     ++fhSeqNo_;
     
-    // Build kdb+ row
-    K row = knk(12,
+    // Build kdb+ row. knk consumes its varargs, so the inline kj/ks/kf/etc.
+    // constructions don't need separate wrapping.
+    t2s::KOwned row(knk(12,
         ktj(-KP, fhRecvTimeUtcNs - KDB_EPOCH_OFFSET_NS),
         ks((S)sym),
         kj(tradeId),
@@ -211,22 +213,27 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
         kj(exchTradeTimeMs),
         kj(fhRecvTimeUtcNs),
         kj(fhParseUs),
-        kj(0LL),  // fhSendUs placeholder
+        kj(0LL),  // fhSendUs placeholder (patched below)
         kj(fhSeqNo_)
-    );
+    ));
     
-    // Capture send time
+    // Capture send time and patch the placeholder. kK(...)[i] returns a
+    // borrowed ref - we mutate it but do NOT release it; the parent list
+    // owns it.
     auto sendEnd = std::chrono::steady_clock::now();
     long long fhSendUs = std::chrono::duration_cast<std::chrono::microseconds>(
         sendEnd - parseEnd).count();
-    kK(row)[10]->j = fhSendUs;
+    t2s::KBorrowed sendField(kK(row.get())[10]);
+    sendField.get()->j = fhSendUs;
     
     // Debug output (only shown at debug level)
     spdlog::debug("Trade: sym={} tradeId={} price={:.2f} qty={:.4f} fhParseUs={} fhSendUs={} fhSeqNo={}",
         sym, tradeId, price, qty, fhParseUs, fhSendUs, fhSeqNo_);
     
-    // Publish to TP
-    K result = k(-tpHandle_, (S)".u.upd", ks((S)"trade_binance"), row, (K)0);
+    // Publish to TP. Async k() consumes its K args, so we release ownership
+    // out of the wrapper. After this, `row` is empty - any attempt to reuse
+    // it on the reconnect path below would just pass NULL (compile-time safe).
+    K result = k(-tpHandle_, (S)".u.upd", ks((S)"trade_binance"), row.release(), (K)0);
     
     // Update health: message published
     lastPubTime_ = std::chrono::system_clock::now();
@@ -239,8 +246,24 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
         kclose(tpHandle_);
         tpHandle_ = -1;
         if (connectToTP()) {
-            // Resend to new connection
-            k(-tpHandle_, (S)".u.upd", ks((S)"trade_binance"), row, (K)0);
+            // Build a fresh row for the resend - the original was consumed
+            // by the failed k() above. (Pre-RAII this code reused the freed
+            // row pointer, a use-after-free.)
+            t2s::KOwned row2(knk(12,
+                ktj(-KP, fhRecvTimeUtcNs - KDB_EPOCH_OFFSET_NS),
+                ks((S)sym),
+                kj(tradeId),
+                kf(price),
+                kf(qty),
+                kb(buyerIsMaker),
+                kj(exchEventTimeMs),
+                kj(exchTradeTimeMs),
+                kj(fhRecvTimeUtcNs),
+                kj(fhParseUs),
+                kj(fhSendUs),
+                kj(fhSeqNo_)
+            ));
+            k(-tpHandle_, (S)".u.upd", ks((S)"trade_binance"), row2.release(), (K)0);
         }
     }
 }
@@ -353,7 +376,7 @@ void TradeFeedHandler::publishHealth() {
     };
     
     // Build health row (10 fields)
-    K row = knk(10,
+    t2s::KOwned row(knk(10,
         ktj(-KP, toKdbTs(now)),                    // time
         ks((S)"trade_fh"),                          // handler
         ktj(-KP, toKdbTs(startTime_)),             // startTimeUtc
@@ -364,10 +387,10 @@ void TradeFeedHandler::publishHealth() {
         ktj(-KP, toKdbTs(lastPubTime_)),           // lastPubTimeUtc
         ks((S)connState_.c_str()),                  // connState
         ki(static_cast<int>(symbols_.size()))       // symbolCount
-    );
+    ));
     
     // Publish to TP (fire and forget)
-    k(-tpHandle_, (S)".u.upd", ks((S)"health_feed_handler"), row, (K)0);
+    k(-tpHandle_, (S)".u.upd", ks((S)"health_feed_handler"), row.release(), (K)0);
     
     spdlog::debug("Health published: uptime={}s msgs={}/{} state={}", 
         uptimeSec, msgsReceived_, msgsPublished_, connState_);

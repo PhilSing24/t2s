@@ -8,6 +8,7 @@
 
 #include "quote_feed_handler.hpp"
 #include "socket_utils.hpp"
+#include "k_object.hpp"
 
 #include <rapidjson/document.h>
 #include <spdlog/spdlog.h>
@@ -509,7 +510,7 @@ void QuoteFeedHandler::publishL5(const L5Quote& quote) {
     // Schema: time, sym, bidPrice1..5, bidQty1..5, askPrice1..5, askQty1..5, 
     //         isValid, exchEventTimeMs, fhRecvTimeUtcNs, fhParseUs, fhSendUs, fhSeqNo
     
-    K row = knk(28,
+    t2s::KOwned row(knk(28,
         // time, sym
         ktj(-KP, quote.fhRecvTimeUtcNs - KDB_EPOCH_OFFSET_NS),
         ks((S)quote.sym.c_str()),
@@ -544,15 +545,16 @@ void QuoteFeedHandler::publishL5(const L5Quote& quote) {
         kj(lastParseUs_),                              // fhParseUs
         kj(0LL),                                       // fhSendUs placeholder
         kj(quote.fhSeqNo)
-    );
+    ));
     
-    // Capture send time
+    // Capture send time and patch the placeholder via borrowed view.
     auto sendEnd = std::chrono::steady_clock::now();
     long long fhSendUs = std::chrono::duration_cast<std::chrono::microseconds>(
         sendEnd - sendStart).count();
-    kK(row)[26]->j = fhSendUs;  // Update fhSendUs field (index 26)
+    t2s::KBorrowed sendField(kK(row.get())[26]);
+    sendField.get()->j = fhSendUs;
     
-    K result = k(-tpHandle_, (S)".u.upd", ks((S)"quote_binance"), row, (K)0);
+    K result = k(-tpHandle_, (S)".u.upd", ks((S)"quote_binance"), row.release(), (K)0);
     
     // Update health: message published
     lastPubTime_ = std::chrono::system_clock::now();
@@ -565,8 +567,9 @@ void QuoteFeedHandler::publishL5(const L5Quote& quote) {
         kclose(tpHandle_);
         tpHandle_ = -1;
         if (connectToTP()) {
-            // Resend to new connection
-            K row2 = knk(28,
+            // Build a fresh row for the resend - the original was consumed
+            // by the failed k() above.
+            t2s::KOwned row2(knk(28,
                 ktj(-KP, quote.fhRecvTimeUtcNs - KDB_EPOCH_OFFSET_NS),
                 ks((S)quote.sym.c_str()),
                 kf(quote.bidPrice1), kf(quote.bidPrice2), kf(quote.bidPrice3),
@@ -583,8 +586,8 @@ void QuoteFeedHandler::publishL5(const L5Quote& quote) {
                 kj(lastParseUs_),
                 kj(fhSendUs),
                 kj(quote.fhSeqNo)
-            );
-            k(-tpHandle_, (S)".u.upd", ks((S)"quote_binance"), row2, (K)0);
+            ));
+            k(-tpHandle_, (S)".u.upd", ks((S)"quote_binance"), row2.release(), (K)0);
         }
     }
 }
@@ -605,7 +608,7 @@ void QuoteFeedHandler::publishHealth() {
     };
     
     // Build health row (10 fields)
-    K row = knk(10,
+    t2s::KOwned row(knk(10,
         ktj(-KP, toKdbTs(now)),                    // time
         ks((S)"quote_fh"),                          // handler
         ktj(-KP, toKdbTs(startTime_)),             // startTimeUtc
@@ -616,10 +619,10 @@ void QuoteFeedHandler::publishHealth() {
         ktj(-KP, toKdbTs(lastPubTime_)),           // lastPubTimeUtc
         ks((S)connState_.c_str()),                  // connState
         ki(static_cast<int>(symbolsLower_.size()))  // symbolCount
-    );
+    ));
     
     // Publish to TP (fire and forget)
-    k(-tpHandle_, (S)".u.upd", ks((S)"health_feed_handler"), row, (K)0);
+    k(-tpHandle_, (S)".u.upd", ks((S)"health_feed_handler"), row.release(), (K)0);
     
     spdlog::debug("Health published: uptime={}s msgs={}/{} state={}", 
         uptimeSec, msgsReceived_, msgsPublished_, connState_);
