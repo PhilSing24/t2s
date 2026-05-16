@@ -2,7 +2,7 @@
 
 A real-time Binance market data pipeline built with C++ and KDB-X. Dual feed handlers (trades + L5 order book) stream into a tickerplant-fanout architecture with batched analytics, RSI-based signal generation, simulated P&L tracking, and durability-log replay (WDB recovers from disconnects). A historical data store (`hdb_binancedata/`) supports offline research and feature-engineering primitives drawn from López de Prado's *Advances in Financial Machine Learning*.
 
-Architecture patterns originally inspired by *Building Real-Time Event-Driven KDB-X Systems* by Data Intellect; extended with TLS-verified WS/REST, TCP keepalive and dead-connection detection, per-stream sequence-gap surfacing, async snapshot fetching, replay-on-reconnect, and a multi-language test suite.
+Architecture patterns originally inspired by *Building Real-Time Event-Driven KDB-X Systems* by Data Intellect; extended with TLS-verified WS/REST, TCP keepalive and dead-connection detection, per-stream sequence-gap surfacing, Binance-spec-correct order book reconciliation, async snapshot fetching, replay-on-reconnect, RAII-managed kdb+ IPC, drop-and-count JSON parsing, and a multi-language test suite.
 
 ## Architecture
 
@@ -51,6 +51,8 @@ t2s/
 ├── cpp/                      # Feed handlers (C++)
 │   ├── include/              # Public headers
 │   │   ├── config.hpp                # JSON config loader for FH binaries
+│   │   ├── json_reader.hpp           # Safe accessors for rapidjson (no-throw, type-checked)
+│   │   ├── k_object.hpp              # RAII wrappers for kdb+ K objects (KOwned/KBorrowed)
 │   │   ├── logger.hpp                # spdlog setup helper
 │   │   ├── order_book_manager.hpp    # L5 book reconstruction + state machine
 │   │   ├── quote_feed_handler.hpp    # Quote FH class declaration
@@ -98,7 +100,8 @@ t2s/
 │   ├── test_wdb_eod.sh       # End-to-end WDB EOD persistence test
 │   ├── wdb_eod_body.q        # Q assertions invoked by test_wdb_eod.sh
 │   ├── test_order_book.cpp   # C++ unit tests for OrderBookManager (Catch2)
-│   └── test_snapshot_worker.cpp  # C++ unit tests for SnapshotWorker (Catch2)
+│   ├── test_snapshot_worker.cpp  # C++ unit tests for SnapshotWorker (Catch2)
+│   └── test_json_reader.cpp  # C++ unit tests for JsonReader + parseLevelPair (Catch2)
 ├── config/                   # Feed handler JSON configs
 ├── dashboards/               # KX Dashboards (Analytics, DataFlow, FH, Trades/Quotes)
 ├── hdb/                      # Live HDB partitions (gitignored, populated at EOD)
@@ -184,7 +187,11 @@ The runner discovers `tests/test_*.q`, `tests/test_*.sh`, and any compiled binar
 - **`test_schemas.q`** — schemas.q column counts, types, and derived index positions. Catches accidental schema changes that would break the rest of the pipeline.
 - **`test_smoke.sh`** — starts each q process (tp, ctp, rdb, wdb, sig, pnl, rte, tel) in isolation against test ports, asserts `.health[]` returns a sane response. Catches load-time errors and missing `.health[]` interface.
 - **`test_wdb_eod.sh`** — full TP→WDB integration test: publishes synthetic data, forces EOD, verifies a partition lands in the sandbox HDB with correct row counts. Validates the EOD persistence path end-to-end.
-- **`build/test_order_book`** — C++ unit tests (Catch2) for `OrderBookManager`: state machine (INIT→SYNCING→VALID→INVALID), snapshot truncation/padding, delta semantics (insert/update/delete via qty=0), sequence-gap detection, multi-symbol independence. Built when `cpp/third_party/catch2/catch_amalgamated.{hpp,cpp}` are present (download from https://github.com/catchorg/Catch2/releases).
+- **`build/test_order_book`** — C++ unit tests (Catch2) for `OrderBookManager`: state machine (INIT→SYNCING→VALID→INVALID), snapshot truncation/padding, delta semantics (insert/update/delete via qty=0), sequence-gap detection, multi-symbol independence, and Binance-spec compliance for overlapping deltas, boundary cases, and entirely-stale events.
+- **`build/test_snapshot_worker`** — C++ unit tests (Catch2) for `SnapshotWorker`: bounded-queue semantics, drop-oldest on overflow, worker thread lifecycle, request-id stale-result discard, shutdown signalling.
+- **`build/test_json_reader`** — C++ unit tests (Catch2) for `JsonReader` and `parseLevelPair`: missing keys, wrong types, malformed numeric strings, nested-object error propagation, first-error-wins semantics, and level-array edge cases (wrong shape, non-string elements, unparseable content, future-compat with extra elements).
+
+C++ tests are built when `cpp/third_party/catch2/catch_amalgamated.{hpp,cpp}` are present (download from https://github.com/catchorg/Catch2/releases).
 
 Tests run on isolated ports (production + 10000) so they're safe to run while the live pipeline is up. Sandbox state goes under `tests/sandbox/` and is auto-cleaned on success, preserved on failure for inspection.
 
@@ -284,7 +291,7 @@ Range mode skips dates whose partition already exists (so backfills are idempote
 
 The ML pipeline (`kdb/ml/`) is actively developed and APIs may change. The live tick pipeline is the stable, primary deliverable.
 
-C++ unit tests currently cover `OrderBookManager` (17 cases, 73 assertions) and `SnapshotWorker` (13 cases, 51 assertions). Feed handler classes don't yet have isolated tests; they're exercised end-to-end via the live pipeline.
+C++ unit tests currently cover `OrderBookManager` (23 cases, 98 assertions), `SnapshotWorker` (13 cases, 51 assertions), and `JsonReader` (17 cases, 51 assertions). Feed handler classes don't yet have isolated tests; they're exercised end-to-end via the live pipeline. Trade output was end-to-end validated against the Binance Vision archive on 2026-05-09 (1,002,373 BTCUSDT trades, byte-identical modulo µs/ms timestamp resolution — Binance Vision archives carry microsecond precision, the WebSocket stream publishes milliseconds).
 
 WDB replay-on-reconnect (Phase 4) reads only the current day's durability log. Disconnects spanning midnight UTC will not catch up data from the prior day — operationally rare on a single machine, but a known limitation.
 
