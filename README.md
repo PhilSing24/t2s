@@ -6,9 +6,7 @@ Architecture patterns originally inspired by *Building Real-Time Event-Driven KD
 
 ## Architecture
 
-```
 ![Architecture Overview](images/DiagramArchitectureOverview.jpg)
-```
 
 Each downstream process auto-reconnects with exponential backoff. The TP writes a durability log per day. **WDB persists a checkpoint and replays missed data from the durability log on reconnect** (Phase 4); other subscribers (CTP, RDB, RTE, TEL, SIG, PNL) are best-effort live analytics that may have gaps after disconnect. Feed handler TLS connections to Binance are fully verified (peer cert + hostname), use TCP keepalive plus a 30s WebSocket idle timeout to detect dead connections within ~90s, and TP tracks per-stream sequence-number gaps so missed messages are surfaced rather than silent.
 
