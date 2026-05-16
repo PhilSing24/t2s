@@ -97,6 +97,19 @@ if(EXISTS ${CATCH2_DIR}/catch_amalgamated.cpp)
         OpenSSL::SSL
         OpenSSL::Crypto
     )
+
+    # JsonReader is a header-only, rapidjson-only utility, so this test
+    # doesn't need any of the FH/network/kdb link surface - just Catch2
+    # and the standard library (rapidjson is header-only).
+    add_executable(test_json_reader
+        tests/test_json_reader.cpp
+        ${CATCH2_DIR}/catch_amalgamated.cpp
+    )
+
+    target_include_directories(test_json_reader PRIVATE
+        ${INCLUDE_DIR}
+        ${CATCH2_DIR}
+    )
 else()
     message(STATUS "Catch2 not found at ${CATCH2_DIR} - skipping test_order_book target")
     message(STATUS "  Download catch_amalgamated.hpp/.cpp from")

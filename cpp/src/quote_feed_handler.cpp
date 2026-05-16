@@ -9,10 +9,13 @@
 #include "quote_feed_handler.hpp"
 #include "socket_utils.hpp"
 #include "k_object.hpp"
+#include "json_reader.hpp"
 
 #include <rapidjson/document.h>
+#include <rapidjson/error/en.h>
 #include <spdlog/spdlog.h>
 
+#include <atomic>
 #include <chrono>
 #include <thread>
 #include <algorithm>
@@ -296,56 +299,83 @@ void QuoteFeedHandler::runWebSocketLoop() {
 // MESSAGE PROCESSING
 // ============================================================================
 
+namespace {
+
+// Process-local counter for messages dropped due to malformed/unexpected JSON.
+// Logged with rate limiting (first 10, then every 1000th) to avoid log spam
+// on systematic schema breaks.
+std::atomic<long long> g_parseFailures{0};
+
+bool shouldLogParseFailure(long long count) noexcept {
+    return count <= 10 || (count % 1000) == 0;
+}
+
+} // namespace
+
 void QuoteFeedHandler::processMessage(const std::string& msg, long long fhRecvTimeUtcNs) {
     rapidjson::Document doc;
     doc.Parse(msg.c_str());
-    if (!doc.IsObject()) return;
-    
+    if (doc.HasParseError()) {
+        long long n = ++g_parseFailures;
+        if (shouldLogParseFailure(n)) {
+            spdlog::warn("quote JSON parse error [count={}]: {} at offset {} - msg: {}",
+                n,
+                rapidjson::GetParseError_En(doc.GetParseError()),
+                doc.GetErrorOffset(),
+                msg.substr(0, 200));
+        }
+        return;
+    }
+
     // Combined stream format: {"stream":"btcusdt@depth@100ms","data":{...}}
-    if (!doc.HasMember("data")) return;
-    const auto& d = doc["data"];
-    if (!d.IsObject()) return;
-    
-    // Extract symbol (uppercase)
-    if (!d.HasMember("s")) return;
-    std::string sym = d["s"].GetString();
-    
+    t2s::JsonReader root(doc);
+    t2s::JsonReader d = root.obj("data");
+    auto symField = d.string("s");
+    auto Uf       = d.int64("U");
+    auto uf       = d.int64("u");
+    auto Ef       = d.int64("E");
+    const auto* bArr = d.array("b");
+    const auto* aArr = d.array("a");
+
+    if (d.hasError()) {
+        long long n = ++g_parseFailures;
+        if (shouldLogParseFailure(n)) {
+            spdlog::warn("quote schema error [count={}]: {} - msg: {}",
+                n, d.lastError(), msg.substr(0, 200));
+        }
+        return;
+    }
+
+    // All required fields validated. Map to delta struct.
+    std::string sym(*symField);
     int symIdx = bookMgr_->getSymbolIndex(sym);
-    if (symIdx < 0) return;  // Unknown symbol
-    
-    // Parse delta fields
-    // U = first update ID, u = final update ID, E = event time
-    if (!d.HasMember("U") || !d.HasMember("u")) return;
-    
+    if (symIdx < 0) return;  // Unknown symbol (not a parse failure - configured subset)
+
     BufferedDelta delta;
-    delta.firstUpdateId = d["U"].GetInt64();
-    delta.finalUpdateId = d["u"].GetInt64();
-    delta.eventTimeMs = d.HasMember("E") ? d["E"].GetInt64() : 0;
-    
-    // Parse bid updates
-    if (d.HasMember("b") && d["b"].IsArray()) {
-        for (const auto& lvl : d["b"].GetArray()) {
-            if (lvl.IsArray() && lvl.Size() >= 2) {
-                PriceLevel pl;
-                pl.price = std::stod(lvl[0].GetString());
-                pl.qty = std::stod(lvl[1].GetString());
-                delta.bids.push_back(pl);
-            }
+    delta.firstUpdateId = *Uf;
+    delta.finalUpdateId = *uf;
+    delta.eventTimeMs   = *Ef;
+
+    // Per-level parsing. Malformed levels are silently skipped (per-level
+    // resilience) rather than failing the whole message - one bad price
+    // tick shouldn't invalidate the rest of the diff.
+    for (const auto& lvl : bArr->GetArray()) {
+        if (auto p = t2s::parseLevelPair(lvl)) {
+            PriceLevel pl;
+            pl.price = p->first;
+            pl.qty   = p->second;
+            delta.bids.push_back(pl);
         }
     }
-    
-    // Parse ask updates
-    if (d.HasMember("a") && d["a"].IsArray()) {
-        for (const auto& lvl : d["a"].GetArray()) {
-            if (lvl.IsArray() && lvl.Size() >= 2) {
-                PriceLevel pl;
-                pl.price = std::stod(lvl[0].GetString());
-                pl.qty = std::stod(lvl[1].GetString());
-                delta.asks.push_back(pl);
-            }
+    for (const auto& lvl : aArr->GetArray()) {
+        if (auto p = t2s::parseLevelPair(lvl)) {
+            PriceLevel pl;
+            pl.price = p->first;
+            pl.qty   = p->second;
+            delta.asks.push_back(pl);
         }
     }
-    
+
     // Handle delta based on book state
     handleDelta(symIdx, delta, fhRecvTimeUtcNs);
 }

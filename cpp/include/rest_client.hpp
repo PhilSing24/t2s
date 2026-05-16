@@ -20,6 +20,7 @@
 #include <boost/asio/ssl/host_name_verification.hpp>
 
 #include <rapidjson/document.h>
+#include <rapidjson/error/en.h>
 
 #include <string>
 #include <vector>
@@ -27,6 +28,7 @@
 #include <stdexcept>
 
 #include "order_book_manager.hpp"
+#include "json_reader.hpp"
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -158,58 +160,74 @@ private:
      *   "asks": [["4.00000200", "12.00000000"], ...]
      * }
      * 
-     * Note: Prices and quantities are strings in Binance API
+     * Note: Prices and quantities are strings in Binance API.
+     * 
+     * Uses JsonReader for safe field access (no rapidjson asserts, no
+     * std::stod exceptions). Malformed individual levels are silently
+     * skipped; top-level schema violations set result.error and abort.
      */
     void parseSnapshotResponse(const std::string& body, SnapshotData& result) {
         rapidjson::Document doc;
         doc.Parse(body.c_str());
 
+        if (doc.HasParseError()) {
+            result.error = std::string("JSON parse error: ")
+                         + rapidjson::GetParseError_En(doc.GetParseError());
+            return;
+        }
         if (!doc.IsObject()) {
-            result.error = "Invalid JSON response";
+            result.error = "Response not a JSON object";
             return;
         }
 
-        // Check for API error
+        // Check for API error first (separate response shape from success).
+        // We do this with raw rapidjson access since the JsonReader's
+        // accessors would set an error if "code" is missing in normal
+        // success responses.
         if (doc.HasMember("code")) {
-            result.error = "API error: " + std::to_string(doc["code"].GetInt());
-            if (doc.HasMember("msg")) {
-                result.error += " - " + std::string(doc["msg"].GetString());
+            int code = 0;
+            if (doc["code"].IsInt()) code = doc["code"].GetInt();
+            std::string apiMsg;
+            if (doc.HasMember("msg") && doc["msg"].IsString()) {
+                apiMsg = doc["msg"].GetString();
             }
+            result.error = "API error " + std::to_string(code) + ": " + apiMsg;
             return;
         }
 
-        // Extract lastUpdateId
-        if (!doc.HasMember("lastUpdateId")) {
-            result.error = "Missing lastUpdateId";
+        t2s::JsonReader r(doc);
+
+        auto lastId = r.int64("lastUpdateId");
+        const auto* bidsArr = r.array("bids");
+        const auto* asksArr = r.array("asks");
+
+        if (r.hasError()) {
+            result.error = "Snapshot schema error: " + r.lastError();
             return;
         }
-        result.lastUpdateId = doc["lastUpdateId"].GetInt64();
 
-        // Parse bids (already sorted high→low by exchange)
-        if (doc.HasMember("bids") && doc["bids"].IsArray()) {
-            const auto& bids = doc["bids"];
-            result.bids.reserve(bids.Size());
-            for (rapidjson::SizeType i = 0; i < bids.Size(); ++i) {
-                if (bids[i].IsArray() && bids[i].Size() >= 2) {
-                    PriceLevel lvl;
-                    lvl.price = std::stod(bids[i][0].GetString());
-                    lvl.qty = std::stod(bids[i][1].GetString());
-                    result.bids.push_back(lvl);
-                }
+        result.lastUpdateId = *lastId;
+
+        // Bids: pre-sorted high->low by exchange. Silently skip malformed
+        // levels (per-level resilience).
+        result.bids.reserve(bidsArr->Size());
+        for (const auto& lvl : bidsArr->GetArray()) {
+            if (auto p = t2s::parseLevelPair(lvl)) {
+                PriceLevel pl;
+                pl.price = p->first;
+                pl.qty   = p->second;
+                result.bids.push_back(pl);
             }
         }
 
-        // Parse asks (already sorted low→high by exchange)
-        if (doc.HasMember("asks") && doc["asks"].IsArray()) {
-            const auto& asks = doc["asks"];
-            result.asks.reserve(asks.Size());
-            for (rapidjson::SizeType i = 0; i < asks.Size(); ++i) {
-                if (asks[i].IsArray() && asks[i].Size() >= 2) {
-                    PriceLevel lvl;
-                    lvl.price = std::stod(asks[i][0].GetString());
-                    lvl.qty = std::stod(asks[i][1].GetString());
-                    result.asks.push_back(lvl);
-                }
+        // Asks: pre-sorted low->high by exchange.
+        result.asks.reserve(asksArr->Size());
+        for (const auto& lvl : asksArr->GetArray()) {
+            if (auto p = t2s::parseLevelPair(lvl)) {
+                PriceLevel pl;
+                pl.price = p->first;
+                pl.qty   = p->second;
+                result.asks.push_back(pl);
             }
         }
 

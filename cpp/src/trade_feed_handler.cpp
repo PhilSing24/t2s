@@ -6,10 +6,13 @@
 #include "trade_feed_handler.hpp"
 #include "socket_utils.hpp"
 #include "k_object.hpp"
+#include "json_reader.hpp"
 
 #include <rapidjson/document.h>
+#include <rapidjson/error/en.h>
 #include <spdlog/spdlog.h>
 
+#include <atomic>
 #include <chrono>
 #include <thread>
 
@@ -84,6 +87,22 @@ void TradeFeedHandler::stop() {
 // ============================================================================
 // PRIVATE METHODS
 // ============================================================================
+
+namespace {
+
+// Process-local counter for messages dropped due to malformed/unexpected JSON.
+// Logged with rate limiting (first 10, then every 1000th) to avoid log spam
+// on systematic schema breaks; not exposed in the health table since that
+// would require a kdb-side schema change.
+std::atomic<long long> g_parseFailures{0};
+
+// Returns true on the first 10 increments, then every 1000th. Used to
+// cap the log volume of repeat parse failures.
+bool shouldLogParseFailure(long long count) noexcept {
+    return count <= 10 || (count % 1000) == 0;
+}
+
+} // namespace
 
 std::string TradeFeedHandler::buildStreamPath() const {
     std::string path = "/stream?streams=";
@@ -168,29 +187,56 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
     // Start monotonic timer for parse latency
     auto parseStart = std::chrono::steady_clock::now();
     
-    // Parse JSON
+    // Parse JSON. rapidjson asserts on type-mismatch in GetX() calls and
+    // std::stod throws on garbage, so we never touch the raw API directly -
+    // all field access goes through JsonReader, which returns nullopt and
+    // accumulates an error string on missing/wrong-type/parse failures.
     rapidjson::Document doc;
     doc.Parse(msg.c_str());
-    if (!doc.IsObject()) return;
-    
-    // Combined stream format: {"stream":"btcusdt@trade","data":{...}}
-    if (!doc.HasMember("data")) return;
-    const rapidjson::Value& d = doc["data"];
-    
-    if (!d.IsObject()) return;
-    if (!d.HasMember("s")) return;
-    
-    // Extract trade fields
-    const char* sym = d["s"].GetString();
-    long long tradeId = d["t"].GetInt64();
-    double price = std::stod(d["p"].GetString());
-    double qty = std::stod(d["q"].GetString());
-    bool buyerIsMaker = d["m"].GetBool();
-    long long exchEventTimeMs = d["E"].GetInt64();
-    long long exchTradeTimeMs = d["T"].GetInt64();
-    
+    if (doc.HasParseError()) {
+        long long n = ++g_parseFailures;
+        if (shouldLogParseFailure(n)) {
+            spdlog::warn("trade JSON parse error [count={}]: {} at offset {} - msg: {}",
+                n,
+                rapidjson::GetParseError_En(doc.GetParseError()),
+                doc.GetErrorOffset(),
+                msg.substr(0, 200));
+        }
+        return;
+    }
+
+    t2s::JsonReader root(doc);
+    t2s::JsonReader d = root.obj("data");
+    auto sym      = d.string("s");
+    auto tradeId  = d.int64("t");
+    auto price    = d.priceString("p");
+    auto qty      = d.priceString("q");
+    auto buyerMkr = d.boolean("m");
+    auto evtTime  = d.int64("E");
+    auto trdTime  = d.int64("T");
+
+    if (d.hasError()) {
+        long long n = ++g_parseFailures;
+        if (shouldLogParseFailure(n)) {
+            spdlog::warn("trade schema error [count={}]: {} - msg: {}",
+                n, d.lastError(), msg.substr(0, 200));
+        }
+        return;
+    }
+
+    // All fields validated. string_view points into doc (alive for this
+    // function's scope); copy to std::string for stable lifetime through
+    // the kdb row construction below.
+    std::string symStr(*sym);
+    long long tradeIdV       = *tradeId;
+    double priceV            = *price;
+    double qtyV              = *qty;
+    bool buyerIsMaker        = *buyerMkr;
+    long long exchEventTimeMs = *evtTime;
+    long long exchTradeTimeMs = *trdTime;
+
     // Validate sequence
-    validateTradeId(sym, tradeId);
+    validateTradeId(symStr, tradeIdV);
     
     // End parse timer
     auto parseEnd = std::chrono::steady_clock::now();
@@ -204,10 +250,10 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
     // constructions don't need separate wrapping.
     t2s::KOwned row(knk(12,
         ktj(-KP, fhRecvTimeUtcNs - KDB_EPOCH_OFFSET_NS),
-        ks((S)sym),
-        kj(tradeId),
-        kf(price),
-        kf(qty),
+        ks((S)symStr.c_str()),
+        kj(tradeIdV),
+        kf(priceV),
+        kf(qtyV),
         kb(buyerIsMaker),
         kj(exchEventTimeMs),
         kj(exchTradeTimeMs),
@@ -228,7 +274,7 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
     
     // Debug output (only shown at debug level)
     spdlog::debug("Trade: sym={} tradeId={} price={:.2f} qty={:.4f} fhParseUs={} fhSendUs={} fhSeqNo={}",
-        sym, tradeId, price, qty, fhParseUs, fhSendUs, fhSeqNo_);
+        symStr, tradeIdV, priceV, qtyV, fhParseUs, fhSendUs, fhSeqNo_);
     
     // Publish to TP. Async k() consumes its K args, so we release ownership
     // out of the wrapper. After this, `row` is empty - any attempt to reuse
@@ -251,10 +297,10 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
             // row pointer, a use-after-free.)
             t2s::KOwned row2(knk(12,
                 ktj(-KP, fhRecvTimeUtcNs - KDB_EPOCH_OFFSET_NS),
-                ks((S)sym),
-                kj(tradeId),
-                kf(price),
-                kf(qty),
+                ks((S)symStr.c_str()),
+                kj(tradeIdV),
+                kf(priceV),
+                kf(qtyV),
                 kb(buyerIsMaker),
                 kj(exchEventTimeMs),
                 kj(exchTradeTimeMs),
