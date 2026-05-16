@@ -26,6 +26,28 @@ Each downstream process auto-reconnects with exponential backoff. The TP writes 
 | PNL       | 5018  | CTP           | P&L and position monitoring                            |
 | MLE       | 5032  | TP            | ML engine (research, not auto-started) — dollar-imbalance bars, threshold adaptation |
 
+## The System in Action
+
+**System Health Monitoring** — Health status of main processes.
+
+![System Health Monitoring](images/SystemHealthView.jpg)
+
+**Feed Handler Monitoring** — Feedhandler latency metrics for trade and quote ingestion.
+
+![Feed Handler Monitoring](images/FeedhandlerMonitoringView.png)
+
+**Dataflow Monitoring** — Data volume, system resources, and end-to-end latency breakdown.
+
+![Dataflow Monitoring](images/DataFlowMonitoringView.png)
+
+**Analytics** — VWAP, Volatility, Order Book Imbalance.
+
+![Analytics](images/RealTimeAnalyticsView.jpg)
+
+**Trades & Quotes** — Live order books and OHLC charts per symbol.
+
+![Trades & Quotes](images/TradesQuotesView.png)
+
 ## Project Layout
 
 ```
