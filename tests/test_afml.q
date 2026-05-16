@@ -52,6 +52,9 @@
     -1 "============================================";
     -1 raze ("Pass: "; string .t.pass; "  Fail: "; string .t.fail);
     -1 "============================================";
+    / Small sleep to let stdout flush before exit. Without this, the lines
+    / above can be lost on KDB-X 5.0 when exit fires too quickly.
+    system "sleep 0.1";
     $[.t.fail > 0; exit 1; exit 0]
     };
 
@@ -73,10 +76,8 @@
 hdbPath: 1_ string .afml.cfg.hdb;
 -1 raze ("test_afml.q: HDB path resolved to: "; hdbPath);
 
-/ Sanity-check that the path exists on disk. Diagnostic print so we can see
-/ what key returns even if the check passes.
+/ Sanity-check that the path exists on disk before trying to \l it.
 pathExists: not () ~ key hsym `$hdbPath;
--1 raze ("test_afml.q: path exists check: "; string pathExists);
 
 if[not pathExists;
     .t.skip raze ("HDB directory not found at "; hdbPath)];
@@ -220,32 +221,23 @@ ratio: maxTh % minTh;
 preBars:  count .afml.bars;
 preBN:    (first 0!.afml.state)`bn;
 preTheta: (first 0!.afml.state)`theta;
--1 "    [diag] pre-save snapshot taken";
 
 .afml.save[];
--1 "    [diag] save returned";
 
 / Wipe in-memory tables.
 .afml.bars:  ();
 .afml.state: ();
--1 "    [diag] in-memory wiped";
 
 .afml.ld[];
--1 "    [diag] load returned";
 
 .t.eq[count .afml.bars; preBars; "bar count changed after save/load round-trip"];
--1 "    [diag] assertion 1 done";
 .t.eq[(first 0!.afml.state)`bn; preBN; "state bn changed after save/load round-trip"];
--1 "    [diag] assertion 2 done";
 .t.eq[(first 0!.afml.state)`theta; preTheta; "state theta changed after save/load round-trip"];
--1 "    [diag] assertion 3 done";
 
 / Cleanup the polluted save files. @[] absorbs hdel failures (e.g. if the
 / files were never written due to an earlier test failure).
 @[hdel; hsym `$"afml_bars";  {[e] -1 raze ("    note: "; e)}];
--1 "    [diag] cleanup 1 done";
 @[hdel; hsym `$"afml_state"; {[e] -1 raze ("    note: "; e)}];
--1 "    [diag] cleanup 2 done";
 
 / ============================================================================
 / Report
