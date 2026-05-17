@@ -5,7 +5,10 @@
 set -e  # Exit on error
 
 SESSION="t2s"
-BASEDIR="$HOME/t2s"
+# Resolve the project root from the script's own location so this works
+# regardless of where the repo is cloned (previously hardcoded $HOME/t2s,
+# which silently launched the wrong copy if you had multiple checkouts).
+BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Colors for output
 RED='\033[0;31m'

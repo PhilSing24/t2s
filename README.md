@@ -126,7 +126,16 @@ t2s/
 - C++17 compiler, CMake 3.16+
 - Boost (Beast, Asio), OpenSSL, RapidJSON, spdlog
 
+On Ubuntu/WSL the system libraries can be installed with:
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake \
+    libboost-system-dev libssl-dev libspdlog-dev rapidjson-dev
+```
+
 A helper script `install_kdb.sh` is provided for kdb+ setup.
+
+Catch2 is optional (only used to build the C++ test binaries). If `cpp/third_party/catch2/catch_amalgamated.{hpp,cpp}` is present, the test targets are built; otherwise CMake prints a notice and skips them. Download the amalgamated headers from https://github.com/catchorg/Catch2/releases (v3.x).
 
 ## Build
 
@@ -167,6 +176,8 @@ q kdb/analytics/pnl.q
 ./build/trade_feed_handler config/trade_feed_handler.json
 ./build/quote_feed_handler config/quote_feed_handler.json
 ```
+
+The feed handler binaries take a config file path as their only argument. If invoked with no argument (as `start.sh` does), each falls back to `config/<binary_name>.json` relative to the working directory, which is why `start.sh` runs them without an explicit path after `cd $BASEDIR`. To run from elsewhere, pass the config explicitly as shown above.
 
 ## Configuration
 

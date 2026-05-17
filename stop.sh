@@ -3,7 +3,9 @@
 # Usage: ./stop.sh [-f|--force]
 
 SESSION="t2s"
-BASEDIR="$HOME/t2s"
+# Resolve the project root from the script's own location so this works
+# regardless of where the repo is cloned.
+BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIDDIR="$BASEDIR/kdb/logs/processes"
 
 # Colors
