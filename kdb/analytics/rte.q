@@ -12,6 +12,7 @@
 .rte.cfg.logDir:"logs";
 .rte.cfg.volWindowSec:30;             / Return window (30 sec)
 .rte.cfg.volMinReturns:30;            / Min returns before displaying vol
+.rte.cfg.volRollingWindowMin:60;      / Returns older than this are pruned from the vol stddev sample
 .rte.cfg.obiAlpha:0.05;               / EMA smoothing (lower = smoother)
 .rte.cfg.iVol:`BTCUSDT`ETHUSDT`SOLUSDT!45.00 65.00 67.00;  / 30-day implied vol (%)
 .rte.cfg.historyRetentionMin:60;      / Keep 60 minutes of history
@@ -35,6 +36,7 @@ system "g 0";
 
 / Derived config
 .rte.cfg.volWindowNs:.rte.cfg.volWindowSec * 1000000000j;
+.rte.cfg.volRollingWindowNs:.rte.cfg.volRollingWindowMin * 60 * 1000000000j;
 .rte.cfg.historyRetentionNs:.rte.cfg.historyRetentionMin * 60 * 1000000000j;
 
 / Statistics
@@ -74,7 +76,7 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo];
 
 / Volatility - rolling returns
 .rte.st.volPrices:()!();   / sym -> list of (time; price)
-.rte.st.volReturns:()!();  / sym -> list of returns
+.rte.st.volReturns:()!();  / sym -> list of (time; return) pairs, pruned to volRollingWindowMin
 .rte.st.volLatest:()!();   / sym -> (annualizedVol; returnCount; isValid)
 .rte.st.volLastInsert:()!();  / sym -> last history insert time (throttle)
 
@@ -110,7 +112,10 @@ vol_history:([]
 
 / Calculate next retry delay with exponential backoff
 .rte.conn.getDelay:{[]
-  delay:.rte.conn.cfg.baseDelayMs * `long$.rte.conn.cfg.backoffMultiplier xexp .rte.conn.retryCount;
+  / Cast to long AFTER the multiplication (was: cast multiplier first, which
+  / truncated 1.5^N to int, producing degenerate sequence 1s, 1s, 2s, 3s, 5s
+  / instead of smooth 1s, 1.5s, 2.25s, 3.375s, ...)
+  delay:`long$ .rte.conn.cfg.baseDelayMs * .rte.conn.cfg.backoffMultiplier xexp .rte.conn.retryCount;
   delay & .rte.conn.cfg.maxDelayMs  / Cap at max
   };
 
@@ -219,14 +224,18 @@ vol_history:([]
   prices:.rte.st.volPrices[s];
   if[2 > count prices; :()];
   
-  / Find price from ~30 sec ago
+  / Find price closest to ~30 sec ago. `oldPrices` are all prices at least
+  / volWindowSec old; we want the YOUNGEST of those (closest to the 30s mark).
+  / Previously used `first oldPrices` which picked the oldest retained price -
+  / since volPrices is pruned to last 10 minutes, that gave a return over ~10
+  / minutes instead of 30 seconds, and the annualization was wildly wrong.
   cutoff:time - .rte.cfg.volWindowNs;
   oldPrices:prices where prices[;0] <= cutoff;
   
   if[0 = count oldPrices; :()];
   
-  / Use oldest price in window
-  oldPrice:first[oldPrices][1];
+  / Use newest price within window (i.e., the one closest to 30s ago)
+  oldPrice:last[oldPrices][1];
   
   / Guard: skip if old price is invalid
   if[(null oldPrice) or oldPrice <= 0; :()];
@@ -237,19 +246,28 @@ vol_history:([]
   / Guard: skip if return is invalid (inf, null)
   if[(null ret) or (ret = 0w) or (ret = -0w); :()];
   
-  / Store return
+  / Store return WITH its timestamp so we can prune by time window.
+  / Previously stored just the return value, causing volReturns to grow
+  / unboundedly and the "rolling" stddev to become cumulative-since-start.
   $[s in key .rte.st.volReturns;
-    .rte.st.volReturns[s],:ret;
-    .rte.st.volReturns[s]:enlist ret
+    .rte.st.volReturns[s],:enlist (time; ret);
+    .rte.st.volReturns[s]:enlist (time; ret)
   ];
+  
+  / Prune returns older than volRollingWindowMin. This is what makes the
+  / stddev actually rolling rather than cumulative.
+  retCutoff:time - .rte.cfg.volRollingWindowNs;
+  .rte.st.volReturns[s]:.rte.st.volReturns[s] where .rte.st.volReturns[s][;0] >= retCutoff;
   
   / Update volatility if enough returns
   nReturns:count .rte.st.volReturns[s];
   if[nReturns >= .rte.cfg.volMinReturns;
+    / Extract just the return values for stddev computation
+    retsOnly:.rte.st.volReturns[s][;1];
     / Annualize: sqrt(periods per year) * stddev
     / periods per year = 365*24*60*60 / volWindowSec
     periodsPerYear:31536000 % .rte.cfg.volWindowSec;
-    vol:sqrt[periodsPerYear] * dev .rte.st.volReturns[s];
+    vol:sqrt[periodsPerYear] * dev retsOnly;
     / Guard: only update if vol is valid and non-zero
     if[(not null vol) and vol > 0; 
       .rte.st.volLatest[s]:(vol; nReturns; 1b);
@@ -262,7 +280,8 @@ vol_history:([]
     ];
   ];
   
-  / Cleanup old prices (keep last 10 min worth)
+  / Cleanup old prices (keep last 10 min worth - same horizon as volReturns
+  / so we don't have to look beyond what's retained when computing returns).
   cutoffCleanup:time - 600000000000j;
   .rte.st.volPrices[s]:prices where prices[;0] >= cutoffCleanup;
   };
@@ -321,6 +340,11 @@ vol_history:([]
   if[not s in key .rte.st.book; :`sym`bid`ask`spread`mid!(s;0n;0n;0n;0n)];
   d:.rte.st.book[s];
   bid:d 0; ask:d 10;
+  / NOTE on mid formula: q has NO operator precedence and evaluates strictly
+  / right-to-left, so `0.5*bid+ask` parses as `0.5 * (bid+ask)` - the correct
+  / midpoint. A reader applying Python/C precedence would see this as
+  / `(0.5*bid)+ask` (incorrect), but in q that would require explicit parens.
+  / Verify: q) 0.5*100+200 -> 150 (not 250).
   `sym`bid`ask`spread`mid!(s; bid; ask; ask-bid; 0.5*bid+ask)
   };
 
