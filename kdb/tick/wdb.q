@@ -52,9 +52,19 @@ system "g 0";
 / Uses T2S_TMP_DIR if set (same env var as TMPSAVE) for consistency.
 .wdb.cfg.checkpointFile:hsym `$ raze ($[count v:getenv `T2S_TMP_DIR; v; "../"]; "wdb.lastTpSeqNo");
 
-/ Highest tpSeqNo successfully flushed to disk. Loaded from checkpoint
-/ on startup, advanced after each flush, persisted on each successful flush.
-.wdb.lastTpSeqNo:0j;
+/ Highest tpSeqNo successfully flushed to disk PER TABLE. Loaded from
+/ checkpoint on startup, advanced after each table's flush, persisted on
+/ each successful flush.
+/
+/ DESIGN NOTE: this must be per-table, not a single global counter. With
+/ a global cursor, flushing one table (say trade_binance reaches its 50k
+/ buffer first) would advance the checkpoint past unflushed rows of the
+/ other table (quote_binance with seqnos in the same range still in memory).
+/ A crash here loses those rows on replay since they're below the new
+/ checkpoint floor. Tracking per-table fixes this: trade's flush only
+/ advances trade's cursor, and quote replay still picks up its pending
+/ rows from the right point.
+.wdb.lastTpSeqNo: `trade_binance`quote_binance ! 0j 0j;
 
 / Phase 4 stats (separate from the existing stats group)
 .wdb.stats.replayRowsApplied:0j;
@@ -116,33 +126,44 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
 / Phase 4: Checkpoint persistence
 / -------------------------------------------------------
 
-/ Load checkpoint from disk. Returns 0 if no checkpoint exists yet.
+/ Load checkpoint from disk. Returns per-table dict, with backward-compat
+/ handling for the pre-fix scalar format (promoted to per-table by
+/ initializing both tables to that value - conservative, may cause some
+/ already-applied messages to be replayed but no data loss).
 .wdb.loadCheckpoint:{[]
   if[() ~ key .wdb.cfg.checkpointFile;
-    -1 "WDB: no checkpoint file, starting from tpSeqNo=0";
-    :0j
+    -1 "WDB: no checkpoint file, starting fresh (trade=0, quote=0)";
+    :`trade_binance`quote_binance ! 0j 0j
   ];
   v: @[get; .wdb.cfg.checkpointFile; {[err]
     -1 raze ("WDB: ERROR reading checkpoint - "; err);
-    0j
+    `trade_binance`quote_binance ! 0j 0j
   }];
-  -1 raze ("WDB: loaded checkpoint tpSeqNo="; string v);
+  / Legacy scalar format: a single long applied to both tables. This was
+  / the buggy original design - see DESIGN NOTE on .wdb.lastTpSeqNo above.
+  if[-7h = type v;
+    -1 raze ("WDB: migrating legacy scalar checkpoint "; string v; " -> per-table dict");
+    :`trade_binance`quote_binance ! (v;v)
+  ];
+  -1 raze ("WDB: loaded checkpoint - trade="; string v`trade_binance;
+           " quote="; string v`quote_binance);
   v
  };
 
-/ Persist checkpoint atomically. Writes to a temp file then renames so
-/ a crash mid-write doesn't corrupt the checkpoint file.
-.wdb.saveCheckpoint:{[seq]
+/ Persist checkpoint atomically. Writes the current .wdb.lastTpSeqNo dict
+/ to a temp file then renames so a crash mid-write doesn't corrupt the
+/ checkpoint file. Takes no args - always persists the current global.
+.wdb.saveCheckpoint:{[]
   / Build the temp file path by appending ".tmp" to the checkpoint path.
   / Cannot use ` sv (...; `tmp) - that treats the checkpoint as a directory.
   tmpStr: 1 _ string .wdb.cfg.checkpointFile;
   tmpFile: hsym `$ raze (tmpStr; ".tmp");
   / Use .[func; argList; errHandler] for multi-arg protected eval.
   / @[func; arg; errHandler] is the SINGLE-arg form and would treat
-  / our (tmpFile; seq) as a single list arg to set.
+  / our (tmpFile; dict) as a single list arg to set.
   / Sentinel: error handler returns the symbol `error`; success path
-  / returns whatever set returns (the seq value). We check by type.
-  result: .[set; (tmpFile; seq); {[err]
+  / returns whatever set returns. We check by type.
+  result: .[set; (tmpFile; .wdb.lastTpSeqNo); {[err]
     -1 raze ("WDB: ERROR writing checkpoint tmp - "; err);
     `error
   }];
@@ -158,7 +179,10 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
 
 / Calculate next retry delay with exponential backoff
 .wdb.conn.getDelay:{[]
-  delay:.wdb.conn.cfg.baseDelayMs * `long$.wdb.conn.cfg.backoffMultiplier xexp .wdb.conn.retryCount;
+  / Cast to long AFTER the multiplication (was: cast multiplier first, which
+  / truncated 1.5^N to int, producing degenerate sequence 1s, 1s, 2s, 3s, 5s
+  / instead of smooth 1s, 1.5s, 2.25s, 3.375s, ...)
+  delay:`long$ .wdb.conn.cfg.baseDelayMs * .wdb.conn.cfg.backoffMultiplier xexp .wdb.conn.retryCount;
   delay & .wdb.conn.cfg.maxDelayMs  / Cap at max
   };
 
@@ -230,7 +254,9 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
 / Run the full replay protocol against an open TP handle. Called by
 / .wdb.connect AFTER the subscribe completes.
 .wdb.runReplay:{[h]
-  -1 raze ("WDB: starting replay from tpSeqNo "; string .wdb.lastTpSeqNo + 1);
+  -1 raze ("WDB: starting replay - checkpoint state: trade=";
+           string .wdb.lastTpSeqNo`trade_binance;
+           " quote="; string .wdb.lastTpSeqNo`quote_binance);
 
   / Capture cutoff. Live messages already arriving (since we subscribed)
   / are stashed in replayLiveBuffer; on drain, any with tpSeqNo > cutoff
@@ -238,20 +264,27 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
   .wdb.replayCutoff: h ".tp.currentSeqNo[]";
   -1 raze ("WDB: replay cutoff = "; string .wdb.replayCutoff);
 
-  if[.wdb.replayCutoff < .wdb.lastTpSeqNo + 1;
-    -1 "WDB: nothing to replay (TP seqno is behind our checkpoint - probably TP restart with no log)";
-  ];
-
-  if[.wdb.replayCutoff >= .wdb.lastTpSeqNo + 1;
-    {[h; tbl]
-      replayRows: h(`.tp.replayFrom; tbl; .wdb.lastTpSeqNo + 1);
-      n: count replayRows;
-      -1 raze ("WDB: replaying "; string n; " "; string tbl; " rows");
-      / Each iteration of the table yields a dict row; convert to list
-      / via `value` to match the shape live upd() receives.
-      {[tbl; rowDict] .wdb.applyReplayRow[tbl; value rowDict]} [tbl;] each replayRows;
-    }[h;] each `trade_binance`quote_binance;
-  ];
+  / Per-table replay. Each iteration reads its own table's cursor fresh,
+  / so a flush triggered DURING trade replay (which advances trade's
+  / cursor) doesn't drag quote's starting point forward. This is critical
+  / - the previous global-cursor design lost quote rows because trade's
+  / replay would push the shared cursor past quote's checkpoint.
+  {[h; tbl]
+    fromSeq: .wdb.lastTpSeqNo[tbl] + 1;
+    if[.wdb.replayCutoff < fromSeq;
+      -1 raze ("WDB: nothing to replay for "; string tbl;
+               " (cutoff "; string .wdb.replayCutoff;
+               " < fromSeq "; string fromSeq; ")");
+      :()
+    ];
+    replayRows: h(`.tp.replayFrom; tbl; fromSeq);
+    n: count replayRows;
+    -1 raze ("WDB: replaying "; string n; " "; string tbl;
+             " rows from tpSeqNo "; string fromSeq);
+    / Each iteration of the table yields a dict row; convert to list
+    / via `value` to match the shape live upd() receives.
+    {[tbl; rowDict] .wdb.applyReplayRow[tbl; value rowDict]} [tbl;] each replayRows;
+  }[h;] each `trade_binance`quote_binance;
 
   / Drain live buffer (filtering duplicates against cutoff)
   .wdb.drainLiveBuffer each `trade_binance`quote_binance;
@@ -265,8 +298,9 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
 
 / Status helper for observability
 .wdb.replayStatus:{[]
-  `lastTpSeqNo`replayMode`replayCutoff`replayRowsApplied`replayDupsFiltered`bufferTrades`bufferQuotes!(
-    .wdb.lastTpSeqNo;
+  `lastTpSeqNoTrade`lastTpSeqNoQuote`replayMode`replayCutoff`replayRowsApplied`replayDupsFiltered`bufferTrades`bufferQuotes!(
+    .wdb.lastTpSeqNo`trade_binance;
+    .wdb.lastTpSeqNo`quote_binance;
     .wdb.replayMode;
     .wdb.replayCutoff;
     .wdb.stats.replayRowsApplied;
@@ -375,14 +409,13 @@ append:{[t;data]
   if[.wdb.cfg.maxRows<count value t;
     -1"WDB: Flushing ",string[t]," to disk (",string[count value t]," rows)";
 
-    / Phase 4: capture max tpSeqNo BEFORE flushing so we can advance the
-    / checkpoint after a successful flush.
+    / Capture max tpSeqNo for THIS table BEFORE flushing so we can advance
+    / the per-table checkpoint after a successful flush.
     maxSeq: max value[t]`tpSeqNo;
 
-    / Append enumerated buffer to disk. Phase 4 also addresses review issue #6
-    / (unprotected intraday flush) - wrap in protected eval so a write failure
-    / (disk full, permissions, etc.) doesn't tear down the process and leaves
-    / the in-memory buffer intact for retry on the next append call.
+    / Append enumerated buffer to disk. Wrap in protected eval so a write
+    / failure (disk full, permissions, etc.) doesn't tear down the process
+    / and leaves the in-memory buffer intact for retry on the next call.
     flushOk:@[{
         .[` sv TMPSAVE,x,`;();,;.Q.en[.wdb.cfg.hdbDir]`. x];
         1b
@@ -391,10 +424,12 @@ append:{[t;data]
     if[flushOk;
       .wdb.stats.flushCount+:1;
       .wdb.stats.rowsWritten+:count value t;
-      / Phase 4: advance and persist checkpoint after successful flush
-      if[maxSeq > .wdb.lastTpSeqNo;
-        .wdb.lastTpSeqNo: maxSeq;
-        .wdb.saveCheckpoint[maxSeq];
+      / Per-table checkpoint: only this table's cursor advances. Quote's
+      / cursor stays where it was, so a crash between this flush and the
+      / next quote flush still replays the right pending quote rows.
+      if[maxSeq > .wdb.lastTpSeqNo[t];
+        .wdb.lastTpSeqNo[t]: maxSeq;
+        .wdb.saveCheckpoint[];
       ];
       / Clear buffer
       @[`.;t;0#];
@@ -487,6 +522,10 @@ upd:{[tbl;data]
   cnt:count value t;
   if[0 = cnt; :1b];
   -1 .wdb.eod.msg ("Flushing final "; string t; " ("; string cnt; " rows)");
+  / Capture max seq BEFORE flush so we can advance the per-table checkpoint
+  / on success. If we crash between this flush and the partition move, restart
+  / will see this checkpoint and won't ask TP to replay rows already on disk.
+  maxSeq: max value[t]`tpSeqNo;
   ok:@[{[t]
     .[` sv TMPSAVE,t,`;();,;.Q.en[.wdb.cfg.hdbDir]`. t];
     1b
@@ -494,6 +533,11 @@ upd:{[tbl;data]
   if[ok;
     .wdb.stats.rowsWritten+:cnt;
     @[`.;t;0#];
+    / Advance and persist this table's checkpoint.
+    if[maxSeq > .wdb.lastTpSeqNo[t];
+      .wdb.lastTpSeqNo[t]: maxSeq;
+      .wdb.saveCheckpoint[];
+    ];
   ];
   ok
   };
@@ -641,8 +685,8 @@ endofday:{[]
 
   {
     if[0 < count value x;
-      / Phase 4: capture max tpSeqNo before flushing so we can advance
-      / the checkpoint after a successful flush, same as the auto-flush
+      / Capture max tpSeqNo for this table before flushing so we can advance
+      / its checkpoint after a successful flush. Same pattern as the auto-flush
       / path in append.
       maxSeq: max value[x]`tpSeqNo;
       -1 "WDB: Flushing ",string[x]," (",string[count value x]," rows)";
@@ -653,9 +697,9 @@ endofday:{[]
       if[flushOk;
         .wdb.stats.flushCount+:1;
         .wdb.stats.rowsWritten+:count value x;
-        if[maxSeq > .wdb.lastTpSeqNo;
-          .wdb.lastTpSeqNo: maxSeq;
-          .wdb.saveCheckpoint[maxSeq];
+        if[maxSeq > .wdb.lastTpSeqNo[x];
+          .wdb.lastTpSeqNo[x]: maxSeq;
+          .wdb.saveCheckpoint[];
         ];
         @[`.;x;0#];
       ];
