@@ -52,7 +52,10 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`rdbRecvTime
 
 / Calculate next retry delay with exponential backoff
 .rdb.conn.getDelay:{[]
-  delay:.rdb.conn.cfg.baseDelayMs * `long$.rdb.conn.cfg.backoffMultiplier xexp .rdb.conn.retryCount;
+  / Cast to long AFTER the multiplication (was: cast multiplier first, which
+  / truncated 1.5^N to int, producing degenerate sequence 1s, 1s, 2s, 3s, 5s
+  / instead of smooth 1s, 1.5s, 2.25s, 3.375s, ...)
+  delay:`long$ .rdb.conn.cfg.baseDelayMs * .rdb.conn.cfg.backoffMultiplier xexp .rdb.conn.retryCount;
   delay & .rdb.conn.cfg.maxDelayMs  / Cap at max
   };
 
@@ -264,9 +267,27 @@ endofday:{[]
   by sym from quote_binance
   };
 
-.rdb.lastTrades:{[n] select from(update rn:i by sym from trade_binance)where rn>=count[i]-n};
+/ Per-symbol "last N" queries. The previous formulation was:
+/   select from (update rn:i by sym from trade_binance) where rn>=count[i]-n
+/ which is broken: rn (from `by sym`) is per-symbol so it maxes at the per-sym
+/ row count, but count[i] in the outer select is the GLOBAL row count. With
+/ multiple symbols the filter rn>=globalCount-n is never satisfied and zero
+/ rows come back; with a single symbol it accidentally works. Fix: iterate
+/ over distinct symbols and take the last n of each, then concatenate.
+/ sublist with a negative count returns the last n elements (or all of them
+/ if the table has fewer than n rows) without padding.
 
-.rdb.lastQuotes:{[n] select from(update rn:i by sym from quote_binance)where rn>=count[i]-n};
+.rdb.lastTrades:{[n]
+  if[0 = count trade_binance; :0#trade_binance];
+  syms: exec distinct sym from trade_binance;
+  raze {[s; n] (neg n) sublist select from trade_binance where sym = s}[; n] each syms
+ };
+
+.rdb.lastQuotes:{[n]
+  if[0 = count quote_binance; :0#quote_binance];
+  syms: exec distinct sym from quote_binance;
+  raze {[s; n] (neg n) sublist select from quote_binance where sym = s}[; n] each syms
+ };
 
 / Get data within a time range
 .rdb.tradeRange:{[s;startTime;endTime]
