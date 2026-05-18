@@ -10,8 +10,8 @@
 .rte.cfg.port:5015;
 .rte.cfg.ctpPort:5014;                / Chained TP
 .rte.cfg.logDir:"logs";
-.rte.cfg.volWindowSec:30;             / Return window (30 sec)
-.rte.cfg.volMinReturns:30;            / Min returns before displaying vol
+.rte.cfg.volSampleIntervalSec:30;     / How often we sample a price + compute one return (sec)
+.rte.cfg.volMinReturns:10;            / Min returns before flagging vol as valid (was 30 with tick-rate sampling; lowered for 30s sampling)
 .rte.cfg.volRollingWindowMin:60;      / Returns older than this are pruned from the vol stddev sample
 .rte.cfg.obiAlpha:0.05;               / EMA smoothing (lower = smoother)
 .rte.cfg.iVol:`BTCUSDT`ETHUSDT`SOLUSDT!45.00 65.00 67.00;  / 30-day implied vol (%)
@@ -35,8 +35,11 @@ system "g 0";
 .proc.startTime:.z.p;
 
 / Derived config
-.rte.cfg.volWindowNs:.rte.cfg.volWindowSec * 1000000000j;
+.rte.cfg.volSampleIntervalNs:.rte.cfg.volSampleIntervalSec * 1000000000j;
 .rte.cfg.volRollingWindowNs:.rte.cfg.volRollingWindowMin * 60 * 1000000000j;
+/ Expected sample count when the rolling window is fully loaded. isValid
+/ flips to 1b only when nReturns reaches this. With defaults: 60*60/30 = 120.
+.rte.cfg.volTargetCount:`long$(.rte.cfg.volRollingWindowMin * 60) % .rte.cfg.volSampleIntervalSec;
 .rte.cfg.historyRetentionNs:.rte.cfg.historyRetentionMin * 60 * 1000000000j;
 
 / Statistics
@@ -74,11 +77,13 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo];
 / VWAP - sym -> (sumPxQty; sumQty; lastPrice; tradeCount)
 .rte.st.vwap:()!();
 
-/ Volatility - rolling returns
-.rte.st.volPrices:()!();   / sym -> list of (time; price)
-.rte.st.volReturns:()!();  / sym -> list of (time; return) pairs, pruned to volRollingWindowMin
-.rte.st.volLatest:()!();   / sym -> (annualizedVol; returnCount; isValid)
-.rte.st.volLastInsert:()!();  / sym -> last history insert time (throttle)
+/ Volatility - non-overlapping sampled returns
+/ Sample one return every volSampleIntervalSec; keep returns within
+/ volRollingWindowMin; stddev across those is the realized vol estimator.
+.rte.st.volLastSample:()!();   / sym -> (time; price) of last successful sample
+.rte.st.volReturns:()!();      / sym -> list of (time; return) pairs, pruned to volRollingWindowMin
+.rte.st.volLatest:()!();       / sym -> (annualizedVol; returnCount; isValid)
+.rte.st.volLastInsert:()!();   / sym -> last history insert time (throttle)
 
 / Order Book - L5 snapshot
 .rte.st.book:()!();        / sym -> L2 data
@@ -214,76 +219,66 @@ vol_history:([]
 / =============================================================================
 
 .rte.updVol:{[s;time;price]
-  / Add price point
-  $[s in key .rte.st.volPrices;
-    .rte.st.volPrices[s],:enlist (time; price);
-    .rte.st.volPrices[s]:enlist (time; price)
+  / Initialize on first trade we see for this symbol. We need a baseline
+  / before we can compute any return, so first trade just stores the
+  / baseline and exits.
+  if[not s in key .rte.st.volLastSample;
+    .rte.st.volLastSample[s]: (time; price);
+    :()
   ];
-  
-  / Check if we can calculate a return (30 sec window)
-  prices:.rte.st.volPrices[s];
-  if[2 > count prices; :()];
-  
-  / Find price closest to ~30 sec ago. `oldPrices` are all prices at least
-  / volWindowSec old; we want the YOUNGEST of those (closest to the 30s mark).
-  / Previously used `first oldPrices` which picked the oldest retained price -
-  / since volPrices is pruned to last 10 minutes, that gave a return over ~10
-  / minutes instead of 30 seconds, and the annualization was wildly wrong.
-  cutoff:time - .rte.cfg.volWindowNs;
-  oldPrices:prices where prices[;0] <= cutoff;
-  
-  if[0 = count oldPrices; :()];
-  
-  / Use newest price within window (i.e., the one closest to 30s ago)
-  oldPrice:last[oldPrices][1];
-  
-  / Guard: skip if old price is invalid
-  if[(null oldPrice) or oldPrice <= 0; :()];
-  
-  / Calculate log return
-  ret:log price % oldPrice;
-  
-  / Guard: skip if return is invalid (inf, null)
+
+  / Has enough time elapsed since the last sample?
+  / If not, this trade is inside the current sample window - skip it.
+  / This is the core of non-overlapping sampling: only the FIRST trade
+  / at or after `lastTime + sampleIntervalNs` becomes the next sample.
+  lastSample: .rte.st.volLastSample[s];
+  lastTime: lastSample[0];
+  if[(time - lastTime) < .rte.cfg.volSampleIntervalNs; :()];
+
+  / This trade crosses the sample boundary. Compute one log return
+  / against the previous sample.
+  lastPrice: lastSample[1];
+  if[(null lastPrice) or lastPrice <= 0; :()];
+
+  ret: log price % lastPrice;
   if[(null ret) or (ret = 0w) or (ret = -0w); :()];
-  
-  / Store return WITH its timestamp so we can prune by time window.
-  / Previously stored just the return value, causing volReturns to grow
-  / unboundedly and the "rolling" stddev to become cumulative-since-start.
+
+  / Advance the sample marker. Subsequent trades within the next
+  / sampleIntervalNs window will be ignored until we cross again.
+  .rte.st.volLastSample[s]: (time; price);
+
+  / Store the return with its timestamp so we can prune by clock time.
   $[s in key .rte.st.volReturns;
     .rte.st.volReturns[s],:enlist (time; ret);
     .rte.st.volReturns[s]:enlist (time; ret)
   ];
-  
-  / Prune returns older than volRollingWindowMin. This is what makes the
-  / stddev actually rolling rather than cumulative.
-  retCutoff:time - .rte.cfg.volRollingWindowNs;
-  .rte.st.volReturns[s]:.rte.st.volReturns[s] where .rte.st.volReturns[s][;0] >= retCutoff;
-  
-  / Update volatility if enough returns
-  nReturns:count .rte.st.volReturns[s];
+
+  / Prune returns older than the rolling window. Strict `>` (not `>=`) so
+  / the count is stable at exactly volTargetCount once steady state is
+  / reached - inclusive prune would oscillate between target and target+1
+  / at the boundary.
+  retCutoff: time - .rte.cfg.volRollingWindowNs;
+  .rte.st.volReturns[s]: .rte.st.volReturns[s] where .rte.st.volReturns[s][;0] > retCutoff;
+
+  / At steady state, count stabilizes at volTargetCount (= 120 with
+  / defaults). isValid=1b only once the window is fully loaded.
+  nReturns: count .rte.st.volReturns[s];
   if[nReturns >= .rte.cfg.volMinReturns;
-    / Extract just the return values for stddev computation
-    retsOnly:.rte.st.volReturns[s][;1];
-    / Annualize: sqrt(periods per year) * stddev
-    / periods per year = 365*24*60*60 / volWindowSec
-    periodsPerYear:31536000 % .rte.cfg.volWindowSec;
-    vol:sqrt[periodsPerYear] * dev retsOnly;
-    / Guard: only update if vol is valid and non-zero
-    if[(not null vol) and vol > 0; 
-      .rte.st.volLatest[s]:(vol; nReturns; 1b);
+    retsOnly: .rte.st.volReturns[s][;1];
+    / Annualize: periods per year = (365 days * 24h * 60m * 60s) / sampleIntervalSec
+    periodsPerYear: 31536000 % .rte.cfg.volSampleIntervalSec;
+    vol: sqrt[periodsPerYear] * dev retsOnly;
+    isValid: nReturns >= .rte.cfg.volTargetCount;
+    if[(not null vol) and vol > 0;
+      .rte.st.volLatest[s]: (vol; nReturns; isValid);
       / Throttled history insert: only every 5 seconds
-      lastIns:$[s in key .rte.st.volLastInsert; .rte.st.volLastInsert[s]; 0Np];
+      lastIns: $[s in key .rte.st.volLastInsert; .rte.st.volLastInsert[s]; 0Np];
       if[(null lastIns) or (time - lastIns) >= .rte.cfg.historyInsertIntervalNs;
         `vol_history insert (time; s; 100*vol);
-        .rte.st.volLastInsert[s]:time;
+        .rte.st.volLastInsert[s]: time;
       ];
     ];
   ];
-  
-  / Cleanup old prices (keep last 10 min worth - same horizon as volReturns
-  / so we don't have to look beyond what's retained when computing returns).
-  cutoffCleanup:time - 600000000000j;
-  .rte.st.volPrices[s]:prices where prices[;0] >= cutoffCleanup;
   };
 
 .rte.getVol:{[]
@@ -371,6 +366,10 @@ vol_history:([]
   };
 
 .rte.getOBI:{[mode]
+  / Default to smoothed OBI when called with no arg (.rte.getOBI[]).
+  / Without this, `:: = `smooth` throws 'type since q can't compare a
+  / generic null to a symbol.
+  if[mode ~ (::); mode: `smooth];
   if[0 = count .rte.st.obi; :flip `sym`OBI!(`$();`float$())];
   syms:key .rte.st.obi;
   data:value .rte.st.obi;
@@ -390,9 +389,11 @@ vol_history:([]
 / =============================================================================
 
 / Get OBI history for charting
-/ @param s - symbol (` for all symbols)
-/ @param mins - minutes of history to retrieve
+/ @param s - symbol (` for all symbols; default `)
+/ @param minutes - minutes of history to retrieve (default 60)
 .rte.getOBIHistory:{[s;minutes]
+  if[s ~ (::); s: `];
+  if[minutes ~ (::); minutes: 60];
   cutoff:.z.p - `long$minutes * 60000000000;
   $[s ~ `;
     select time, sym, rawOBI, smoothOBI from obi_history where time > cutoff;
@@ -401,9 +402,11 @@ vol_history:([]
   };
 
 / Get Volatility history for charting
-/ @param s - symbol (` for all symbols)
-/ @param mins - minutes of history to retrieve
+/ @param s - symbol (` for all symbols; default `)
+/ @param minutes - minutes of history to retrieve (default 60)
 .rte.getVolHistory:{[s;minutes]
+  if[s ~ (::); s: `];
+  if[minutes ~ (::); minutes: 60];
   cutoff:.z.p - `long$minutes * 60000000000;
   $[s ~ `;
     select time, sym, annualizedVol from vol_history where time > cutoff;
@@ -505,7 +508,7 @@ upd:{[tbl;data]
 endofday:{[]
   -1 "RTE: EOD received";
   .rte.st.vwap:()!();
-  .rte.st.volPrices:()!();
+  .rte.st.volLastSample:()!();
   .rte.st.volReturns:()!();
   .rte.st.volLatest:()!();
   .rte.st.volLastInsert:()!();
@@ -542,8 +545,10 @@ system "p ",string .rte.cfg.port;
 -1 "=======================================================";
 -1 "Configuration:";
 -1 "  Chained TP: ",string[.rte.cfg.ctpPort];
--1 "  Vol window: ",string[.rte.cfg.volWindowSec],"s";
--1 "  Vol min returns: ",string[.rte.cfg.volMinReturns];
+-1 "  Vol sample interval: ",string[.rte.cfg.volSampleIntervalSec],"s";
+-1 "  Vol rolling window: ",string[.rte.cfg.volRollingWindowMin]," min";
+-1 "  Vol min returns: ",string[.rte.cfg.volMinReturns]," (before showing any number)";
+-1 "  Vol target count: ",string[.rte.cfg.volTargetCount]," (before isValid=1)";
 -1 "  OBI alpha: ",string[.rte.cfg.obiAlpha];
 -1 "  History retention: ",string[.rte.cfg.historyRetentionMin]," minutes";
 -1 "  History insert interval: ",string[`long$.rte.cfg.historyInsertIntervalNs % 1000000000],"s";
