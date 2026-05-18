@@ -322,15 +322,32 @@ upd:{[tbl;data]
   result
  };
 
+/ Helper called by recoverSeqNo's log replay. Updates per-stream maxes
+/ from each row in the log. Kept as a top-level function rather than an
+/ inline lambda inside recoverSeqNo because deeply-nested if[] bodies
+/ inside a lambda hit parser quirks in KDB-X 5.0. Using `|` (max) keeps
+/ the per-stream merge null-safe: 0N | 5 -> 5, 5 | 3 -> 5, 0N | 0N -> 0N.
+.tp.recoverScan:{[t;d]
+  if[not t in `trade_binance`quote_binance; :()];
+  if[(count d) <> count cols value t; :()];
+  / tpSeqNo is the last column of the persisted row.
+  .tp.recoverTpMax:: .tp.recoverTpMax | last d;
+  / Per-stream max fhSeqNo.
+  if[t = `trade_binance;
+    .tp.recoverTradeMax:: .tp.recoverTradeMax | d .tp.idx.tradeSeq];
+  if[t = `quote_binance;
+    .tp.recoverQuoteMax:: .tp.recoverQuoteMax | d .tp.idx.quoteSeq];
+ };
+
 / Recover .tp.tpSeqNo AND per-side .tp.seq.{trade,quote} from the durability
 / log on startup. Reads through the log, tracking the maximum tpSeqNo (global)
 / and the maximum fhSeqNo per side. Seeds the corresponding state so newly
 / accepted messages continue the sequence and gap detection correctly flags
 / messages missed during the TP-down window.
-/
+
 / Critical: must be called BEFORE the log is reopened for new writes,
 / otherwise the new TP-process's first messages would re-use existing seqs.
-/
+
 / Without per-side FH recovery, a TP restart while FH continues silently
 / swallowed gap detection: the first post-restart FH message hit checkSeq's
 / "first message - initialize, accept" branch and the missing messages
@@ -349,30 +366,7 @@ upd:{[tbl;data]
   .tp.recoverQuoteMax:: 0N;
 
   oldUpd:: upd;
-  upd:: {[t;d]
-    / Defensive: skip pre-Phase-4 log entries (no tpSeqNo column)
-    if[t in `trade_binance`quote_binance;
-      if[(count d) = count cols value t;
-        / tpSeqNo is the last column of the persisted row
-        tpSeq: last d;
-        if[tpSeq > .tp.recoverTpMax; .tp.recoverTpMax:: tpSeq];
-        / fhSeqNo position is the same in persisted rows as in live rows
-        / since TP appends to the end (tpRecvTimeUtcNs, tpSeqNo).
-        if[t = `trade_binance;
-          fhSeq: d .tp.idx.tradeSeq;
-          if[(null .tp.recoverTradeMax) or fhSeq > .tp.recoverTradeMax;
-            .tp.recoverTradeMax:: fhSeq
-          ]
-        ];
-        if[t = `quote_binance;
-          fhSeq: d .tp.idx.quoteSeq;
-          if[(null .tp.recoverQuoteMax) or fhSeq > .tp.recoverQuoteMax;
-            .tp.recoverQuoteMax:: fhSeq
-          ]
-        ]
-      ]
-    ]
-  };
+  upd:: .tp.recoverScan;
 
   .[{-11!x}; enlist logFile; {[err]
     -1 raze ("TP: recoverSeqNo error: "; err);
@@ -381,8 +375,8 @@ upd:{[tbl;data]
   upd:: oldUpd;
 
   / Seed live state from recovered maxes. tpSeqNo continues monotonically;
-  / per-side fhSeqs are the floor for the next valid message (anything <= is
-  / treated as duplicate or restart per checkSeq's existing logic).
+  / per-side fhSeqs are the floor for the next valid message (anything <=
+  / is treated as duplicate or restart per checkSeq's existing logic).
   .tp.tpSeqNo:   .tp.recoverTpMax;
   .tp.seq.trade: .tp.recoverTradeMax;
   .tp.seq.quote: .tp.recoverQuoteMax;
