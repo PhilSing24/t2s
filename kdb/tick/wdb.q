@@ -55,7 +55,7 @@ system "g 0";
 / Highest tpSeqNo successfully flushed to disk PER TABLE. Loaded from
 / checkpoint on startup, advanced after each table's flush, persisted on
 / each successful flush.
-/
+
 / DESIGN NOTE: this must be per-table, not a single global counter. With
 / a global cursor, flushing one table (say trade_binance reaches its 50k
 / buffer first) would advance the checkpoint past unflushed rows of the
@@ -64,7 +64,7 @@ system "g 0";
 / checkpoint floor. Tracking per-table fixes this: trade's flush only
 / advances trade's cursor, and quote replay still picks up its pending
 / rows from the right point.
-.wdb.lastTpSeqNo: `trade_binance`quote_binance ! 0j 0j;
+.wdb.lastTpSeqNo: `trade_binance`quote_binance ! 0 0j;
 
 / Phase 4 stats (separate from the existing stats group)
 .wdb.stats.replayRowsApplied:0j;
@@ -89,10 +89,14 @@ system "g 0";
 / TMPSAVE - temporary directory for intraday writes
 / Read tmp dir prefix from env var, fall back to a relative path.
 / Override with T2S_TMP_DIR=/path/to/tmp/ (trailing slash; absolute recommended).
+/ Path is per-DATE only (no PID). A restarted WDB process inherits the
+/ existing day's temp partition and appends to it, so a mid-day crash
+/ doesn't strand data in a PID-named directory that EOD won't move.
+/ Cross-day stragglers are handled by the orphan-recovery pass at startup.
 / -------------------------------------------------------
 
 .wdb.tmpDir:$[count v:getenv `T2S_TMP_DIR; v; "../"];
-.wdb.getTmpSave:{`$":",.wdb.tmpDir,"tmp.",string[.z.i],".",string x}
+.wdb.getTmpSave:{`$":",.wdb.tmpDir,"tmp.",string x}
 TMPSAVE:.wdb.getTmpSave .z.d
 
 / -------------------------------------------------------
@@ -127,17 +131,21 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
 / -------------------------------------------------------
 
 / Load checkpoint from disk. Returns per-table dict, with backward-compat
-/ handling for the pre-fix scalar format (promoted to per-table by
-/ initializing both tables to that value - conservative, may cause some
-/ already-applied messages to be replayed but no data loss).
+/ handling for the pre-fix scalar format. The scalar gets promoted to a
+/ per-table dict by initializing both tables to that value. This prevents
+/ NEW losses going forward but does NOT recover rows that were already
+/ silently skipped under the old global-cursor design - any such rows are
+/ unrecoverable from this checkpoint and would need to be replayed from the
+/ TP durability log (which is what the per-table fix prevents from
+/ happening again).
 .wdb.loadCheckpoint:{[]
   if[() ~ key .wdb.cfg.checkpointFile;
     -1 "WDB: no checkpoint file, starting fresh (trade=0, quote=0)";
-    :`trade_binance`quote_binance ! 0j 0j
+    :`trade_binance`quote_binance ! 0 0j
   ];
   v: @[get; .wdb.cfg.checkpointFile; {[err]
     -1 raze ("WDB: ERROR reading checkpoint - "; err);
-    `trade_binance`quote_binance ! 0j 0j
+    `trade_binance`quote_binance ! 0 0j
   }];
   / Legacy scalar format: a single long applied to both tables. This was
   / the buggy original design - see DESIGN NOTE on .wdb.lastTpSeqNo above.
@@ -571,6 +579,117 @@ upd:{[tbl;data]
   };
 
 / -------------------------------------------------------
+/ Orphan Recovery
+/ -------------------------------------------------------
+/ Scans .wdb.tmpDir at startup for tmp.YYYY.MM.DD directories from past
+/ dates (stale temp partitions left behind by previous crashes) and moves
+/ them into the HDB. Without this, a WDB crash between EOD-flush and
+/ partition-move could strand a complete day's data in a temp directory
+/ that nothing else will ever look at, while the checkpoint claims those
+/ rows were durably persisted.
+
+/ Parse a directory entry of form "tmp.YYYY.MM.DD" into a date.
+/ Returns 0Nd if the entry doesn't match the expected shape.
+.wdb.recovery.parseDate:{[entryStr]
+  if[14 <> count entryStr; :0Nd];
+  if[not "tmp." ~ 4#entryStr; :0Nd];
+  "D"$ 4_ entryStr
+  };
+
+/ Sort + move one orphan temp directory into the HDB partition for its date.
+/ Returns 1b on success, 0b on failure. Failure leaves the orphan in place
+/ for inspection.
+.wdb.recovery.recoverOne:{[entryStr; d]
+  fullPath: .wdb.tmpDir, entryStr;
+  tmpSym: hsym `$ fullPath;
+  tabs: @[key; tmpSym; {[err]
+    -1 raze ("WDB: cannot read orphan dir - "; err);
+    `symbol$()
+  }];
+  if[0 = count tabs;
+    -1 raze ("WDB: orphan "; entryStr; " is empty - leaving in place");
+    :0b
+  ];
+
+  -1 raze ("WDB: sorting orphan "; entryStr; " (tables: "; ", " sv string tabs; ")");
+  sortOk: all .wdb.recovery.sortOrphanTable[tmpSym] each tabs;
+  if[not sortOk;
+    -1 raze ("WDB: ABORTING recovery of "; entryStr; " - sort failures, data preserved");
+    :0b
+  ];
+
+  / Move into HDB partition for the orphan's date.
+  dest: .Q.par[.wdb.cfg.hdbDir; d; `];
+  destStr: -1_1_string dest;
+  if[not () ~ key dest;
+    -1 raze ("WDB: ERROR HDB partition "; destStr;
+             " already exists - leaving orphan "; entryStr; " for manual review");
+    :0b
+  ];
+
+  cmd: "mv ", fullPath, " ", destStr;
+  moveOk: @[{[c] system c; 1b};
+            cmd;
+            {[err] -1 raze ("WDB: ERROR moving orphan - "; err); 0b}];
+  if[moveOk;
+    -1 raze ("WDB: recovered orphan "; entryStr; " -> "; destStr);
+  ];
+  moveOk
+  };
+
+/ disksort one table within an orphan dir. Returns 1b/0b.
+.wdb.recovery.sortOrphanTable:{[tmpSym; t]
+  @[{[p] disksort[p; `sym; `p#]; 1b};
+    ` sv tmpSym, t, `;
+    {[err] -1 raze ("WDB: ERROR sorting orphan table - "; err); 0b}]
+  };
+
+/ Top-level: scan tmpDir, find tmp.YYYY.MM.DD entries with date < today,
+/ recover each. Called once at startup before .wdb.connect[].
+.wdb.recovery.run:{[]
+  -1 "WDB: scanning for orphan temp partitions...";
+  tmpDirSym: hsym `$ .wdb.tmpDir;
+  entries: @[key; tmpDirSym; {[err]
+    -1 raze ("WDB: cannot list tmp dir - "; err);
+    `symbol$()
+  }];
+  if[0 = count entries;
+    -1 "WDB: tmp dir empty, no orphan scan needed";
+    :()
+  ];
+
+  / Build (entryStr; date) pairs for entries matching tmp.YYYY.MM.DD.
+  / Discard malformed entries (returns 0Nd from parseDate).
+  entryStrs: string entries;
+  dates: .wdb.recovery.parseDate each entryStrs;
+  validIdx: where not null dates;
+  if[0 = count validIdx;
+    -1 "WDB: no tmp.YYYY.MM.DD entries found";
+    :()
+  ];
+
+  / Orphans are entries with date strictly before today. Today's dir (if
+  / any) is owned by this process and will be appended to as live data
+  / arrives.
+  orphanIdx: validIdx where dates[validIdx] < .z.d;
+  if[0 = count orphanIdx;
+    -1 "WDB: no past-date temp partitions to recover";
+    :()
+  ];
+
+  -1 raze ("WDB: found "; string count orphanIdx; " orphan partition(s)");
+
+  / Process oldest first so partitions land in HDB in date order.
+  / Use a projection on a top-level lambda - q lambdas don't capture
+  / enclosing locals, so entryStrs/dates must be bound via projection
+  / rather than referenced from the closure.
+  ord: orphanIdx iasc dates orphanIdx;
+  {[i; strs; dts] .wdb.recovery.recoverOne[strs i; dts i]}[; entryStrs; dates] each ord;
+
+  -1 "WDB: orphan recovery scan complete";
+  };
+
+/ -------------------------------------------------------
 / End-of-Day Handler
 / -------------------------------------------------------
 
@@ -740,6 +859,11 @@ system"p ",string .wdb.cfg.port;
 
 / Phase 4: load checkpoint before connecting so replay knows where to start
 .wdb.lastTpSeqNo: .wdb.loadCheckpoint[];
+
+/ Recover any orphan tmp.YYYY.MM.DD partitions from prior crashes. Runs
+/ before connect so any stranded past-day data flows into HDB before we
+/ start accepting new live messages.
+.wdb.recovery.run[];
 
 / Attempt initial connection (non-blocking; runReplay fires inside connect)
 connected:.wdb.connect[];
