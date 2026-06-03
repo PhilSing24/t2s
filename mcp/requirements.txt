@@ -1,0 +1,9 @@
+# t2s MCP server dependencies
+# Install into your existing ~/t2s/.venv:
+#   pip install -r requirements.txt
+#
+# pykx is assumed already present (KDB-X integration); pinned loosely here for
+# reproducibility if installing fresh.
+
+mcp>=1.2.0
+pykx>=2.5.0

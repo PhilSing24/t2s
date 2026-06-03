@@ -1,0 +1,25 @@
+{
+  "manifest_version": "0.2",
+  "name": "t2s-volatility",
+  "display_name": "t2s Volatility",
+  "version": "1.0.0",
+  "description": "Query live annualized volatility from the t2s real-time engine (RTE on kdb+ port 5015) running in WSL.",
+  "author": {
+    "name": "Philippe"
+  },
+  "server": {
+    "type": "binary",
+    "entry_point": "server.py",
+    "mcp_config": {
+      "command": "wsl.exe",
+      "args": [
+        "-d",
+        "Ubuntu-22.04",
+        "--exec",
+        "bash",
+        "-lc",
+        "/home/philippe/t2s/.venv/bin/python /home/philippe/t2s/mcp/server.py"
+      ]
+    }
+  }
+}

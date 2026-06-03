@@ -2,7 +2,7 @@
 
 A real-time Binance market data pipeline built with C++ and KDB-X. Dual feed handlers (trades + L5 order book) stream into a tickerplant-fanout architecture with batched analytics, RSI-based signal generation, simulated P&L tracking, and durability-log replay (WDB recovers from disconnects). A historical data store (`hdb_binancedata/`) supports offline research and feature-engineering primitives drawn from López de Prado's *Advances in Financial Machine Learning*.
 
-Architecture patterns originally inspired by *Building Real-Time Event-Driven KDB-X Systems* by Data Intellect; extended with TLS-verified WS/REST, TCP keepalive and dead-connection detection, per-stream sequence-gap surfacing, Binance-spec-correct order book reconciliation, async snapshot fetching, replay-on-reconnect, RAII-managed kdb+ IPC, drop-and-count JSON parsing, and a multi-language test suite.
+Architecture patterns originally inspired by *Building Real-Time Event-Driven KDB-X Systems* by Data Intellect; extended with TLS-verified WS/REST, TCP keepalive and dead-connection detection, per-stream sequence-gap surfacing, Binance-spec-correct order book reconciliation, async snapshot fetching, replay-on-reconnect, RAII-managed kdb+ IPC, drop-and-count JSON parsing, and a multi-language test suite. A read-only MCP server (`mcp/`) additionally exposes the live analytics for natural-language querying through Claude Desktop.
 
 ## Architecture
 
@@ -106,6 +106,10 @@ t2s/
 │   ├── test_order_book.cpp   # C++ unit tests for OrderBookManager (Catch2)
 │   ├── test_snapshot_worker.cpp  # C++ unit tests for SnapshotWorker (Catch2)
 │   └── test_json_reader.cpp  # C++ unit tests for JsonReader + parseLevelPair (Catch2)
+├── mcp/                      # MCP server — conversational query surface (Python sidecar)
+│   ├── server.py             # get_volatility tool → calls .rte.getVol[] over IPC
+│   ├── requirements.txt      # mcp, pykx
+│   └── README.md             # setup + Claude Desktop wiring notes
 ├── config/                   # Feed handler JSON configs
 ├── dashboards/               # KX Dashboards (Analytics, DataFlow, FH, Trades/Quotes)
 ├── hdb/                      # Live HDB partitions (gitignored, populated at EOD)
@@ -246,6 +250,38 @@ select from trade_binance where sym=`BTCUSDT
 ```
 
 WDB persists its replay checkpoint to `$T2S_TMP_DIR/wdb.lastTpSeqNo` after every successful flush. On restart, it loads this and asks TP to replay everything since, so disk-persisted data is recoverable across WDB or TP restarts.
+
+## Conversational Query Interface (MCP)
+
+The analytics are also reachable in plain English through an [MCP](https://modelcontextprotocol.io) server (`mcp/server.py`), which exposes the live RTE process to an MCP host such as Claude Desktop. Instead of opening a q session and calling `.rte.getVol[]`, you can ask:
+
+![Conversational volatility queries via MCP](images/MCPChatbotView.jpg)
+
+The server is a **read-only sidecar**: a separate Python process that connects to RTE (port 5015) as an ordinary kdb+ IPC client via [PyKX](https://code.kx.com/pykx/), so it sits alongside the pipeline and is never in the tick hot path. It recomputes nothing — each tool call invokes an existing q function and returns the result as structured data. The current tool, `get_volatility`, wraps `.rte.getVol[]`:
+
+- `get_volatility(symbol)` returns that symbol's current annualized realized volatility (case-insensitive, e.g. `BTCUSDT`).
+- `get_volatility()` with no symbol returns volatility for all tracked symbols.
+
+Each result carries `annualizedVol`, `returnCount`, and `isValid`, plus a readable note. Because vol is computed over a fixed 60-minute rolling window (~120 samples at one per 30s), `isValid` is only `true` once that window is fully loaded; readings in the first ~60 minutes after startup (or after an EOD reset) are returned but flagged as warming up, so a preliminary estimate is never mistaken for a steady-state one.
+
+**Setup.** Install the dependencies into the project venv, then point an MCP host at the server:
+
+```bash
+cd mcp
+python -m pip install -r requirements.txt   # mcp; pykx assumed present (KDB-X)
+```
+
+For Claude Desktop on Windows + WSL, the server is registered as a local MCP extension that launches the WSL-side process:
+
+```
+command:  wsl.exe
+args:     -d Ubuntu-22.04 --exec bash -lc
+          "/home/<user>/t2s/.venv/bin/python /home/<user>/t2s/mcp/server.py"
+```
+
+With RTE running, the host discovers the `get_volatility` tool and routes natural-language volatility questions to it, while general questions (e.g. "what *is* annualized volatility?") are answered from the model's own knowledge without a tool call. See `mcp/README.md` for full wiring and troubleshooting notes.
+
+The server is intentionally minimal — one read-only tool — but the pattern extends directly to the other RTE query functions (`.rte.getOBI`, `.rte.getSpread`, `.rte.getOrderBook`) and to the history functions (`.rte.getVolHistory`, `.rte.getOBIHistory`), which return time series suitable for charting.
 
 ## Dashboards
 
