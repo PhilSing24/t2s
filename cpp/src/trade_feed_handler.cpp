@@ -7,6 +7,7 @@
 #include "socket_utils.hpp"
 #include "k_object.hpp"
 #include "json_reader.hpp"
+#include "trade_row.hpp"
 
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
@@ -15,15 +16,18 @@
 #include <atomic>
 #include <chrono>
 #include <thread>
+#include <utility>
 
 // ============================================================================
 // CONSTRUCTION / DESTRUCTION
 // ============================================================================
 
 TradeFeedHandler::TradeFeedHandler(const std::vector<std::string>& symbols,
+                                   t2s::MarketConfig market,
                                    const std::string& tpHost,
                                    int tpPort)
     : symbols_(symbols)
+    , cfg_(std::move(market))
     , tpHost_(tpHost)
     , tpPort_(tpPort)
     , startTime_(std::chrono::system_clock::now())
@@ -43,14 +47,16 @@ TradeFeedHandler::~TradeFeedHandler() {
 
 void TradeFeedHandler::run() {
     spdlog::info("Starting...");
+    spdlog::info("Market: host={} port={} streamSuffix={} tpTable={}",
+                 cfg_.host, cfg_.port, cfg_.streamSuffix, cfg_.tpTable);
     spdlog::info("Symbols: {}", fmt::join(symbols_, " "));
-    
+
     // Connect to tickerplant (retries until success or shutdown)
     if (!connectToTP()) {
         spdlog::warn("Shutdown before TP connection established");
         return;
     }
-    
+
     // Main loop with reconnection
     while (running_) {
         try {
@@ -67,7 +73,7 @@ void TradeFeedHandler::run() {
             }
         }
     }
-    
+
     // Cleanup
     spdlog::info("Cleaning up...");
     if (tpHandle_ > 0) {
@@ -75,7 +81,7 @@ void TradeFeedHandler::run() {
         tpHandle_ = -1;
         spdlog::info("TP connection closed");
     }
-    
+
     spdlog::info("Shutdown complete (processed {} messages)", fhSeqNo_);
 }
 
@@ -104,28 +110,19 @@ bool shouldLogParseFailure(long long count) noexcept {
 
 } // namespace
 
-std::string TradeFeedHandler::buildStreamPath() const {
-    std::string path = "/stream?streams=";
-    for (size_t i = 0; i < symbols_.size(); ++i) {
-        if (i > 0) path += "/";
-        path += symbols_[i] + "@trade";
-    }
-    return path;
-}
-
 bool TradeFeedHandler::connectToTP() {
     int attempt = 0;
     while (running_) {
         spdlog::info("Connecting to TP on {}:{}...", tpHost_, tpPort_);
-        
+
         int h = khpu((S)tpHost_.c_str(), tpPort_, (S)"");
-        
+
         if (h > 0) {
             tpHandle_ = h;
             spdlog::info("Connected to TP (handle {})", h);
             return true;
         }
-        
+
         spdlog::error("Failed to connect to TP");
         if (!sleepWithBackoff(attempt++)) {
             return false;  // Shutdown requested
@@ -140,9 +137,9 @@ bool TradeFeedHandler::sleepWithBackoff(int attempt) {
         delay *= BACKOFF_MULTIPLIER;
     }
     delay = std::min(delay, MAX_BACKOFF_MS);
-    
+
     spdlog::info("Waiting {}ms before reconnect...", delay);
-    
+
     // Sleep in small increments to allow quick shutdown response
     const int checkIntervalMs = 100;
     int slept = 0;
@@ -150,16 +147,16 @@ bool TradeFeedHandler::sleepWithBackoff(int attempt) {
         std::this_thread::sleep_for(std::chrono::milliseconds(checkIntervalMs));
         slept += checkIntervalMs;
     }
-    
+
     return running_;
 }
 
 void TradeFeedHandler::validateTradeId(const std::string& sym, long long tradeId) {
     auto it = lastTradeId_.find(sym);
-    
+
     if (it != lastTradeId_.end()) {
         long long last = it->second;
-        
+
         if (tradeId < last) {
             spdlog::warn("OUT OF ORDER: {} last={} got={}", sym, last, tradeId);
         } else if (tradeId == last) {
@@ -169,7 +166,7 @@ void TradeFeedHandler::validateTradeId(const std::string& sym, long long tradeId
             spdlog::warn("Gap: {} missed={} (last={} got={})", sym, missed, last, tradeId);
         }
     }
-    
+
     lastTradeId_[sym] = tradeId;
 }
 
@@ -179,14 +176,14 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
     long long fhRecvTimeUtcNs =
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             recvWall.time_since_epoch()).count();
-    
+
     // Update health: message received
     lastMsgTime_ = recvWall;
     ++msgsReceived_;
-    
+
     // Start monotonic timer for parse latency
     auto parseStart = std::chrono::steady_clock::now();
-    
+
     // Parse JSON. rapidjson asserts on type-mismatch in GetX() calls and
     // std::stod throws on garbage, so we never touch the raw API directly -
     // all field access goes through JsonReader, which returns nullopt and
@@ -237,32 +234,22 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
 
     // Validate sequence
     validateTradeId(symStr, tradeIdV);
-    
+
     // End parse timer
     auto parseEnd = std::chrono::steady_clock::now();
     long long fhParseUs = std::chrono::duration_cast<std::chrono::microseconds>(
         parseEnd - parseStart).count();
-    
+
     // Increment sequence number
     ++fhSeqNo_;
-    
-    // Build kdb+ row. knk consumes its varargs, so the inline kj/ks/kf/etc.
-    // constructions don't need separate wrapping.
-    t2s::KOwned row(knk(12,
-        ktj(-KP, fhRecvTimeUtcNs - KDB_EPOCH_OFFSET_NS),
-        ks((S)symStr.c_str()),
-        kj(tradeIdV),
-        kf(priceV),
-        kf(qtyV),
-        kb(buyerIsMaker),
-        kj(exchEventTimeMs),
-        kj(exchTradeTimeMs),
-        kj(fhRecvTimeUtcNs),
-        kj(fhParseUs),
-        kj(0LL),  // fhSendUs placeholder (patched below)
-        kj(fhSeqNo_)
-    ));
-    
+
+    // Build kdb+ row using the extracted helper. fhSendUs starts as a
+    // placeholder 0; we patch the slot below after measuring send latency.
+    t2s::KOwned row = t2s::buildTradeRow(
+        fhRecvTimeUtcNs, symStr, tradeIdV, priceV, qtyV, buyerIsMaker,
+        exchEventTimeMs, exchTradeTimeMs, fhParseUs, /*fhSendUs=*/0LL, fhSeqNo_,
+        KDB_EPOCH_OFFSET_NS);
+
     // Capture send time and patch the placeholder. kK(...)[i] returns a
     // borrowed ref - we mutate it but do NOT release it; the parent list
     // owns it.
@@ -271,20 +258,20 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
         sendEnd - parseEnd).count();
     t2s::KBorrowed sendField(kK(row.get())[10]);
     sendField.get()->j = fhSendUs;
-    
+
     // Debug output (only shown at debug level)
     spdlog::debug("Trade: sym={} tradeId={} price={:.2f} qty={:.4f} fhParseUs={} fhSendUs={} fhSeqNo={}",
         symStr, tradeIdV, priceV, qtyV, fhParseUs, fhSendUs, fhSeqNo_);
-    
+
     // Publish to TP. Async k() consumes its K args, so we release ownership
     // out of the wrapper. After this, `row` is empty - any attempt to reuse
     // it on the reconnect path below would just pass NULL (compile-time safe).
-    K result = k(-tpHandle_, (S)".u.upd", ks((S)"trade_binance"), row.release(), (K)0);
-    
+    K result = k(-tpHandle_, (S)".u.upd", ks((S)cfg_.tpTable.c_str()), row.release(), (K)0);
+
     // Update health: message published
     lastPubTime_ = std::chrono::system_clock::now();
     ++msgsPublished_;
-    
+
     // Check if TP connection died
     if (result == nullptr) {
         spdlog::error("TP connection lost, reconnecting...");
@@ -295,52 +282,42 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
             // Build a fresh row for the resend - the original was consumed
             // by the failed k() above. (Pre-RAII this code reused the freed
             // row pointer, a use-after-free.)
-            t2s::KOwned row2(knk(12,
-                ktj(-KP, fhRecvTimeUtcNs - KDB_EPOCH_OFFSET_NS),
-                ks((S)symStr.c_str()),
-                kj(tradeIdV),
-                kf(priceV),
-                kf(qtyV),
-                kb(buyerIsMaker),
-                kj(exchEventTimeMs),
-                kj(exchTradeTimeMs),
-                kj(fhRecvTimeUtcNs),
-                kj(fhParseUs),
-                kj(fhSendUs),
-                kj(fhSeqNo_)
-            ));
-            k(-tpHandle_, (S)".u.upd", ks((S)"trade_binance"), row2.release(), (K)0);
+            t2s::KOwned row2 = t2s::buildTradeRow(
+                fhRecvTimeUtcNs, symStr, tradeIdV, priceV, qtyV, buyerIsMaker,
+                exchEventTimeMs, exchTradeTimeMs, fhParseUs, fhSendUs, fhSeqNo_,
+                KDB_EPOCH_OFFSET_NS);
+            k(-tpHandle_, (S)".u.upd", ks((S)cfg_.tpTable.c_str()), row2.release(), (K)0);
         }
     }
 }
 
 void TradeFeedHandler::runWebSocketLoop() {
-    std::string target = buildStreamPath();
-    spdlog::info("Connecting to Binance: {}{}", BINANCE_HOST, target);
-    
+    std::string target = t2s::buildStreamPath(symbols_, cfg_.streamSuffix);
+    spdlog::info("Connecting to Binance: {}{}", cfg_.host, target);
+
     connState_ = "connecting";
-    
+
     // Initialize ASIO and SSL
     net::io_context ioc;
     ssl::context ctx{ssl::context::tlsv12_client};
     ctx.set_default_verify_paths();
     ctx.set_verify_mode(ssl::verify_peer);
-    
+
     // Resolve and connect
     tcp::resolver resolver{ioc};
     websocket::stream<beast::ssl_stream<tcp::socket>> ws{ioc, ctx};
-    
+
     // Set SNI hostname so Binance serves the right cert and so we can
     // verify the cert's CN/SAN matches what we asked to connect to.
-    if (!SSL_set_tlsext_host_name(ws.next_layer().native_handle(), BINANCE_HOST)) {
+    if (!SSL_set_tlsext_host_name(ws.next_layer().native_handle(), cfg_.host.c_str())) {
         throw beast::system_error(
             beast::error_code(static_cast<int>(::ERR_get_error()),
                               net::error::get_ssl_category()),
             "Failed to set SNI hostname");
     }
-    ws.next_layer().set_verify_callback(ssl::host_name_verification(BINANCE_HOST));
-    
-    auto const results = resolver.resolve(BINANCE_HOST, BINANCE_PORT);
+    ws.next_layer().set_verify_callback(ssl::host_name_verification(cfg_.host));
+
+    auto const results = resolver.resolve(cfg_.host, cfg_.port);
     net::connect(ws.next_layer().next_layer(), results.begin(), results.end());
 
     // Configure aggressive TCP keepalive so dead connections (e.g. after
@@ -350,9 +327,9 @@ void TradeFeedHandler::runWebSocketLoop() {
 
     // TLS handshake
     ws.next_layer().handshake(ssl::stream_base::client);
-    
+
     // WebSocket handshake
-    ws.handshake(BINANCE_HOST, target);
+    ws.handshake(cfg_.host, target);
 
     // Configure idle timeout: if no message arrives for 30s, ws.read()
     // throws, which the outer try/catch treats as a disconnect and
@@ -368,23 +345,23 @@ void TradeFeedHandler::runWebSocketLoop() {
 
     spdlog::info("Connected to Binance ({} symbols)", symbols_.size());
     connState_ = "connected";
-    
+
     // Reset backoff on successful connection
     binanceReconnectAttempt_ = 0;
-    
+
     // Health publish timer
     auto lastHealthPub = std::chrono::steady_clock::now();
-    
+
     // Message loop
     while (running_) {
         beast::flat_buffer buffer;
         ws.read(buffer);
-        
+
         if (!running_) break;
-        
+
         std::string msg = beast::buffers_to_string(buffer.data());
         processMessage(msg);
-        
+
         // Publish health every HEALTH_INTERVAL_SEC seconds
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::seconds>(now - lastHealthPub).count() >= HEALTH_INTERVAL_SEC) {
@@ -392,9 +369,9 @@ void TradeFeedHandler::runWebSocketLoop() {
             lastHealthPub = now;
         }
     }
-    
+
     connState_ = "disconnected";
-    
+
     // Graceful close
     if (!running_) {
         try {
@@ -408,19 +385,19 @@ void TradeFeedHandler::runWebSocketLoop() {
 
 void TradeFeedHandler::publishHealth() {
     if (tpHandle_ <= 0) return;
-    
+
     auto now = std::chrono::system_clock::now();
-    
+
     // Calculate uptime
     long long uptimeSec = std::chrono::duration_cast<std::chrono::seconds>(
         now - startTime_).count();
-    
+
     // Convert timestamps to kdb+ format
     auto toKdbTs = [](std::chrono::system_clock::time_point tp) -> long long {
         return std::chrono::duration_cast<std::chrono::nanoseconds>(
             tp.time_since_epoch()).count() - KDB_EPOCH_OFFSET_NS;
     };
-    
+
     // Build health row (10 fields)
     t2s::KOwned row(knk(10,
         ktj(-KP, toKdbTs(now)),                    // time
@@ -434,11 +411,10 @@ void TradeFeedHandler::publishHealth() {
         ks((S)connState_.c_str()),                  // connState
         ki(static_cast<int>(symbols_.size()))       // symbolCount
     ));
-    
+
     // Publish to TP (fire and forget)
     k(-tpHandle_, (S)".u.upd", ks((S)"health_feed_handler"), row.release(), (K)0);
-    
-    spdlog::debug("Health published: uptime={}s msgs={}/{} state={}", 
+
+    spdlog::debug("Health published: uptime={}s msgs={}/{} state={}",
         uptimeSec, msgsReceived_, msgsPublished_, connState_);
 }
-

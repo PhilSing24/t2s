@@ -60,16 +60,16 @@ add_executable(quote_feed_handler
 target_link_libraries(quote_feed_handler PRIVATE t2s_fh)
 
 # ---------------------------------------------------------------------------
-# Test binary: order book unit tests
+# Test binaries
 #
 # Built only when Catch2 amalgamation files are present at
 # cpp/third_party/catch2/. See tests/README or the project README for
 # download instructions.
-#
-# OrderBookManager is header-only, so this test does not link the
-# t2s_fh lib - it just includes the header directly.
 # ---------------------------------------------------------------------------
 if(EXISTS ${CATCH2_DIR}/catch_amalgamated.cpp)
+
+    # OrderBookManager is header-only, so this test does not link the
+    # t2s_fh lib - it just includes the header directly.
     add_executable(test_order_book
         tests/test_order_book.cpp
         ${CATCH2_DIR}/catch_amalgamated.cpp
@@ -110,8 +110,42 @@ if(EXISTS ${CATCH2_DIR}/catch_amalgamated.cpp)
         ${INCLUDE_DIR}
         ${CATCH2_DIR}
     )
+
+    # Trade FH row construction regression test (ADR-013 step 2).
+    # Pure header-only test of t2s::buildTradeRow: locks the trade_binance
+    # K-row layout against silent drift during the MarketConfig refactor.
+    # Links c.o directly (needs knk/kj/ks/etc.) but does NOT link t2s_fh -
+    # the row builder is self-contained in trade_row.hpp.
+    add_executable(test_trade_fh_row_construction
+        tests/test_trade_fh_row_construction.cpp
+        ${CATCH2_DIR}/catch_amalgamated.cpp
+    )
+
+    target_include_directories(test_trade_fh_row_construction PRIVATE
+        ${INCLUDE_DIR}
+        ${KDB_DIR}
+        ${CATCH2_DIR}
+    )
+
+    target_link_libraries(test_trade_fh_row_construction PRIVATE
+        ${KDB_DIR}/c.o
+        Threads::Threads
+    )
+
+    # Stream path builder test (ADR-013 step 3).
+    # buildStreamPath is a pure string function; no kdb/Boost link needed.
+    add_executable(test_stream_path
+        tests/test_stream_path.cpp
+        ${CATCH2_DIR}/catch_amalgamated.cpp
+    )
+
+    target_include_directories(test_stream_path PRIVATE
+        ${INCLUDE_DIR}
+        ${CATCH2_DIR}
+    )
+
 else()
-    message(STATUS "Catch2 not found at ${CATCH2_DIR} - skipping test_order_book target")
+    message(STATUS "Catch2 not found at ${CATCH2_DIR} - skipping test targets")
     message(STATUS "  Download catch_amalgamated.hpp/.cpp from")
     message(STATUS "  https://github.com/catchorg/Catch2/releases (v3.x)")
 endif()

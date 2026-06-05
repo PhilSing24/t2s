@@ -43,6 +43,75 @@ extern "C" {
 #include "k.h"
 }
 
+// k.h defines a number of single- or two-letter convenience macros (see
+// the "remove more clutter" and similar sections of k.h) that were
+// intended for use inside k.h's own source style. They are NOT part of
+// the kdb+ C API surface, and they pollute the global preprocessor
+// namespace in ways that collide with normal C++ identifiers used by
+// other libraries. The most damaging collision is `R` → `return`, which
+// breaks any template that uses `R` as a type parameter name (Catch2's
+// amalgamated header is one such case).
+//
+// Undefine them here, at the single boundary where k.h enters our C++
+// code, so every translation unit that includes this header gets a
+// clean preprocessor environment afterwards. The kdb+ public API we
+// actually use (type constants like KP/KS/KJ, accessors kK/kJ/kF/...,
+// null/infinity constants nj/wj/nf/wf, and the K typedef itself) is
+// preserved.
+
+// "remove more clutter" group
+#undef O
+#undef R
+#undef Z
+#undef P
+#undef U
+#undef SW
+#undef CS
+#undef CD
+
+// static-prefix shortcuts (ZV = Z V, ZK = Z K, ...)
+#undef ZV
+#undef ZK
+#undef ZH
+#undef ZI
+#undef ZJ
+#undef ZE
+#undef ZF
+#undef ZC
+#undef ZS
+
+// q-extension declaration helpers (we don't write q extensions)
+#undef K1
+#undef K2
+#undef TX
+
+// "x..." accessor shortcuts that bake in a parameter named `x`. We use
+// the proper accessor functions/macros (kK, kJ, ...) instead.
+#undef xr
+#undef xt
+#undef xu
+#undef xn
+#undef xx
+#undef xy
+#undef xg
+#undef xh
+#undef xi
+#undef xj
+#undef xe
+#undef xf
+#undef xs
+#undef xk
+#undef xG
+#undef xH
+#undef xI
+#undef xJ
+#undef xE
+#undef xF
+#undef xS
+#undef xK
+#undef xC
+#undef xB
+
 namespace t2s {
 
 /**

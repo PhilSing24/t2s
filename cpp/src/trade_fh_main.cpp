@@ -6,9 +6,15 @@
  * signal installation, and lifecycle of the TradeFeedHandler instance.
  * The handler itself is in trade_feed_handler.cpp and linked via the
  * t2s_fh shared lib so the same class is available to test binaries.
+ *
+ * The handler is parameterized over a t2s::MarketConfig built from the
+ * JSON config. Defaults preserve spot behaviour (see ADR-013); the
+ * futures binary supplies a different config file that overrides
+ * host/port/stream_suffix/tp_table/schema.
  */
 
 #include "trade_feed_handler.hpp"
+#include "market_config.hpp"
 #include "config.hpp"
 #include "logger.hpp"
 
@@ -34,6 +40,21 @@ void signalHandler(int signum) {
     if (g_handler) {
         g_handler->stop();
     }
+}
+
+// Build a MarketConfig from the parsed JSON config fields. Unknown
+// schema strings fall back to spot to keep accidental typos benign;
+// the launch log makes the resolved schema visible.
+t2s::MarketConfig buildMarketConfig(const FeedHandlerConfig& config) {
+    t2s::MarketConfig m;
+    m.host         = config.marketHost;
+    m.port         = config.marketPort;
+    m.streamSuffix = config.marketStreamSuffix;
+    m.tpTable      = config.marketTpTable;
+    m.schema       = (config.marketSchema == "futures_agg_trade")
+                     ? t2s::TradeSchema::FuturesAggTrade
+                     : t2s::TradeSchema::SpotTrade;
+    return m;
 }
 
 } // namespace
@@ -67,8 +88,9 @@ int main(int argc, char* argv[]) {
     std::signal(SIGTERM, signalHandler);
     spdlog::info("Signal handlers installed (Ctrl+C to shutdown)");
 
-    // Create and run handler
-    TradeFeedHandler handler(config.symbols, config.tpHost, config.tpPort);
+    // Build market config and create handler
+    t2s::MarketConfig market = buildMarketConfig(config);
+    TradeFeedHandler handler(config.symbols, market, config.tpHost, config.tpPort);
     g_handler = &handler;
 
     handler.run();
