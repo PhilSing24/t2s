@@ -111,11 +111,11 @@ if(EXISTS ${CATCH2_DIR}/catch_amalgamated.cpp)
         ${CATCH2_DIR}
     )
 
-    # Trade FH row construction regression test (ADR-013 step 2).
-    # Pure header-only test of t2s::buildTradeRow: locks the trade_binance
-    # K-row layout against silent drift during the MarketConfig refactor.
+    # Trade FH row construction regression test (ADR-013 step 2 + step 5).
+    # Covers both buildTradeRow (spot) and buildAggTradeRow (futures).
+    # Locks both row layouts against silent drift.
     # Links c.o directly (needs knk/kj/ks/etc.) but does NOT link t2s_fh -
-    # the row builder is self-contained in trade_row.hpp.
+    # the row builders are self-contained in trade_row.hpp.
     add_executable(test_trade_fh_row_construction
         tests/test_trade_fh_row_construction.cpp
         ${CATCH2_DIR}/catch_amalgamated.cpp
@@ -140,6 +140,19 @@ if(EXISTS ${CATCH2_DIR}/catch_amalgamated.cpp)
     )
 
     target_include_directories(test_stream_path PRIVATE
+        ${INCLUDE_DIR}
+        ${CATCH2_DIR}
+    )
+
+    # Futures aggTrade JSON parse test (ADR-013 step 5).
+    # Covers the futures schema extraction path mirror of processMessage.
+    # Pure JsonReader/rapidjson test; no kdb link needed.
+    add_executable(test_aggtrade_parse
+        tests/test_aggtrade_parse.cpp
+        ${CATCH2_DIR}/catch_amalgamated.cpp
+    )
+
+    target_include_directories(test_aggtrade_parse PRIVATE
         ${INCLUDE_DIR}
         ${CATCH2_DIR}
     )

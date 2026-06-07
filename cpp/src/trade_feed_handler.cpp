@@ -204,28 +204,56 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
 
     t2s::JsonReader root(doc);
     t2s::JsonReader d = root.obj("data");
+
+    // Common fields - same names in both spot @trade and futures @aggTrade.
     auto sym      = d.string("s");
-    auto tradeId  = d.int64("t");
     auto price    = d.priceString("p");
     auto qty      = d.priceString("q");
     auto buyerMkr = d.boolean("m");
     auto evtTime  = d.int64("E");
     auto trdTime  = d.int64("T");
 
-    if (d.hasError()) {
-        long long n = ++g_parseFailures;
-        if (shouldLogParseFailure(n)) {
-            spdlog::warn("trade schema error [count={}]: {} - msg: {}",
-                n, d.lastError(), msg.substr(0, 200));
+    // Schema-specific id extraction. Spot has just `t` (tradeId); futures
+    // aggTrade has `a` (aggTradeId) plus `f`/`l` (first/last constituent
+    // trade ids). The sequence-validation contract is identical: the
+    // primary id (tradeId or aggTradeId) must be monotonically increasing
+    // per symbol; the validator log message is generic.
+    long long primaryId  = 0;  // tradeId (spot) or aggTradeId (futures)
+    long long firstAggId = 0;  // futures only; 0 for spot
+    long long lastAggId  = 0;  // futures only; 0 for spot
+
+    if (cfg_.schema == t2s::TradeSchema::SpotTrade) {
+        auto t = d.int64("t");
+        if (d.hasError()) {
+            long long n = ++g_parseFailures;
+            if (shouldLogParseFailure(n)) {
+                spdlog::warn("trade schema error [count={}, schema=spot]: {} - msg: {}",
+                    n, d.lastError(), msg.substr(0, 200));
+            }
+            return;
         }
-        return;
+        primaryId = *t;
+    } else {  // FuturesAggTrade
+        auto a = d.int64("a");
+        auto f = d.int64("f");
+        auto l = d.int64("l");
+        if (d.hasError()) {
+            long long n = ++g_parseFailures;
+            if (shouldLogParseFailure(n)) {
+                spdlog::warn("trade schema error [count={}, schema=futures]: {} - msg: {}",
+                    n, d.lastError(), msg.substr(0, 200));
+            }
+            return;
+        }
+        primaryId  = *a;
+        firstAggId = *f;
+        lastAggId  = *l;
     }
 
     // All fields validated. string_view points into doc (alive for this
     // function's scope); copy to std::string for stable lifetime through
     // the kdb row construction below.
     std::string symStr(*sym);
-    long long tradeIdV       = *tradeId;
     double priceV            = *price;
     double qtyV              = *qty;
     bool buyerIsMaker        = *buyerMkr;
@@ -233,7 +261,7 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
     long long exchTradeTimeMs = *trdTime;
 
     // Validate sequence
-    validateTradeId(symStr, tradeIdV);
+    validateTradeId(symStr, primaryId);
 
     // End parse timer
     auto parseEnd = std::chrono::steady_clock::now();
@@ -243,12 +271,25 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
     // Increment sequence number
     ++fhSeqNo_;
 
-    // Build kdb+ row using the extracted helper. fhSendUs starts as a
-    // placeholder 0; we patch the slot below after measuring send latency.
-    t2s::KOwned row = t2s::buildTradeRow(
-        fhRecvTimeUtcNs, symStr, tradeIdV, priceV, qtyV, buyerIsMaker,
-        exchEventTimeMs, exchTradeTimeMs, fhParseUs, /*fhSendUs=*/0LL, fhSeqNo_,
-        KDB_EPOCH_OFFSET_NS);
+    // Build kdb+ row using the schema-appropriate helper. fhSendUs starts
+    // as a placeholder 0; we patch the slot below after measuring send
+    // latency. Slot index for fhSendUs is 10 (spot) or 12 (futures).
+    t2s::KOwned row;
+    int fhSendSlotIdx;
+    if (cfg_.schema == t2s::TradeSchema::SpotTrade) {
+        row = t2s::buildTradeRow(
+            fhRecvTimeUtcNs, symStr, primaryId, priceV, qtyV, buyerIsMaker,
+            exchEventTimeMs, exchTradeTimeMs, fhParseUs, /*fhSendUs=*/0LL, fhSeqNo_,
+            KDB_EPOCH_OFFSET_NS);
+        fhSendSlotIdx = 10;
+    } else {  // FuturesAggTrade
+        row = t2s::buildAggTradeRow(
+            fhRecvTimeUtcNs, symStr, primaryId, firstAggId, lastAggId,
+            priceV, qtyV, buyerIsMaker,
+            exchEventTimeMs, exchTradeTimeMs, fhParseUs, /*fhSendUs=*/0LL, fhSeqNo_,
+            KDB_EPOCH_OFFSET_NS);
+        fhSendSlotIdx = 12;
+    }
 
     // Capture send time and patch the placeholder. kK(...)[i] returns a
     // borrowed ref - we mutate it but do NOT release it; the parent list
@@ -256,12 +297,12 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
     auto sendEnd = std::chrono::steady_clock::now();
     long long fhSendUs = std::chrono::duration_cast<std::chrono::microseconds>(
         sendEnd - parseEnd).count();
-    t2s::KBorrowed sendField(kK(row.get())[10]);
+    t2s::KBorrowed sendField(kK(row.get())[fhSendSlotIdx]);
     sendField.get()->j = fhSendUs;
 
     // Debug output (only shown at debug level)
-    spdlog::debug("Trade: sym={} tradeId={} price={:.2f} qty={:.4f} fhParseUs={} fhSendUs={} fhSeqNo={}",
-        symStr, tradeIdV, priceV, qtyV, fhParseUs, fhSendUs, fhSeqNo_);
+    spdlog::debug("Trade: sym={} primaryId={} price={:.2f} qty={:.4f} fhParseUs={} fhSendUs={} fhSeqNo={}",
+        symStr, primaryId, priceV, qtyV, fhParseUs, fhSendUs, fhSeqNo_);
 
     // Publish to TP. Async k() consumes its K args, so we release ownership
     // out of the wrapper. After this, `row` is empty - any attempt to reuse
@@ -281,11 +322,20 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
         if (connectToTP()) {
             // Build a fresh row for the resend - the original was consumed
             // by the failed k() above. (Pre-RAII this code reused the freed
-            // row pointer, a use-after-free.)
-            t2s::KOwned row2 = t2s::buildTradeRow(
-                fhRecvTimeUtcNs, symStr, tradeIdV, priceV, qtyV, buyerIsMaker,
-                exchEventTimeMs, exchTradeTimeMs, fhParseUs, fhSendUs, fhSeqNo_,
-                KDB_EPOCH_OFFSET_NS);
+            // row pointer, a use-after-free.) Schema branch the same way.
+            t2s::KOwned row2;
+            if (cfg_.schema == t2s::TradeSchema::SpotTrade) {
+                row2 = t2s::buildTradeRow(
+                    fhRecvTimeUtcNs, symStr, primaryId, priceV, qtyV, buyerIsMaker,
+                    exchEventTimeMs, exchTradeTimeMs, fhParseUs, fhSendUs, fhSeqNo_,
+                    KDB_EPOCH_OFFSET_NS);
+            } else {  // FuturesAggTrade
+                row2 = t2s::buildAggTradeRow(
+                    fhRecvTimeUtcNs, symStr, primaryId, firstAggId, lastAggId,
+                    priceV, qtyV, buyerIsMaker,
+                    exchEventTimeMs, exchTradeTimeMs, fhParseUs, fhSendUs, fhSeqNo_,
+                    KDB_EPOCH_OFFSET_NS);
+            }
             k(-tpHandle_, (S)".u.upd", ks((S)cfg_.tpTable.c_str()), row2.release(), (K)0);
         }
     }
