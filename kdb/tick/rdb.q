@@ -42,6 +42,7 @@ system "g 0";
 \l ../schemas.q
 
 trade_binance:.schema.extend[.schema.trade; `tpRecvTimeUtcNs`tpSeqNo`rdbRecvTimeUtcNs];
+trade_binance_fut:.schema.extend[.schema.aggTrade; `tpRecvTimeUtcNs`tpSeqNo`rdbRecvTimeUtcNs];
 quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`rdbRecvTimeUtcNs];
 
 / -------------------------------------------------------
@@ -96,6 +97,9 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`rdbRecvTime
     -1 "RDB: Subscribing to trade_binance...";
     res:h(`pubsub.subscribe;`trade_binance;`);
     -1 "RDB: Subscribed to trade_binance";
+    -1 "RDB: Subscribing to trade_binance_fut...";
+    res:h(`pubsub.subscribe;`trade_binance_fut;`);
+    -1 "RDB: Subscribed to trade_binance_fut";
     -1 "RDB: Subscribing to quote_binance...";
     res:h(`pubsub.subscribe;`quote_binance;`);
     -1 "RDB: Subscribed to quote_binance";
@@ -152,14 +156,18 @@ upd:{[tbl;data]
   
   / Count rows before deletion
   tradesBefore:count trade_binance;
+  aggTradesBefore:count trade_binance_fut;
   quotesBefore:count quote_binance;
   
   / Delete old rows
   delete from `trade_binance where time < cutoff;
+  delete from `trade_binance_fut where time < cutoff;
   delete from `quote_binance where time < cutoff;
   
   / Track statistics
-  deleted:(tradesBefore - count trade_binance) + (quotesBefore - count quote_binance);
+  deleted:(tradesBefore - count trade_binance)
+        + (aggTradesBefore - count trade_binance_fut)
+        + (quotesBefore - count quote_binance);
   if[deleted > 0;
     .rdb.stats.rowsDeleted+:deleted;
   ];
@@ -177,6 +185,7 @@ upd:{[tbl;data]
     / Emergency cleanup - keep only last 10 minutes
     emergencyCutoff:.z.p - 0D00:10:00;
     delete from `trade_binance where time < emergencyCutoff;
+    delete from `trade_binance_fut where time < emergencyCutoff;
     delete from `quote_binance where time < emergencyCutoff;
     .Q.gc[];  / Force garbage collection
     :();
@@ -203,8 +212,11 @@ upd:{[tbl;data]
 / -------------------------------------------------------
 
 endofday:{[]
-  -1 "RDB: EOD - trades:",string[count trade_binance]," quotes:",string[count quote_binance];
+  -1 "RDB: EOD - trades:",string[count trade_binance],
+     " aggTrades:",string[count trade_binance_fut],
+     " quotes:",string[count quote_binance];
   delete from`trade_binance;
+  delete from`trade_binance_fut;
   delete from`quote_binance;
   .rdb.stats.rowsDeleted:0j;
   .rdb.stats.cleanupCount:0j;
@@ -225,7 +237,7 @@ endofday:{[]
        memMB > .rdb.cfg.memWarnMB; `degraded;
        `ok];
   
-  `process`port`uptime`status`connState`memMB`trades`quotes`rowsDeleted`cleanups!(
+  `process`port`uptime`status`connState`memMB`trades`aggTrades`quotes`rowsDeleted`cleanups!(
     `rdb;
     .rdb.cfg.port;
     `second$.z.p - .proc.startTime;
@@ -233,6 +245,7 @@ endofday:{[]
     .rdb.conn.state;
     memMB;
     count trade_binance;
+    count trade_binance_fut;
     count quote_binance;
     .rdb.stats.rowsDeleted;
     .rdb.stats.cleanupCount
@@ -244,11 +257,13 @@ endofday:{[]
 / -------------------------------------------------------
 
 .rdb.status:{[]
-  `port`chainedTP`connected`trades`quotes`symbols`lastTrade`lastQuote`retentionMin`memMB!
+  `port`chainedTP`connected`trades`aggTrades`quotes`symbols`lastTrade`lastAggTrade`lastQuote`retentionMin`memMB!
   (.rdb.cfg.port;.rdb.cfg.chainedTP;.rdb.conn.state = `connected;
-   count trade_binance;count quote_binance;
-   count distinct(exec distinct sym from trade_binance),(exec distinct sym from quote_binance);
-   exec last time from trade_binance;exec last time from quote_binance;
+   count trade_binance;count trade_binance_fut;count quote_binance;
+   count distinct (exec distinct sym from trade_binance),(exec distinct sym from trade_binance_fut),(exec distinct sym from quote_binance);
+   exec last time from trade_binance;
+   exec last time from trade_binance_fut;
+   exec last time from quote_binance;
    .rdb.cfg.retentionMin;
    (`long$.Q.w[][`used]) % 1000000)
   };
@@ -258,6 +273,15 @@ endofday:{[]
          minPx:min price,maxPx:max price,lastPx:last price,
          firstTime:first time,lastTime:last time
   by sym from trade_binance
+  };
+
+/ Aggregated-trade summary for the futures table. Same shape as
+/ .rdb.tradeSummary so dashboards can show spot vs futures side by side.
+.rdb.aggTradeSummary:{[]
+  select aggTrades:count i,volume:sum qty,dollarVol:sum price*qty,
+         minPx:min price,maxPx:max price,lastPx:last price,
+         firstTime:first time,lastTime:last time
+  by sym from trade_binance_fut
   };
 
 .rdb.quoteSummary:{[]
@@ -283,6 +307,12 @@ endofday:{[]
   raze {[s; n] (neg n) sublist select from trade_binance where sym = s}[; n] each syms
  };
 
+.rdb.lastAggTrades:{[n]
+  if[0 = count trade_binance_fut; :0#trade_binance_fut];
+  syms: exec distinct sym from trade_binance_fut;
+  raze {[s; n] (neg n) sublist select from trade_binance_fut where sym = s}[; n] each syms
+ };
+
 .rdb.lastQuotes:{[n]
   if[0 = count quote_binance; :0#quote_binance];
   syms: exec distinct sym from quote_binance;
@@ -294,6 +324,13 @@ endofday:{[]
   $[s ~ `;
     select from trade_binance where time within (startTime;endTime);
     select from trade_binance where sym = s, time within (startTime;endTime)
+  ]
+  };
+
+.rdb.aggTradeRange:{[s;startTime;endTime]
+  $[s ~ `;
+    select from trade_binance_fut where time within (startTime;endTime);
+    select from trade_binance_fut where sym = s, time within (startTime;endTime)
   ]
   };
 
@@ -339,7 +376,7 @@ system "p ",string .rdb.cfg.port;
 -1 "  Base retry delay: ",string[.rdb.conn.cfg.baseDelayMs],"ms";
 -1 "  Max retry delay: ",string[.rdb.conn.cfg.maxDelayMs],"ms";
 -1 "";
--1 "Tables: trade_binance quote_binance";
+-1 "Tables: trade_binance trade_binance_fut quote_binance";
 -1 "";
 
 / Attempt initial connection (non-blocking)
@@ -349,14 +386,17 @@ connected:.rdb.connect[];
 system "t ",string .rdb.cfg.cleanupIntervalMs;
 
 -1 "Query Interface:";
--1 "  .health[]              / Standardized health check";
--1 "  .rdb.status[]          / Full status";
--1 "  .rdb.tradeSummary[]    / Trade summary by symbol";
--1 "  .rdb.quoteSummary[]    / Quote summary by symbol";
--1 "  .rdb.lastTrades[10]    / Last 10 trades per symbol";
--1 "  .rdb.lastQuotes[10]    / Last 10 quotes per symbol";
--1 "  .rdb.tradeRange[`BTCUSDT; startTime; endTime]  / Trades in range";
--1 "  .rdb.quoteRange[`; startTime; endTime]         / All quotes in range";
+-1 "  .health[]                / Standardized health check";
+-1 "  .rdb.status[]            / Full status";
+-1 "  .rdb.tradeSummary[]      / Spot trade summary by symbol";
+-1 "  .rdb.aggTradeSummary[]   / Futures aggTrade summary by symbol";
+-1 "  .rdb.quoteSummary[]      / Quote summary by symbol";
+-1 "  .rdb.lastTrades[10]      / Last 10 spot trades per symbol";
+-1 "  .rdb.lastAggTrades[10]   / Last 10 futures aggTrades per symbol";
+-1 "  .rdb.lastQuotes[10]      / Last 10 quotes per symbol";
+-1 "  .rdb.tradeRange[`BTCUSDT; startTime; endTime]      / Spot trades in range";
+-1 "  .rdb.aggTradeRange[`BTCUSDT; startTime; endTime]   / Futures aggTrades in range";
+-1 "  .rdb.quoteRange[`; startTime; endTime]             / All quotes in range";
 -1 "";
 -1 "Memory Interface:";
 -1 "  .rdb.memStats[]        / Memory statistics";

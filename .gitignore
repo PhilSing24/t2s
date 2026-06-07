@@ -14,6 +14,7 @@ logs/processes/*.log
 kdb/logs/
 
 # Runtime scratch
+run/
 tmp/
 tmp.*/
 

@@ -5,21 +5,46 @@
 /   \l ../schemas.q
 /   / Process that just receives the upstream schema as-is:
 /   trade_binance:.schema.trade;
+/   trade_binance_fut:.schema.aggTrade;
 /   quote_binance:.schema.quote;
 /   health_feed_handler:.schema.health;
 /   / Process that adds its own receive-time stamp(s):
 /   trade_binance:.schema.extend[.schema.trade; enlist `tpRecvTimeUtcNs];
+/   trade_binance_fut:.schema.extend[.schema.aggTrade; enlist `tpRecvTimeUtcNs];
 /   quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`rdbRecvTimeUtcNs];
 
 / -------------------------------------------------------
 / Base schemas
 / -------------------------------------------------------
 
-/ Trade feed handler output (12 base columns)
+/ Trade feed handler output (12 base columns) — Binance spot @trade stream.
+/ Carries the per-symbol tradeId from the exchange for gap detection.
 .schema.trade:([]
   time:`timestamp$();
   sym:`symbol$();
   tradeId:`long$();
+  price:`float$();
+  qty:`float$();
+  buyerIsMaker:`boolean$();
+  exchEventTimeMs:`long$();
+  exchTradeTimeMs:`long$();
+  fhRecvTimeUtcNs:`long$();
+  fhParseUs:`long$();
+  fhSendUs:`long$();
+  fhSeqNo:`long$()
+  );
+
+/ Futures aggTrade feed handler output (14 base columns) — Binance USDT-M
+/ @aggTrade stream. Carries aggTradeId (the per-symbol monotonic id for
+/ gap detection) plus firstTradeId / lastTradeId describing the range of
+/ underlying fills aggregated into this event. Identical to .schema.trade
+/ except for the three id columns at positions 2-4. See ADR-013.
+.schema.aggTrade:([]
+  time:`timestamp$();
+  sym:`symbol$();
+  aggTradeId:`long$();
+  firstTradeId:`long$();
+  lastTradeId:`long$();
   price:`float$();
   qty:`float$();
   buyerIsMaker:`boolean$();

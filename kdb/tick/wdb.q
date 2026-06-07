@@ -38,6 +38,7 @@ system "g 0";
 .wdb.stats.flushCount:0j;
 .wdb.stats.rowsWritten:0j;
 .wdb.stats.tradesReceived:0j;
+.wdb.stats.aggTradesReceived:0j;
 .wdb.stats.quotesReceived:0j;
 
 / -------------------------------------------------------
@@ -64,7 +65,7 @@ system "g 0";
 / checkpoint floor. Tracking per-table fixes this: trade's flush only
 / advances trade's cursor, and quote replay still picks up its pending
 / rows from the right point.
-.wdb.lastTpSeqNo: `trade_binance`quote_binance ! 0 0j;
+.wdb.lastTpSeqNo: `trade_binance`trade_binance_fut`quote_binance ! 0 0 0j;
 
 / Phase 4 stats (separate from the existing stats group)
 .wdb.stats.replayRowsApplied:0j;
@@ -74,6 +75,7 @@ system "g 0";
 / finishing replay, incoming live messages accumulate here so they
 / aren't lost while we're catching up. Cleared after drain.
 .wdb.replayLiveBuffer.trade_binance:();
+.wdb.replayLiveBuffer.trade_binance_fut:();
 .wdb.replayLiveBuffer.quote_binance:();
 
 / True while in the replay-and-catchup phase. While true, upd() stashes
@@ -107,17 +109,20 @@ TMPSAVE:.wdb.getTmpSave .z.d
 \l ../schemas.q
 
 trade_binance:.schema.extend[.schema.trade; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeUtcNs];
+trade_binance_fut:.schema.extend[.schema.aggTrade; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeUtcNs];
 quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeUtcNs];
 
 / -------------------------------------------------------
 / Phase 4: Field positions (computed from cols at startup)
 / -------------------------------------------------------
-/ When upd() receives a row from TP it has 14 elements (TP stamps
+/ When upd() receives a row from TP it has N-1 elements (TP stamps
 / tpRecvTimeUtcNs and tpSeqNo, but our wdbRecvTimeUtcNs hasn't been added
-/ yet at that point). The position of tpSeqNo in our 15-column table is
-/ the same as the position in the incoming 14-element row, since
-/ wdbRecvTimeUtcNs is appended at the end.
-/ Both schemas have tpSeqNo at the same relative position so we use trade.
+/ yet at that point). The position of tpSeqNo in our N-column table is
+/ the same as the position in the incoming row, since wdbRecvTimeUtcNs is
+/ appended at the end.
+/ All three schemas have tpSeqNo at the same relative position from the
+/ left (second-to-last in the incoming row), so a single index works for
+/ all of them.
 .wdb.idx.tpSeqNo:(cols trade_binance)?`tpSeqNo;
 
 / -------------------------------------------------------
@@ -132,28 +137,40 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
 
 / Load checkpoint from disk. Returns per-table dict, with backward-compat
 / handling for the pre-fix scalar format. The scalar gets promoted to a
-/ per-table dict by initializing both tables to that value. This prevents
+/ per-table dict by initializing all tables to that value. This prevents
 / NEW losses going forward but does NOT recover rows that were already
 / silently skipped under the old global-cursor design - any such rows are
 / unrecoverable from this checkpoint and would need to be replayed from the
 / TP durability log (which is what the per-table fix prevents from
 / happening again).
+/ ADR-013 backward-compat: legacy 2-table checkpoints (just
+/ trade_binance + quote_binance, from before futures was wired) are
+/ migrated to a 3-table dict with trade_binance_fut starting at 0.
 .wdb.loadCheckpoint:{[]
+  defaults: `trade_binance`trade_binance_fut`quote_binance ! 0 0 0j;
   if[() ~ key .wdb.cfg.checkpointFile;
-    -1 "WDB: no checkpoint file, starting fresh (trade=0, quote=0)";
-    :`trade_binance`quote_binance ! 0 0j
+    -1 "WDB: no checkpoint file, starting fresh (trade=0, aggTrade=0, quote=0)";
+    :defaults
   ];
   v: @[get; .wdb.cfg.checkpointFile; {[err]
     -1 raze ("WDB: ERROR reading checkpoint - "; err);
-    `trade_binance`quote_binance ! 0 0j
+    defaults
   }];
   / Legacy scalar format: a single long applied to both tables. This was
   / the buggy original design - see DESIGN NOTE on .wdb.lastTpSeqNo above.
   if[-7h = type v;
     -1 raze ("WDB: migrating legacy scalar checkpoint "; string v; " -> per-table dict");
-    :`trade_binance`quote_binance ! (v;v)
+    :`trade_binance`trade_binance_fut`quote_binance ! (v;0j;v)
+  ];
+  / Pre-ADR-013 dict format had only trade_binance + quote_binance.
+  / Add trade_binance_fut starting at 0 if absent (no futures data
+  / has been written under that cursor, so 0 is correct).
+  if[not `trade_binance_fut in key v;
+    -1 "WDB: migrating legacy 2-table checkpoint -> 3-table dict (trade_binance_fut=0)";
+    v: v, (enlist `trade_binance_fut)!enlist 0j;
   ];
   -1 raze ("WDB: loaded checkpoint - trade="; string v`trade_binance;
+           " aggTrade="; string v`trade_binance_fut;
            " quote="; string v`quote_binance);
   v
  };
@@ -222,14 +239,15 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
 .wdb.applyReplayRow:{[tbl;row]
   row: row, .wdb.tsToNs[.z.p];
   .wdb.stats.replayRowsApplied+: 1;
-  $[tbl = `trade_binance; .wdb.stats.tradesReceived+:1;
-    tbl = `quote_binance; .wdb.stats.quotesReceived+:1;
+  $[tbl = `trade_binance;     .wdb.stats.tradesReceived+:1;
+    tbl = `trade_binance_fut; .wdb.stats.aggTradesReceived+:1;
+    tbl = `quote_binance;     .wdb.stats.quotesReceived+:1;
     ()];
   append[tbl;row];
  };
 
 / Drain the live-buffer accumulated during replay window. Each entry is a
-/ pre-WDB-stamp row (14 elements). Filter out duplicates of replay output
+/ pre-WDB-stamp row. Filter out duplicates of replay output
 / (tpSeqNo <= replayCutoff) and apply the rest as new live messages.
 .wdb.drainLiveBuffer:{[tbl]
   buf: .wdb.replayLiveBuffer[tbl];
@@ -249,8 +267,9 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
   / Apply new rows via the normal live path (adds wdbRecvTimeUtcNs)
   {[tbl; row]
     row: row, .wdb.tsToNs[.z.p];
-    $[tbl = `trade_binance; .wdb.stats.tradesReceived+:1;
-      tbl = `quote_binance; .wdb.stats.quotesReceived+:1;
+    $[tbl = `trade_binance;     .wdb.stats.tradesReceived+:1;
+      tbl = `trade_binance_fut; .wdb.stats.aggTradesReceived+:1;
+      tbl = `quote_binance;     .wdb.stats.quotesReceived+:1;
       ()];
     append[tbl; row];
   } [tbl;] each newRows;
@@ -264,7 +283,8 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
 .wdb.runReplay:{[h]
   -1 raze ("WDB: starting replay - checkpoint state: trade=";
            string .wdb.lastTpSeqNo`trade_binance;
-           " quote="; string .wdb.lastTpSeqNo`quote_binance);
+           " aggTrade="; string .wdb.lastTpSeqNo`trade_binance_fut;
+           " quote=";    string .wdb.lastTpSeqNo`quote_binance);
 
   / Capture cutoff. Live messages already arriving (since we subscribed)
   / are stashed in replayLiveBuffer; on drain, any with tpSeqNo > cutoff
@@ -292,10 +312,10 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
     / Each iteration of the table yields a dict row; convert to list
     / via `value` to match the shape live upd() receives.
     {[tbl; rowDict] .wdb.applyReplayRow[tbl; value rowDict]} [tbl;] each replayRows;
-  }[h;] each `trade_binance`quote_binance;
+  }[h;] each `trade_binance`trade_binance_fut`quote_binance;
 
   / Drain live buffer (filtering duplicates against cutoff)
-  .wdb.drainLiveBuffer each `trade_binance`quote_binance;
+  .wdb.drainLiveBuffer each `trade_binance`trade_binance_fut`quote_binance;
 
   / Clear replay mode - normal upd() resumes
   .wdb.replayMode: 0b;
@@ -306,14 +326,16 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
 
 / Status helper for observability
 .wdb.replayStatus:{[]
-  `lastTpSeqNoTrade`lastTpSeqNoQuote`replayMode`replayCutoff`replayRowsApplied`replayDupsFiltered`bufferTrades`bufferQuotes!(
+  `lastTpSeqNoTrade`lastTpSeqNoAggTrade`lastTpSeqNoQuote`replayMode`replayCutoff`replayRowsApplied`replayDupsFiltered`bufferTrades`bufferAggTrades`bufferQuotes!(
     .wdb.lastTpSeqNo`trade_binance;
+    .wdb.lastTpSeqNo`trade_binance_fut;
     .wdb.lastTpSeqNo`quote_binance;
     .wdb.replayMode;
     .wdb.replayCutoff;
     .wdb.stats.replayRowsApplied;
     .wdb.stats.replayDuplicatesFiltered;
     count .wdb.replayLiveBuffer.trade_binance;
+    count .wdb.replayLiveBuffer.trade_binance_fut;
     count .wdb.replayLiveBuffer.quote_binance)
  };
 
@@ -351,6 +373,8 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
   subResult:@[{[h]
     .wdb.replayMode:: 1b;
     res:h(`pubsub.subscribe;`trade_binance;`);
+    -1 "WDB: Subscribed to ",string first first res;
+    res:h(`pubsub.subscribe;`trade_binance_fut;`);
     -1 "WDB: Subscribed to ",string first first res;
     res:h(`pubsub.subscribe;`quote_binance;`);
     -1 "WDB: Subscribed to ",string first first res;
@@ -453,7 +477,7 @@ upd:{[tbl;data]
   / drained after replay completes. This prevents losing live data that
   / arrives during the replay window.
   if[.wdb.replayMode;
-    if[tbl in `trade_binance`quote_binance;
+    if[tbl in `trade_binance`trade_binance_fut`quote_binance;
       .wdb.replayLiveBuffer[tbl],: enlist data;
     ];
     :();
@@ -464,8 +488,9 @@ upd:{[tbl;data]
   data:data,.wdb.tsToNs[.z.p];
 
   / Track statistics
-  $[tbl = `trade_binance; .wdb.stats.tradesReceived+:1;
-    tbl = `quote_binance; .wdb.stats.quotesReceived+:1;
+  $[tbl = `trade_binance;     .wdb.stats.tradesReceived+:1;
+    tbl = `trade_binance_fut; .wdb.stats.aggTradesReceived+:1;
+    tbl = `quote_binance;     .wdb.stats.quotesReceived+:1;
     ()];
 
   / Append (will flush to disk if needed)
@@ -484,7 +509,7 @@ upd:{[tbl;data]
        .wdb.conn.state = `connecting; `degraded;
        `disconnected];
   
-  `process`port`uptime`status`connState`memMB`tradesRecv`quotesRecv`flushes`rowsWritten`bufferTrades`bufferQuotes!(
+  `process`port`uptime`status`connState`memMB`tradesRecv`aggTradesRecv`quotesRecv`flushes`rowsWritten`bufferTrades`bufferAggTrades`bufferQuotes!(
     `wdb;
     .wdb.cfg.port;
     `second$.z.p - .proc.startTime;
@@ -492,10 +517,12 @@ upd:{[tbl;data]
     .wdb.conn.state;
     memMB;
     .wdb.stats.tradesReceived;
+    .wdb.stats.aggTradesReceived;
     .wdb.stats.quotesReceived;
     .wdb.stats.flushCount;
     .wdb.stats.rowsWritten;
     count trade_binance;
+    count trade_binance_fut;
     count quote_binance
   )
   };
@@ -505,7 +532,7 @@ upd:{[tbl;data]
 / -------------------------------------------------------
 
 .wdb.status:{[]
-  `port`tpPort`connected`maxRows`tmpSave`hdbDir`flushes`rowsWritten`bufferTrades`bufferQuotes`memMB!(
+  `port`tpPort`connected`maxRows`tmpSave`hdbDir`flushes`rowsWritten`bufferTrades`bufferAggTrades`bufferQuotes`memMB!(
     .wdb.cfg.port;
     .wdb.cfg.tpPort;
     .wdb.conn.state = `connected;
@@ -515,6 +542,7 @@ upd:{[tbl;data]
     .wdb.stats.flushCount;
     .wdb.stats.rowsWritten;
     count trade_binance;
+    count trade_binance_fut;
     count quote_binance;
     (`long$.Q.w[][`used]) % 1000000
   )
@@ -551,8 +579,19 @@ upd:{[tbl;data]
   };
 
 .wdb.eod.sortTable:{[t]
-  ok:@[{[t] disksort[` sv TMPSAVE,t,`;`sym;`p#]; 1b};
-       t;
+  / If this table was empty all day, flushTable never wrote a splay to
+  / TMPSAVE and disksort would fail on the missing path. Treat absence
+  / as success (nothing to sort, nothing to fail). Pre-ADR-013 this code
+  / was never exercised against an empty table because spot + quote were
+  / always both populated; the futures table can legitimately be empty
+  / when running --markets=spot.
+  splayPath:` sv TMPSAVE,t,`;
+  if[() ~ key splayPath;
+    -1 .wdb.eod.msg ("No splay for "; string t; " - skipping sort (empty table)");
+    :1b
+  ];
+  ok:@[{[p] disksort[p;`sym;`p#]; 1b};
+       splayPath;
        {[t;err] -1 .wdb.eod.msg ("ERROR sorting "; string t; " - "; err); 0b}[t]];
   ok
   };
@@ -562,6 +601,8 @@ upd:{[tbl;data]
   @[{[h]
     h(`pubsub.subscribe;`trade_binance;`);
     -1 "WDB: Resubscribed to trade_binance";
+    h(`pubsub.subscribe;`trade_binance_fut;`);
+    -1 "WDB: Resubscribed to trade_binance_fut";
     h(`pubsub.subscribe;`quote_binance;`);
     -1 "WDB: Resubscribed to quote_binance";
   }; .wdb.conn.handle; {[err] -1 "WDB: Resubscription failed - ",err}];
@@ -575,6 +616,7 @@ upd:{[tbl;data]
   .wdb.stats.flushCount:0j;
   .wdb.stats.rowsWritten:0j;
   .wdb.stats.tradesReceived:0j;
+  .wdb.stats.aggTradesReceived:0j;
   .wdb.stats.quotesReceived:0j;
   };
 
@@ -701,7 +743,8 @@ endofday:{[]
   closingTmp:TMPSAVE;
   closingTmpStr:1_string closingTmp;
 
-  / Tables with sym column
+  / Tables with sym column. This auto-discovers trade_binance_fut once
+  / declared above - no name needs to be hardcoded here.
   t:tables`.;
   t@:where 11h=type each t@\:`sym;
   -1 .wdb.eod.msg ("Tables to process: "; ", " sv string t);
@@ -878,7 +921,7 @@ system "t ",string .wdb.cfg.timerMs;
 -1"  .wdb.replayStatus[]  / Phase 4 replay state";
 -1"  .wdb.flush[]         / Manual flush to disk";
 -1"";
--1"Tables: trade_binance quote_binance";
+-1"Tables: trade_binance trade_binance_fut quote_binance";
 -1"";
 
 $[connected; -1 "WDB: Ready and processing"; -1 "WDB: Started in DEGRADED mode - waiting for TP connection"];

@@ -34,6 +34,29 @@ trade_binance:([]
   tpSeqNo:`long$()         / NEW: monotonic per-TP sequence (Phase 4 - replay support)
   );
 
+/ Binance USDT-M futures @aggTrade payload. Schema mirrors trade_binance
+/ except for the three id columns (aggTradeId / firstTradeId / lastTradeId)
+/ that carry the aggregate event plus its constituent-fill range.
+/ See ADR-013 step 6.
+trade_binance_fut:([]
+  time:`timestamp$();
+  sym:`symbol$();
+  aggTradeId:`long$();
+  firstTradeId:`long$();
+  lastTradeId:`long$();
+  price:`float$();
+  qty:`float$();
+  buyerIsMaker:`boolean$();
+  exchEventTimeMs:`long$();
+  exchTradeTimeMs:`long$();
+  fhRecvTimeUtcNs:`long$();
+  fhParseUs:`long$();
+  fhSendUs:`long$();
+  fhSeqNo:`long$();
+  tpRecvTimeUtcNs:`long$();
+  tpSeqNo:`long$()
+  );
+
 quote_binance:([]
   time:`timestamp$();
   sym:`symbol$();
@@ -142,25 +165,31 @@ pubsub.init[]
 / Deriving from cols means schema column reordering is picked up automatically
 / (was: hardcoded 11 / 27, which silently breaks gap detection if the schema
 / shifts. Fixes review finding #4).
-.tp.idx.tradeSeq:(cols trade_binance)?`fhSeqNo;
-.tp.idx.quoteSeq:(cols quote_binance)?`fhSeqNo;
+.tp.idx.tradeSeq:    (cols trade_binance)?`fhSeqNo;
+.tp.idx.aggTradeSeq: (cols trade_binance_fut)?`fhSeqNo;
+.tp.idx.quoteSeq:    (cols quote_binance)?`fhSeqNo;
 
 / Per-side state: last fhSeqNo seen from each FH
 .tp.seq.trade:0N;
+.tp.seq.aggTrade:0N;
 .tp.seq.quote:0N;
 
 / Per-side gap counters
 .tp.gaps.trade:0j;
+.tp.gaps.aggTrade:0j;
 .tp.gaps.quote:0j;
 .tp.missed.trade:0j;
+.tp.missed.aggTrade:0j;
 .tp.missed.quote:0j;
 
 / Per-side restart counters (when fhSeqNo went backwards far enough to look like restart)
 .tp.restarts.trade:0j;
+.tp.restarts.aggTrade:0j;
 .tp.restarts.quote:0j;
 
 / Per-side duplicate counters (Phase 4 - bumped when FH heartbeat resends already-seen seqs)
 .tp.dups.trade:0j;
+.tp.dups.aggTrade:0j;
 .tp.dups.quote:0j;
 
 / Monotonic per-TP sequence number stamped on every accepted message (Phase 4).
@@ -238,6 +267,8 @@ upd:{[tbl;data]
   / On duplicate, we skip log + publish entirely.
   result: $[tbl=`trade_binance;
               .tp.checkSeq[`trade; data .tp.idx.tradeSeq];
+            tbl=`trade_binance_fut;
+              .tp.checkSeq[`aggTrade; data .tp.idx.aggTradeSeq];
             tbl=`quote_binance;
               .tp.checkSeq[`quote; data .tp.idx.quoteSeq];
             `accept];     / unknown tables: just pass through
@@ -252,30 +283,33 @@ upd:{[tbl;data]
 
   / Log first (durability), then publish (best-effort fanout).
   / If logging throws, we don't publish (consistent durable view).
-  .tp.log[tbl;data];
-  pubsub.publish[tbl;data];
- };
+  / Note: TP is a router, not a store - we do NOT insert into the local
+  / table copy. Subscribers (WDB, CTP) maintain the in-memory copies they
+  / need; TP just fans out.
+  .tp.log[tbl; data];
+  pubsub.publish[tbl; data];
+  };
 
-/ Alias for feed handlers that call .u.upd
+/ Alias for feed handlers that call .u.upd over IPC.
+/ The Binance trade/quote FH binaries call k(handle, ".u.upd", table, row)
+/ - this matches the standard kdb tickerplant convention. Without this
+/ alias, every FH message hits an undefined-function error on the TP side.
 .u.upd:upd;
 
-/ -------------------------------------------------------
-/ Phase 4 Public API
-/ -------------------------------------------------------
+/ Phase 4 API helpers (subscribers query these on reconnect to build
+/ a replay request).
 
-/ Returns the highest fhSeqNo accepted from this FH for the given side.
+/ Highest fhSeqNo accepted per side (for diagnostics).
 / Returns 0 (not 0N) if no messages received yet, so FH can compare
 / against its local fhSeqNo_ unambiguously.
-/ Called by FH heartbeat to detect TP-side gaps and trigger resends.
 .tp.lastAccepted:{[side]
   s: .tp.seq[side];
   $[null s; 0; s]
  };
 
-/ Current monotonic tpSeqNo. Used by subscribers at reconnect time to
-/ capture a clean cutoff between replay (everything <= cutoff) and live
-/ (everything > cutoff), so the replay/live boundary is well-defined.
-.tp.currentSeqNo:{[] .tp.tpSeqNo}
+/ Current tpSeqNo cursor - the latest assigned. Subscribers capture this
+/ at reconnect time as the cutoff for separating replay from live data.
+.tp.currentSeqNo:{[] .tp.tpSeqNo};
 
 / Replay support: read the durability log and return rows for `tbl`
 / with tpSeqNo >= fromSeq. Used by subscribers (WDB) on reconnect to
@@ -328,22 +362,26 @@ upd:{[tbl;data]
 / inside a lambda hit parser quirks in KDB-X 5.0. Using `|` (max) keeps
 / the per-stream merge null-safe: 0N | 5 -> 5, 5 | 3 -> 5, 0N | 0N -> 0N.
 .tp.recoverScan:{[t;d]
-  if[not t in `trade_binance`quote_binance; :()];
+  if[not t in `trade_binance`trade_binance_fut`quote_binance; :()];
   if[(count d) <> count cols value t; :()];
   / tpSeqNo is the last column of the persisted row.
   .tp.recoverTpMax:: .tp.recoverTpMax | last d;
-  / Per-stream max fhSeqNo.
+  / Per-stream max fhSeqNo. Each side has a different idx (spot=tradeSeq,
+  / futures=aggTradeSeq, quote=quoteSeq) since aggTrade has 14 base cols
+  / vs spot's 12 so fhSeqNo sits at a different position in the row.
   if[t = `trade_binance;
     .tp.recoverTradeMax:: .tp.recoverTradeMax | d .tp.idx.tradeSeq];
+  if[t = `trade_binance_fut;
+    .tp.recoverAggTradeMax:: .tp.recoverAggTradeMax | d .tp.idx.aggTradeSeq];
   if[t = `quote_binance;
     .tp.recoverQuoteMax:: .tp.recoverQuoteMax | d .tp.idx.quoteSeq];
  };
 
-/ Recover .tp.tpSeqNo AND per-side .tp.seq.{trade,quote} from the durability
-/ log on startup. Reads through the log, tracking the maximum tpSeqNo (global)
-/ and the maximum fhSeqNo per side. Seeds the corresponding state so newly
-/ accepted messages continue the sequence and gap detection correctly flags
-/ messages missed during the TP-down window.
+/ Recover .tp.tpSeqNo AND per-side .tp.seq.{trade,aggTrade,quote} from the
+/ durability log on startup. Reads through the log, tracking the maximum
+/ tpSeqNo (global) and the maximum fhSeqNo per side. Seeds the corresponding
+/ state so newly accepted messages continue the sequence and gap detection
+/ correctly flags messages missed during the TP-down window.
 
 / Critical: must be called BEFORE the log is reopened for new writes,
 / otherwise the new TP-process's first messages would re-use existing seqs.
@@ -361,9 +399,10 @@ upd:{[tbl;data]
   ];
 
   / Track max per-stream sequence numbers during replay.
-  .tp.recoverTpMax::    0j;
-  .tp.recoverTradeMax:: 0N;
-  .tp.recoverQuoteMax:: 0N;
+  .tp.recoverTpMax::       0j;
+  .tp.recoverTradeMax::    0N;
+  .tp.recoverAggTradeMax:: 0N;
+  .tp.recoverQuoteMax::    0N;
 
   oldUpd:: upd;
   upd:: .tp.recoverScan;
@@ -377,17 +416,20 @@ upd:{[tbl;data]
   / Seed live state from recovered maxes. tpSeqNo continues monotonically;
   / per-side fhSeqs are the floor for the next valid message (anything <=
   / is treated as duplicate or restart per checkSeq's existing logic).
-  .tp.tpSeqNo:   .tp.recoverTpMax;
-  .tp.seq.trade: .tp.recoverTradeMax;
-  .tp.seq.quote: .tp.recoverQuoteMax;
+  .tp.tpSeqNo:      .tp.recoverTpMax;
+  .tp.seq.trade:    .tp.recoverTradeMax;
+  .tp.seq.aggTrade: .tp.recoverAggTradeMax;
+  .tp.seq.quote:    .tp.recoverQuoteMax;
 
   -1 raze ("TP: recovered tpSeqNo="; string .tp.tpSeqNo;
            " tradeSeq=";              .Q.s1 .tp.seq.trade;
+           " aggTradeSeq=";           .Q.s1 .tp.seq.aggTrade;
            " quoteSeq=";              .Q.s1 .tp.seq.quote);
 
-  delete recoverTpMax    from `.tp;
-  delete recoverTradeMax from `.tp;
-  delete recoverQuoteMax from `.tp;
+  delete recoverTpMax       from `.tp;
+  delete recoverTradeMax    from `.tp;
+  delete recoverAggTradeMax from `.tp;
+  delete recoverQuoteMax    from `.tp;
  };
 
 / -------------------------------------------------------
@@ -396,7 +438,7 @@ upd:{[tbl;data]
 
 / Standardized health check (consistent across all processes)
 .health:{[]
-  st:$[(.tp.gaps.trade > 0) | .tp.gaps.quote > 0; `degraded; `ok];
+  st:$[(.tp.gaps.trade > 0) | (.tp.gaps.aggTrade > 0) | .tp.gaps.quote > 0; `degraded; `ok];
   `process`port`uptime`status`memMB`msgsIn`msgsOut!(
     `tp;
     .tp.cfg.port;
@@ -409,25 +451,27 @@ upd:{[tbl;data]
 
 .tp.status:{[]
   flip `metric`value!(
-    `port`uptime`logFile`logChunks`logSizeMB`tradeGaps`tradeMissed`tradeRestarts`tradeDups`lastTradeSeq`quoteGaps`quoteMissed`quoteRestarts`quoteDups`lastQuoteSeq`tpSeqNo;
+    `port`uptime`logFile`logChunks`logSizeMB`tradeGaps`tradeMissed`tradeRestarts`tradeDups`lastTradeSeq`aggTradeGaps`aggTradeMissed`aggTradeRestarts`aggTradeDups`lastAggTradeSeq`quoteGaps`quoteMissed`quoteRestarts`quoteDups`lastQuoteSeq`tpSeqNo;
     (.tp.cfg.port;
      `second$.z.p-.proc.startTime;
      .tp.logFile;
      .tp.logCount;
      0.01*`long$100*(@[hcount;.tp.logFile;0j])%1e6;
-     .tp.gaps.trade; .tp.missed.trade; .tp.restarts.trade; .tp.dups.trade; .tp.seq.trade;
-     .tp.gaps.quote; .tp.missed.quote; .tp.restarts.quote; .tp.dups.quote; .tp.seq.quote;
+     .tp.gaps.trade;    .tp.missed.trade;    .tp.restarts.trade;    .tp.dups.trade;    .tp.seq.trade;
+     .tp.gaps.aggTrade; .tp.missed.aggTrade; .tp.restarts.aggTrade; .tp.dups.aggTrade; .tp.seq.aggTrade;
+     .tp.gaps.quote;    .tp.missed.quote;    .tp.restarts.quote;    .tp.dups.quote;    .tp.seq.quote;
      .tp.tpSeqNo))
   };
 
 / Compact status as dictionary (for programmatic use)
 .tp.statusDict:{[]
-  `port`uptime`logChunks`tradeGaps`tradeMissed`tradeDups`quoteGaps`quoteMissed`quoteDups`tpSeqNo!
+  `port`uptime`logChunks`tradeGaps`tradeMissed`tradeDups`aggTradeGaps`aggTradeMissed`aggTradeDups`quoteGaps`quoteMissed`quoteDups`tpSeqNo!
    (.tp.cfg.port;
     `second$.z.p-.proc.startTime;
     .tp.logCount;
-    .tp.gaps.trade; .tp.missed.trade; .tp.dups.trade;
-    .tp.gaps.quote; .tp.missed.quote; .tp.dups.quote;
+    .tp.gaps.trade;    .tp.missed.trade;    .tp.dups.trade;
+    .tp.gaps.aggTrade; .tp.missed.aggTrade; .tp.dups.aggTrade;
+    .tp.gaps.quote;    .tp.missed.quote;    .tp.dups.quote;
     .tp.tpSeqNo)
   };
 
@@ -442,12 +486,14 @@ upd:{[tbl;data]
 
 .tp.endOfDay:{[]
   -1 raze ("TP: EOD - chunks:"; string .tp.logCount;
-           " tradeGaps:"; string .tp.gaps.trade;
-           " quoteGaps:"; string .tp.gaps.quote;
-           " tpSeqNo:"; string .tp.tpSeqNo);
+           " tradeGaps:";    string .tp.gaps.trade;
+           " aggTradeGaps:"; string .tp.gaps.aggTrade;
+           " quoteGaps:";    string .tp.gaps.quote;
+           " tpSeqNo:";      string .tp.tpSeqNo);
   pubsub.callendofday[];
   .tp.rotate[];
   delete from `trade_binance;
+  delete from `trade_binance_fut;
   delete from `quote_binance;
   delete from `health_feed_handler;
   .tp.logCount:0j;
@@ -456,6 +502,10 @@ upd:{[tbl;data]
   .tp.missed.trade:0j;
   .tp.restarts.trade:0j;
   .tp.dups.trade:0j;
+  .tp.gaps.aggTrade:0j;
+  .tp.missed.aggTrade:0j;
+  .tp.restarts.aggTrade:0j;
+  .tp.dups.aggTrade:0j;
   .tp.gaps.quote:0j;
   .tp.missed.quote:0j;
   .tp.restarts.quote:0j;
@@ -503,7 +553,7 @@ system "t 1000";   / Check every 1 second
 -1"=======================================================";
 -1"TP (KDB-X module) starting on port ",string[.tp.cfg.port];
 -1"=======================================================";
--1"Tables: trade_binance quote_binance health_feed_handler";
+-1"Tables: trade_binance trade_binance_fut quote_binance health_feed_handler";
 -1"";
 -1"Monitoring:";
 -1"  .health[]            / Standardized health check";
@@ -512,10 +562,12 @@ system "t 1000";   / Check every 1 second
 -1"  .tp.logStatus[]      / Log file status";
 -1"";
 -1"Phase 4 API (acks/replay):";
--1"  .tp.lastAccepted[`trade]   / Highest fhSeqNo accepted for trades";
--1"  .tp.lastAccepted[`quote]   / Highest fhSeqNo accepted for quotes";
--1"  .tp.currentSeqNo[]         / Current monotonic tpSeqNo (replay cutoff)";
--1"  .tp.replayFrom[`trade_binance; fromSeq]   / Replay subset from log";
+-1"  .tp.lastAccepted[`trade]       / Highest fhSeqNo accepted for spot trades";
+-1"  .tp.lastAccepted[`aggTrade]    / Highest fhSeqNo accepted for futures aggTrades";
+-1"  .tp.lastAccepted[`quote]       / Highest fhSeqNo accepted for quotes";
+-1"  .tp.currentSeqNo[]             / Current monotonic tpSeqNo (replay cutoff)";
+-1"  .tp.replayFrom[`trade_binance; fromSeq]      / Replay subset from log";
+-1"  .tp.replayFrom[`trade_binance_fut; fromSeq]  / Replay futures subset from log";
 -1"";
 -1"Operations:";
 -1"  .tp.endOfDay[]    / Trigger end-of-day";

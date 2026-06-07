@@ -1,0 +1,26 @@
+{
+  "symbols": ["btcusdt"],
+
+  "market": {
+    "host": "fstream.binance.com",
+    "port": "443",
+    "stream_suffix": "@aggTrade",
+    "tp_table": "trade_binance_fut",
+    "schema": "futures_agg_trade"
+  },
+
+  "tickerplant": {
+    "host": "localhost",
+    "port": 5010
+  },
+
+  "reconnect": {
+    "initial_backoff_ms": 1000,
+    "max_backoff_ms": 8000
+  },
+
+  "logging": {
+    "level": "info",
+    "file": ""
+  }
+}

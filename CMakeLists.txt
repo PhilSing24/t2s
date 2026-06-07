@@ -42,13 +42,24 @@ target_include_directories(t2s_fh PUBLIC
 target_link_libraries(t2s_fh PUBLIC ${COMMON_LIBS})
 
 # ---------------------------------------------------------------------------
-# Executable: trade feed handler
+# Executable: spot trade feed handler
 # ---------------------------------------------------------------------------
 add_executable(trade_feed_handler
     cpp/src/trade_fh_main.cpp
 )
 
 target_link_libraries(trade_feed_handler PRIVATE t2s_fh)
+
+# ---------------------------------------------------------------------------
+# Executable: futures (USDT-M aggTrade) trade feed handler
+# Both spot and futures binaries link the same parameterized
+# TradeFeedHandler from t2s_fh; they differ only in default config path.
+# ---------------------------------------------------------------------------
+add_executable(trade_feed_handler_fut
+    cpp/src/trade_fh_fut_main.cpp
+)
+
+target_link_libraries(trade_feed_handler_fut PRIVATE t2s_fh)
 
 # ---------------------------------------------------------------------------
 # Executable: L5 quote feed handler

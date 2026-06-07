@@ -342,7 +342,18 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
 }
 
 void TradeFeedHandler::runWebSocketLoop() {
-    std::string target = t2s::buildStreamPath(symbols_, cfg_.streamSuffix);
+    // Binance USDT-M futures requires a routed path prefix as of the
+    // 2026-04-23 URL migration: streams on /market (which includes
+    // @aggTrade) won't deliver data on unrouted connections - the
+    // WebSocket handshake succeeds but no messages arrive. See
+    //   https://developers.binance.com/docs/derivatives/usds-margined-futures
+    //         /websocket-market-streams/Important-WebSocket-Change-Notice
+    // Spot (stream.binance.com:9443) is unaffected - it uses a different
+    // host and routing isn't required there.
+    std::string pathPrefix = (cfg_.schema == t2s::TradeSchema::FuturesAggTrade)
+                             ? "/market"
+                             : "";
+    std::string target = pathPrefix + t2s::buildStreamPath(symbols_, cfg_.streamSuffix);
     spdlog::info("Connecting to Binance: {}{}", cfg_.host, target);
 
     connState_ = "connecting";
@@ -448,10 +459,17 @@ void TradeFeedHandler::publishHealth() {
             tp.time_since_epoch()).count() - KDB_EPOCH_OFFSET_NS;
     };
 
+    // Handler name distinguishes spot vs futures FH in the shared
+    // health_feed_handler table. Without this, both binaries publish
+    // under "trade_fh" and operators can't tell which one is dead.
+    const char* handlerName = (cfg_.schema == t2s::TradeSchema::FuturesAggTrade)
+                              ? "trade_fh_fut"
+                              : "trade_fh";
+
     // Build health row (10 fields)
     t2s::KOwned row(knk(10,
         ktj(-KP, toKdbTs(now)),                    // time
-        ks((S)"trade_fh"),                          // handler
+        ks((S)handlerName),                         // handler
         ktj(-KP, toKdbTs(startTime_)),             // startTimeUtc
         kj(uptimeSec),                              // uptimeSec
         kj(msgsReceived_),                          // msgsReceived

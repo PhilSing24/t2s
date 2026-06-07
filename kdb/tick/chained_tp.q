@@ -33,6 +33,7 @@ system "g 0";
 \l ../schemas.q
 
 trade_binance:.schema.extend[.schema.trade; `tpRecvTimeUtcNs`tpSeqNo];
+trade_binance_fut:.schema.extend[.schema.aggTrade; `tpRecvTimeUtcNs`tpSeqNo];
 quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo];
 
 / Health metrics from feed handlers (forwarded immediately, not batched)
@@ -60,10 +61,12 @@ pubsub.init[]
 / -------------------------------------------------------
 
 .ctp.buf.trade:trade_binance;
+.ctp.buf.aggTrade:trade_binance_fut;
 .ctp.buf.quote:quote_binance;
 
 .ctp.stats.flushCount:0j;
 .ctp.stats.tradeCount:0j;
+.ctp.stats.aggTradeCount:0j;
 .ctp.stats.quoteCount:0j;
 .ctp.stats.healthCount:0j;
 .ctp.stats.positionsCount:0j;
@@ -116,7 +119,11 @@ pubsub.init[]
     -1 "CTP: Subscribing to trade_binance...";
     res:h(`pubsub.subscribe;`trade_binance;`);
     -1 "CTP: Subscribed to trade_binance";
-    
+
+    -1 "CTP: Subscribing to trade_binance_fut...";
+    res:h(`pubsub.subscribe;`trade_binance_fut;`);
+    -1 "CTP: Subscribed to trade_binance_fut";
+
     -1 "CTP: Subscribing to quote_binance...";
     res:h(`pubsub.subscribe;`quote_binance;`);
     -1 "CTP: Subscribed to quote_binance";
@@ -167,6 +174,8 @@ upd:{[tbl;data]
   / single rows and inflated counters by the number of fields per row.
   $[tbl=`trade_binance;
     [`.ctp.buf.trade insert data;.ctp.stats.tradeCount+:$[98h=type data;count data;1]];
+    tbl=`trade_binance_fut;
+    [`.ctp.buf.aggTrade insert data;.ctp.stats.aggTradeCount+:$[98h=type data;count data;1]];
     tbl=`quote_binance;
     [`.ctp.buf.quote insert data;.ctp.stats.quoteCount+:$[98h=type data;count data;1]];
     tbl=`health_feed_handler;
@@ -187,6 +196,10 @@ upd:{[tbl;data]
     pubsub.publish[`trade_binance;.ctp.buf.trade];
     .ctp.buf.trade:0#.ctp.buf.trade;
   ];
+  if[count .ctp.buf.aggTrade;
+    pubsub.publish[`trade_binance_fut;.ctp.buf.aggTrade];
+    .ctp.buf.aggTrade:0#.ctp.buf.aggTrade;
+  ];
   if[count .ctp.buf.quote;
     pubsub.publish[`quote_binance;.ctp.buf.quote];
     .ctp.buf.quote:0#.ctp.buf.quote;
@@ -205,7 +218,7 @@ upd:{[tbl;data]
        .ctp.conn.state = `connecting; `degraded;
        `disconnected];
   
-  `process`port`uptime`status`connState`retryCount`memMB`trades`quotes`health`positions`flushes`bufTrades`bufQuotes!(
+  `process`port`uptime`status`connState`retryCount`memMB`trades`aggTrades`quotes`health`positions`flushes`bufTrades`bufAggTrades`bufQuotes!(
     `ctp;
     .ctp.cfg.port;
     `second$.z.p - .proc.startTime;
@@ -214,11 +227,13 @@ upd:{[tbl;data]
     .ctp.conn.retryCount;
     (`long$.Q.w[][`used]) % 1000000;
     .ctp.stats.tradeCount;
+    .ctp.stats.aggTradeCount;
     .ctp.stats.quoteCount;
     .ctp.stats.healthCount;
     .ctp.stats.positionsCount;
     .ctp.stats.flushCount;
     count .ctp.buf.trade;
+    count .ctp.buf.aggTrade;
     count .ctp.buf.quote
   )
   };
@@ -243,9 +258,11 @@ endofday:{[]
   .ctp.flush[];
   pubsub.callendofday[];
   delete from`trade_binance;
+  delete from`trade_binance_fut;
   delete from`quote_binance;
   delete from`positions;
   .ctp.stats.tradeCount:0j;
+  .ctp.stats.aggTradeCount:0j;
   .ctp.stats.quoteCount:0j;
   .ctp.stats.healthCount:0j;
   .ctp.stats.positionsCount:0j;
@@ -258,11 +275,11 @@ endofday:{[]
 / -------------------------------------------------------
 
 .ctp.status:{[]
-  `port`primaryTP`batchMs`connected`connState`retryCount`flushes`trades`quotes`health`positions`lastFlush`bufTrades`bufQuotes!
+  `port`primaryTP`batchMs`connected`connState`retryCount`flushes`trades`aggTrades`quotes`health`positions`lastFlush`bufTrades`bufAggTrades`bufQuotes!
   (.ctp.cfg.port;.ctp.cfg.primaryTP;.ctp.cfg.batchMs;.ctp.conn.state = `connected;
    .ctp.conn.state;.ctp.conn.retryCount;
-   .ctp.stats.flushCount;.ctp.stats.tradeCount;.ctp.stats.quoteCount;.ctp.stats.healthCount;.ctp.stats.positionsCount;
-   .ctp.stats.lastFlush;count .ctp.buf.trade;count .ctp.buf.quote)
+   .ctp.stats.flushCount;.ctp.stats.tradeCount;.ctp.stats.aggTradeCount;.ctp.stats.quoteCount;.ctp.stats.healthCount;.ctp.stats.positionsCount;
+   .ctp.stats.lastFlush;count .ctp.buf.trade;count .ctp.buf.aggTrade;count .ctp.buf.quote)
   };
 
 / -------------------------------------------------------
@@ -282,10 +299,10 @@ system "p ",string .ctp.cfg.port;
 -1 "  Base retry delay: ",string[.ctp.conn.cfg.baseDelayMs],"ms";
 -1 "  Max retry delay: ",string[.ctp.conn.cfg.maxDelayMs],"ms";
 -1 "";
--1 "Tables: trade_binance quote_binance health_feed_handler positions";
+-1 "Tables: trade_binance trade_binance_fut quote_binance health_feed_handler positions";
 -1 "";
 -1 "Data Sources:";
--1 "  Primary TP: trades, quotes, health";
+-1 "  Primary TP: trades (spot + futures), quotes, health";
 -1 "  SIG: positions (direct publish)";
 -1 "";
 
