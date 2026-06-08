@@ -85,10 +85,17 @@ anyFileExists: {[syms; dt]
 downloadZip: {[sym; dt]
   url: buildUrl[sym; dt];
   zp: zipPath[sym; dt];
-  cmd: raze ("curl -s -f -o \""; zp; "\" \""; url; "\"");
-  / curl -f returns non-zero on HTTP errors (e.g. 404 for not-yet-published
-  / archives), which makes q's `system` throw 'os. Wrap in protected eval
-  / so we can return false cleanly and let the caller continue.
+  / Ensure download dir exists. mkdir -p is idempotent so this is safe to
+  / call on every download. Without it, curl exits with code 23 (write
+  / error) when .cfg.downloadDir doesn't yet exist - and kdb's `system`
+  / does NOT detect that (it only throws if it can't run the shell at
+  / all, not on non-zero exit codes from the executed command).
+  system raze ("mkdir -p \""; .cfg.downloadDir; "\"");
+  / Append `|| exit 1` so a non-zero curl exit (HTTP 404, write error,
+  / network failure) propagates to the shell's final exit status. kdb's
+  / `system` then sees the shell itself failed and throws 'os, which the
+  / protected eval below catches.
+  cmd: raze ("curl -s -f -o \""; zp; "\" \""; url; "\" || exit 1");
   ok: @[{system x; 1b}; cmd; {[err] 0b}];
   if[not ok;
     -1 raze ("ERROR: Failed to download "; url; " (file may not be published yet)");
