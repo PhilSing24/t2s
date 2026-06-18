@@ -45,13 +45,37 @@
 // ----------------------------------------------------------------------------
 // Argument parsing - simple `-key value` style
 // ----------------------------------------------------------------------------
+
+// Infer the type of a string CLI value for the strategy cfg dict.
+// Order matters: try long first, then float, else keep as string.
+//   "10000"   -> 10000j   (long)
+//   "1.5"     -> 1.5f     (float)
+//   "1.0"     -> 1.0f     (float - has a decimal point, not a clean long)
+//   "BTCUSDT" -> "BTCUSDT" (string)
+// Note: a round value like "5" becomes a long 5j, not 5f. A strategy that
+// treats a parameter as float should cast it defensively in its init.
+.runner.inferType: {[v]
+  / Long iff the value round-trips through long parsing unchanged.
+  if[v ~ string "J"$v; :"J"$v];
+  / Float iff it parses to a non-null float (covers "1.5", "1.0", "1e3").
+  if[not null "F"$v; :"F"$v];
+  / Fallback: leave as the original string.
+  v
+ };
+
 .runner.parseArgs: {[args]
   if[0 = count args; :()];
-  / Walk pairs
+  / Walk pairs. Runner-owned flags are handled explicitly; ANY other -flag is
+  / treated as a strategy parameter and forwarded to strategyCfg with an
+  / inferred type. This means adding a new strategy with new parameters never
+  / requires editing the runner. Strategy-cfg pairs are collected into a list
+  / of (key;value) tuples; the dict is assembled at the end so q doesn't lock
+  / the value list to a single type during incremental insertion.
+  scPairs: ();
   i: 0;
   while[i < count args;
     k: args i;
-    if[i + 1 >= count args; '"missing value for ", k];
+    if[(i + 1) >= count args; '"missing value for ", k];
     v: args i+1;
     $[k ~ "-strategy"; .runner.cfg.strategyFile: v;
       k ~ "-ns";       .runner.cfg.namespace:    `$v;
@@ -60,12 +84,15 @@
       k ~ "-end";      .runner.cfg.endDate:      "D"$v;
       k ~ "-table";    .runner.cfg.tableName:    `$v;
       k ~ "-hdb";      .runner.cfg.hdbRoot:      v;
-      k ~ "-fastN";    .runner.cfg.strategyCfg[`fastN]:    "J"$v;
-      k ~ "-slowN";    .runner.cfg.strategyCfg[`slowN]:    "J"$v;
-      k ~ "-tradeQty"; .runner.cfg.strategyCfg[`tradeQty]: "F"$v;
-      '"unknown arg: ", k
+      / default: any other -flag -> strategy parameter (strip leading '-')
+      [ if[not "-" = k 0; '"unexpected arg (no leading dash): ", k];
+        pname: `$ 1 _ k;
+        scPairs,: enlist (pname; .runner.inferType v) ]
     ];
     i+: 2;
+  ];
+  if[count scPairs;
+    .runner.cfg.strategyCfg: (first each scPairs)!last each scPairs;
   ];
  };
 
