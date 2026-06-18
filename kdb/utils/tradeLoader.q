@@ -69,7 +69,11 @@ csvPath: {[sym; dt]
  };
 
 partitionExists: {[dt]
-  p: raze ((1 _ string .cfg.partitionDir); "/"; string dt);
+  / Check for THIS loader's table (trade/) inside the partition dir, not just
+  / the dir itself. The partition may already exist with sibling tables
+  / (aggTrade_fut/, trade_fut/) from the futures loaders; we should only skip
+  / when our own `trade` splay is already there.
+  p: raze ((1 _ string .cfg.partitionDir); "/"; string dt; "/trade");
   not () ~ key hsym `$p
  };
 

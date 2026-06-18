@@ -50,3 +50,5 @@ kdb/tick/logs/
 *:Zone.Identifier
 kdb/tick/baseline
 kdb/tick/baseline_pr2
+load_*.log
+backtest_*.log
