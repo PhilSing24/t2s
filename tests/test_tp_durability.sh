@@ -14,7 +14,8 @@
 #                      logged); correct rows for all tables flow to WDB
 #   2 TP restart,      SIGTERM + restart: tpSeqNo continues above the old
 #     same day         value, handler sessions continue with no restart and
-#                      no missed rows, WDB healthy, disk == logs
+#                      no missed rows (even when an earlier session left
+#                      higher fhSeqNo in the log), WDB healthy, disk == logs
 #   3 TP restart on a  restart with a fake date for which no log exists:
 #     new day          counter continues from the reservation file; then a
 #                      first start WITHOUT the reservation file on yet
@@ -184,15 +185,22 @@ end_scenario
 # ============================================================================
 begin_scenario 2 "TP SIGTERM + restart same day: tpSeqNo continues, sessions continue" && {
     start_wdb
+    # An earlier spot session leaves HIGH fhSeqNo (1..100) in the log; the
+    # handler then restarts and the live session is at a lower fhSeqNo when
+    # TP restarts. TP must compare against the LAST logged row, not the
+    # day's maximum, or it misreports the reconnect as another restart.
+    tp -step publish -table trade_binance     -rows 100 -date "$TODAY" -session 2000
+    tp -step fhseq_reset -table trade_binance
     tp -step publish -table trade_binance     -rows 50 -date "$TODAY" -session 2001
     tp -step publish -table quote_binance     -rows 20 -date "$TODAY" -session 2002
     tp -step publish -table trade_binance_fut -rows 10 -date "$TODAY" -session 2003
     sleep 1
+    tp -step tp_status -key tradeRestarts -value 1
     tp -step tp_seq_save -name before_restart
     stop_tp_term
     start_tp
     grep -q "tpSeqNo resumed from reservation file" "$TP_LOG" || fail "TP did not resume tpSeqNo from the reservation file"
-    grep -q "recovered last fhSeqNo per table" "$TP_LOG" || fail "TP did not recover fhSeqNo from today's log"
+    grep -q "recovered fhSeqNo of the last logged row" "$TP_LOG" || fail "TP did not recover fhSeqNo from today's log"
     tp -step tp_seq_assert_gt -name before_restart
     wait_wdb_reconnect
     wdb -step assert_status -key halted -value 0
@@ -203,6 +211,7 @@ begin_scenario 2 "TP SIGTERM + restart same day: tpSeqNo continues, sessions con
     tp -step publish -table trade_binance_fut -rows 5  -date "$TODAY" -session 2003
     sleep 1
     grep -q "continues for trade_binance after TP restart" "$TP_LOG" || fail "TP log lacks session-continues line"
+    if grep -q "RESTART detected" "$TP_LOG"; then fail "TP misreported a reconnect after its own restart as a handler restart"; fi
     tp -step tp_status -key tradeRestarts -value 0
     tp -step tp_status -key tradeMissed -value 0
     tp -step tp_status -key missed -value 0
@@ -211,7 +220,7 @@ begin_scenario 2 "TP SIGTERM + restart same day: tpSeqNo continues, sessions con
     wdb -step assert_status -key halted -value 0
     wdb_graceful_stop
     tp -step assert_log_monotone
-    tp -step assert_log_rows -table trade_binance -rows 80
+    tp -step assert_log_rows -table trade_binance -rows 180
     all_tables_match_logs
 }
 end_scenario

@@ -386,25 +386,29 @@ upd:{[tbl;data]
 / reconnect time as the cutoff for separating replay from live data.
 .tp.currentSeqNo:{[] .tp.tpSeqNo};
 
-/ Scan a log file: returns (max tpSeqNo; per-table max fhSeqNo dict). Uses
-/ -11! with a temporary upd. Rows whose width does not match the current
-/ schema are ignored.
+/ Scan a log file: returns (max tpSeqNo; per-table fhSeqNo of the LAST row
+/ logged). The last row's fhSeqNo, not the day's maximum: a handler that
+/ restarted earlier in the day leaves higher numbers from its previous
+/ session in the log, and comparing a reconnecting handler against that
+/ maximum misreported every post-restart registration as a handler
+/ restart (seen in the first live check of this code). Uses -11! with a
+/ temporary upd; rows whose width does not match the schema are ignored.
 .tp.scan.tpMax:0j;
-.tp.scan.fhMax:.tp.tables ! 0N 0N 0Nj;
+.tp.scan.fhLast:.tp.tables ! 0N 0N 0Nj;
 .tp.scanUpd:{[t;d]
   if[not t in .tp.tables; :()];
   if[(count d) <> count cols value t; :()];
   .tp.scan.tpMax:.tp.scan.tpMax | last d;
-  .tp.scan.fhMax[t]:.tp.scan.fhMax[t] | d .tp.idx.fhSeqNo t;
+  .tp.scan.fhLast[t]:d .tp.idx.fhSeqNo t;
  };
 .tp.scanLog:{[f]
   .tp.scan.tpMax:0j;
-  .tp.scan.fhMax:.tp.tables ! 0N 0N 0Nj;
+  .tp.scan.fhLast:.tp.tables ! 0N 0N 0Nj;
   oldUpd:upd;
   upd::.tp.scanUpd;
   .[{-11!x}; enlist f; {[err] -1 "TP: log scan error: ",err}];
   upd::oldUpd;
-  (.tp.scan.tpMax; .tp.scan.fhMax)
+  (.tp.scan.tpMax; .tp.scan.fhLast)
  };
 
 / Replay support: rows for `tbl` with tpSeqNo >= fromSeq from today's log.
@@ -435,7 +439,7 @@ upd:{[tbl;data]
   if[() ~ key logFile; -1 "TP: no log for today - no fhSeqNo to recover"; :()];
   r:.tp.scanLog[logFile];
   .tp.seq.last:r 1;
-  -1 raze ("TP: recovered last fhSeqNo per table from today's log: "; .Q.s1 .tp.seq.last;
+  -1 raze ("TP: recovered fhSeqNo of the last logged row per table: "; .Q.s1 .tp.seq.last;
            " (log max tpSeqNo "; string r 0; ")");
   if[(r 0) > .tp.tpSeqNo;
     -1 raze ("TP: ERROR today's log holds tpSeqNo "; string r 0; " above the reservation "; string .tp.tpSeqNo;
