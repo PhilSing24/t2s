@@ -47,8 +47,12 @@ absolutize:{[cwd;p] canon $[(count p) and "/" = first p; p; raze (cwd; "/"; p)]}
 
 / Which variables to check, per process.
 pathVars:$[proc = `tp;
-  (".tp.cfg.logDir"; ".tp.logFile");
+  (".tp.cfg.logDir"; ".tp.logFile"; ".tp.cfg.seqFile"; ".tp.cfg.wdbCheckpointFile");
   (".wdb.cfg.hdbDir"; ".wdb.cfg.checkpointFile"; ".wdb.tmpDir"; ".wdb.tmpPath .wdb.today[]")];
+/ Test-only clock overrides. Allowed ONLY in a sandboxed process: if one is
+/ set, every path above must already have passed, which this guard
+/ enforces; it is reported here so a fake date never goes unnoticed.
+clockVar:$[proc = `tp; ".tp.clock.fixed"; ".wdb.clock.fixed"];
 portVars:$[proc = `tp;
   enlist ".tp.cfg.port";
   (".wdb.cfg.port"; ".wdb.cfg.tpPort")];
@@ -68,6 +72,10 @@ violations:0;
   if[not ok; violations::violations+1];
  }[h;cwd;sandboxAbs] each pathVars;
 
+fixedDate:h clockVar;
+if[not null fixedDate;
+  -1 raze ("GUARD: clock "; clockVar; " = "; string fixedDate; "  (FAKE DATE - permitted only because every path is inside the sandbox)")];
+
 {[h;portMin;portMax;name]
   v:h name;
   ok:(v >= portMin) and v <= portMax;
@@ -78,6 +86,8 @@ violations:0;
 hclose h;
 
 if[violations > 0;
+  if[not null fixedDate;
+    -1 raze ("GUARD: a fake date is set on a process that is NOT fully sandboxed - never do this outside tests")];
   fail raze (string violations; " violation(s) for "; string proc; " - test run aborted")];
 
 -1 raze ("GUARD: "; string proc; " isolated");

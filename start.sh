@@ -62,6 +62,16 @@ case "$MARKETS" in
         ;;
 esac
 
+# Refuse to start production with a test-only clock override in the
+# environment. These make TP/WDB believe it is another date; they exist for
+# the sandboxed tests only (tests/t_lib.sh sets them per process).
+for var in T2S_TP_FAKE_DATE T2S_WDB_FAKE_DATE; do
+    if [[ -n "${!var:-}" ]]; then
+        echo -e "${RED}Error: $var is set in the environment (${!var}). Refusing to start the live pipeline with a fake date.${NC}"
+        exit 1
+    fi
+done
+
 # Dependency checks
 command -v tmux >/dev/null 2>&1 || { echo -e "${RED}Error: tmux not installed${NC}"; exit 1; }
 command -v q >/dev/null 2>&1 || { echo -e "${RED}Error: q (kdb+) not installed${NC}"; exit 1; }

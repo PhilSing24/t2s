@@ -32,6 +32,7 @@ T2S_SB_TPLOGS="$T2S_SANDBOX/tplogs"
 T2S_SB_HDB="$T2S_SANDBOX/hdb"
 T2S_SB_TMP="$T2S_SANDBOX/tmp/"            # trailing slash: wdb.q concatenates
 T2S_SB_CHECKPOINT="$T2S_SANDBOX/tmp/wdb.lastTpSeqNo"
+T2S_SB_TPSEQ="$T2S_SANDBOX/tplogs/tp.tpSeqNo"
 
 t2s_sandbox_reset() {
     rm -rf "$T2S_SANDBOX"
@@ -74,14 +75,21 @@ t2s_wait_port() {
 }
 
 # Spawn the real tp.q from its own directory with every path/port it reads
-# set explicitly. Args: port logfile. Prints the PID.
+# set explicitly: listen port, log dir, tpSeqNo reservation file, and the
+# WDB checkpoint path it reads (read-only) at migration time.
+# Args: port logfile [EXTRA=value ...] (e.g. T2S_TP_FAKE_DATE=2026.01.02).
+# Prints the PID.
 t2s_spawn_tp() {
     local port=$1 logfile=$2
+    shift 2
     t2s_port_in_test_range "$port" || { echo "t_lib: tp port $port outside test range" >&2; return 1; }
     (
         cd "$T2S_TEST_ROOT/kdb/tick" && exec env \
             T2S_TP_PORT="$port" \
             T2S_TP_LOG_DIR="$T2S_SB_TPLOGS" \
+            T2S_TP_SEQ_FILE="$T2S_SB_TPSEQ" \
+            T2S_WDB_CHECKPOINT="$T2S_SB_CHECKPOINT" \
+            "$@" \
             q tp.q
     ) > "$logfile" 2>&1 < /dev/null &
     echo $!

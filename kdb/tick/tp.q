@@ -1,4 +1,26 @@
 / tp.q - Tickerplant with KDB-X pubsub module
+/ -
+/ Durability model (see markdown_docs/review.md, pass 3 items 3 and 5):
+/   - Schemas come from kdb/schemas.q, the single source of truth. Every
+/     index TP uses (fhSeqNo position, expected feed-handler row width) is
+/     derived from the loaded schema PER TABLE.
+/   - tpSeqNo never goes backwards. TP persists a reservation (current
+/     counter + .tp.cfg.seqReserve) atomically in .tp.cfg.seqFile and only
+/     hands out numbers below the persisted reservation, so a crash can skip
+/     numbers but never reuse one. The file lives in the log dir and MUST
+/     NOT be removed by log retention.
+/   - Feed handlers announce themselves: every connection to TP starts with
+/     .tp.registerSession[table; sessionId; nextFhSeqNo; rowWidth]. A new
+/     sessionId is a handler restart (counted, logged, expected sequence
+/     taken from the announcement); the same sessionId on a new handle is a
+/     reconnect (counted; the gap since TP's last accepted fhSeqNo is
+/     counted as missed). A wrong row width is rejected at registration so
+/     a mismatched binary fails at its own startup.
+/   - TP never drops a row without a log line and a counter. Rows with an
+/     unexpected width are rejected and counted (schemaMismatch); rows from
+/     a handle that never registered are accepted and counted
+/     (unregisteredRows); a backward fhSeqNo inside one session is accepted
+/     and counted (outOfOrder).
 
 / -------------------------------------------------------
 / Configuration
@@ -11,100 +33,59 @@
 .tp.cfg.logDir:$[count v:getenv `T2S_TP_LOG_DIR; v; "logs"];
 .tp.cfg.logEnabled:1b;
 
+/ tpSeqNo reservation file. Default: next to the daily logs. Log retention
+/ must never delete it (see .tp.seq.* below and the README).
+.tp.cfg.seqFile:hsym `$ $[count v:getenv `T2S_TP_SEQ_FILE; v; .tp.cfg.logDir,"/tp.tpSeqNo"];
+.tp.cfg.seqReserve:10000;
+
+/ WDB's checkpoint, read-only, only to warn at migration time if the seeded
+/ counter would be below what WDB has already persisted (WDB would halt).
+/ Same resolution rule as wdb.q.
+.tp.cfg.wdbCheckpointFile:hsym `$ $[count v:getenv `T2S_WDB_CHECKPOINT; v; raze ($[count v:getenv `T2S_TMP_DIR; v; "../"]; "wdb.lastTpSeqNo")];
+
 system "g 0";
 
 .tp.epochOffset:neg"j"$1970.01.01D0;
 .proc.startTime:.z.p;
 
 / -------------------------------------------------------
-/ Table schema (must exist before pubsub init)
+/ Clock (test hook)
+/ -------------------------------------------------------
+/ T2S_TP_FAKE_DATE replaces .z.d for the log file name and the EOD check so a
+/ sandbox can simulate "a new day with no log". It is NEVER for production:
+/ start.sh refuses to start with it set, and tests/t_guard.q only allows it
+/ inside the sandbox.
+.tp.clock.fixed:$[count v:getenv `T2S_TP_FAKE_DATE; "D"$v; 0Nd];
+.tp.today:{[] $[null .tp.clock.fixed; .z.d; .tp.clock.fixed]};
+if[not null .tp.clock.fixed;
+  -1 "=======================================================";
+  -1 "TP: WARNING - T2S_TP_FAKE_DATE is set: today is FIXED to ",string[.tp.clock.fixed];
+  -1 "TP: WARNING - this is a TEST HOOK; never run production with it";
+  -1 "======================================================="];
+
+/ -------------------------------------------------------
+/ Table schemas - from the shared file (must exist before pubsub init)
 / -------------------------------------------------------
 
-trade_binance:([]
-  time:`timestamp$();
-  sym:`symbol$();
-  tradeId:`long$();
-  price:`float$();
-  qty:`float$();
-  buyerIsMaker:`boolean$();
-  exchEventTimeMs:`long$();
-  exchTradeTimeMs:`long$();
-  fhRecvTimeUtcNs:`long$();
-  fhParseUs:`long$();
-  fhSendUs:`long$();
-  fhSeqNo:`long$();
-  tpRecvTimeUtcNs:`long$();
-  tpSeqNo:`long$()         / NEW: monotonic per-TP sequence (Phase 4 - replay support)
-  );
+\l ../schemas.q
 
-/ Binance USDT-M futures @aggTrade payload. Schema mirrors trade_binance
-/ except for the three id columns (aggTradeId / firstTradeId / lastTradeId)
-/ that carry the aggregate event plus its constituent-fill range.
-/ See ADR-013 step 6.
-trade_binance_fut:([]
-  time:`timestamp$();
-  sym:`symbol$();
-  aggTradeId:`long$();
-  firstTradeId:`long$();
-  lastTradeId:`long$();
-  price:`float$();
-  qty:`float$();
-  buyerIsMaker:`boolean$();
-  exchEventTimeMs:`long$();
-  exchTradeTimeMs:`long$();
-  fhRecvTimeUtcNs:`long$();
-  fhParseUs:`long$();
-  fhSendUs:`long$();
-  fhSeqNo:`long$();
-  tpRecvTimeUtcNs:`long$();
-  tpSeqNo:`long$()
-  );
+trade_binance:.schema.extend[.schema.trade; `tpRecvTimeUtcNs`tpSeqNo];
+trade_binance_fut:.schema.extend[.schema.aggTrade; `tpRecvTimeUtcNs`tpSeqNo];
+quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo];
+health_feed_handler:.schema.health;
 
-quote_binance:([]
-  time:`timestamp$();
-  sym:`symbol$();
-  bidPrice1:`float$();
-  bidPrice2:`float$();
-  bidPrice3:`float$();
-  bidPrice4:`float$();
-  bidPrice5:`float$();
-  bidQty1:`float$();
-  bidQty2:`float$();
-  bidQty3:`float$();
-  bidQty4:`float$();
-  bidQty5:`float$();
-  askPrice1:`float$();
-  askPrice2:`float$();
-  askPrice3:`float$();
-  askPrice4:`float$();
-  askPrice5:`float$();
-  askQty1:`float$();
-  askQty2:`float$();
-  askQty3:`float$();
-  askQty4:`float$();
-  askQty5:`float$();
-  isValid:`boolean$();
-  exchEventTimeMs:`long$();
-  fhRecvTimeUtcNs:`long$();
-  fhParseUs:`long$();
-  fhSendUs:`long$();
-  fhSeqNo:`long$();
-  tpRecvTimeUtcNs:`long$();
-  tpSeqNo:`long$()         / NEW: monotonic per-TP sequence (Phase 4 - replay support)
-  );
+.tp.tables:`trade_binance`trade_binance_fut`quote_binance;
 
-health_feed_handler:([]
-  time:`timestamp$();
-  handler:`symbol$();
-  startTimeUtc:`timestamp$();
-  uptimeSec:`long$();
-  msgsReceived:`long$();
-  msgsPublished:`long$();
-  lastMsgTimeUtc:`timestamp$();
-  lastPubTimeUtc:`timestamp$();
-  connState:`symbol$();
-  symbolCount:`int$()
-  );
+/ Per-table indices derived from the schema. The incoming feed-handler row
+/ has the schema's columns minus the two TP appends (tpRecvTimeUtcNs,
+/ tpSeqNo), so fhSeqNo's position is the same in the FH row and the logged
+/ row, and the expected FH row width is the schema width minus 2.
+.tp.idx.fhSeqNo:.tp.tables ! {[t] (cols value t)?`fhSeqNo} each .tp.tables;
+.tp.fhWidth:.tp.tables ! {[t] -2 + count cols value t} each .tp.tables;
+if[any .tp.idx.fhSeqNo >= .tp.fhWidth;
+  '"tp.q: schemas.q has a table without fhSeqNo among the feed-handler columns"];
+if[not all {[t] `tpRecvTimeUtcNs`tpSeqNo ~ -2 # cols value t} each .tp.tables;
+  '"tp.q: tpRecvTimeUtcNs and tpSeqNo must be the last two columns of every table"];
 
 / -------------------------------------------------------
 / Pub/Sub - KDB-X module (must be named 'pubsub' for IPC)
@@ -122,7 +103,7 @@ pubsub.init[]
 .tp.logFile:`;
 .tp.logCount:0j;
 
-.tp.logFilePath:{[] hsym`$(.tp.cfg.logDir,"/",string[.z.d],".log")};
+.tp.logFilePath:{[] hsym`$(.tp.cfg.logDir,"/",string[.tp.today[]],".log")};
 
 .tp.initLog:{[f]
   if[0=@[hcount;f;0j];f set()];
@@ -157,282 +138,310 @@ pubsub.init[]
   };
 
 / -------------------------------------------------------
-/ Sequence Tracking & Gap Detection (Phase 4)
+/ Durable tpSeqNo (reservation file)
 / -------------------------------------------------------
+/ .tp.tpSeqNo        last number handed out
+/ .tp.seq.reserved   highest number we may hand out without touching disk
+/ A number n is handed out only once a reservation >= n is on disk.
 
-/ Field index for fhSeqNo, derived from the table schemas. This is the
-/ position of fhSeqNo in the INCOMING FH row (before TP appends
-/ tpRecvTimeUtcNs and tpSeqNo). Since TP always appends to the end, the
-/ index is the same whether we're looking at a live FH row or a logged
-/ post-TP row, as long as fhSeqNo's position in the schema doesn't change.
-/ Deriving from cols means schema column reordering is picked up automatically
-/ (was: hardcoded 11 / 27, which silently breaks gap detection if the schema
-/ shifts. Fixes review finding #4).
-.tp.idx.tradeSeq:    (cols trade_binance)?`fhSeqNo;
-.tp.idx.aggTradeSeq: (cols trade_binance_fut)?`fhSeqNo;
-.tp.idx.quoteSeq:    (cols quote_binance)?`fhSeqNo;
-
-/ Per-side state: last fhSeqNo seen from each FH
-.tp.seq.trade:0N;
-.tp.seq.aggTrade:0N;
-.tp.seq.quote:0N;
-
-/ Per-side gap counters
-.tp.gaps.trade:0j;
-.tp.gaps.aggTrade:0j;
-.tp.gaps.quote:0j;
-.tp.missed.trade:0j;
-.tp.missed.aggTrade:0j;
-.tp.missed.quote:0j;
-
-/ Per-side restart counters (when fhSeqNo went backwards far enough to look like restart)
-.tp.restarts.trade:0j;
-.tp.restarts.aggTrade:0j;
-.tp.restarts.quote:0j;
-
-/ Per-side duplicate counters (Phase 4 - bumped when FH heartbeat resends already-seen seqs)
-.tp.dups.trade:0j;
-.tp.dups.aggTrade:0j;
-.tp.dups.quote:0j;
-
-/ Monotonic per-TP sequence number stamped on every accepted message (Phase 4).
-/ Used by subscribers (WDB primarily) to track "what's the latest message I've
-/ processed" and to request replay from a specific point on reconnect.
 .tp.tpSeqNo:0j;
+.tp.seq.reserved:0j;
 
-/ Threshold for treating a backward jump as "FH restart" rather than "duplicate".
-/ A duplicate is an in-flight resend of a recent message - typically off by 1-100.
-/ A restart is the FH's own seqno being reset to 0 or 1 (whole-process restart).
-.tp.cfg.restartThresh:1000;
+/ Persist a new reservation atomically (temp file + rename). Throws if the
+/ file cannot be written: TP must not hand out numbers it cannot protect.
+.tp.seq.persist:{[reserved]
+  f:.tp.cfg.seqFile;
+  fStr:1 _ string f;
+  tmpFile:hsym `$ fStr,".tmp";
+  system "mkdir -p ",1 _ string ` sv -1 _ ` vs f;
+  payload:`reserved`updated`tpSeqNo!(reserved; .z.p; .tp.tpSeqNo);
+  r:.[set; (tmpFile; payload); {[e] -1 "TP: ERROR writing tpSeqNo reservation - ",e; `error}];
+  if[r ~ `error; '"tpSeqNo reservation write failed"];
+  ok:@[{[c] system c; 1b}; "mv ",fStr,".tmp ",fStr; {[e] -1 "TP: ERROR renaming tpSeqNo reservation - ",e; 0b}];
+  if[not ok; '"tpSeqNo reservation rename failed"];
+  .tp.seq.reserved:reserved;
+ };
 
-/ Check fhSeqNo for the given side. Returns one of:
-/   `accept           - new in-sequence message, log + publish
-/   `accept_with_gap  - new message but gap detected; still log + publish (we already
-/                       lost the missing ones, accepting this one moves us forward)
-/   `drop_duplicate   - message already seen (FH heartbeat-driven resend); drop silently
-/                       (skip log + publish; just return)
-.tp.checkSeq:{[side; seq]
-  lastSeq: .tp.seq[side];
+/ Hand out the next tpSeqNo, extending the reservation on disk first when
+/ the current one is used up.
+.tp.nextSeqNo:{[]
+  n:.tp.tpSeqNo + 1;
+  if[n > .tp.seq.reserved; .tp.seq.persist[n + .tp.cfg.seqReserve]];
+  .tp.tpSeqNo:n;
+  n
+ };
 
-  / First message - initialize, accept
-  if[null lastSeq;
-    .tp.seq[side]: seq;
-    :`accept
-  ];
+/ Newest daily log in the log dir by file name (YYYY.MM.DD.log), or ` if none.
+.tp.newestLog:{[]
+  d:hsym `$ .tp.cfg.logDir;
+  files:@[key; d; {[e] `symbol$()}];
+  if[0 = count files; :`];
+  names:string files;
+  isLog:{[n] (count[n] = 14) and (n like "*.log") and not null "D"$ 10#n} each names;
+  logs:asc names where isLog;
+  $[0 = count logs; `; hsym `$ .tp.cfg.logDir,"/",last logs]
+ };
 
-  / Normal sequential case
-  if[seq = lastSeq + 1;
-    .tp.seq[side]: seq;
-    :`accept
-  ];
+/ Read WDB's checkpoint (any of its historical shapes) and return the max
+/ persisted tpSeqNo, or 0N if unreadable/absent. Read-only.
+.tp.wdbCheckpointMax:{[]
+  f:.tp.cfg.wdbCheckpointFile;
+  if[() ~ key f; :0Nj];
+  v:@[get; f; {[e] `error}];
+  if[v ~ `error; :0Nj];
+  if[-7h = type v; :v];
+  if[99h = type v; if[`seq in key v; v:v `seq]; :max value v];
+  0Nj
+ };
 
-  / Forward jump - gap detected, missed messages
-  if[seq > lastSeq + 1;
-    missed: seq - lastSeq - 1;
-    .tp.gaps[side]+: 1;
-    .tp.missed[side]+: missed;
-    -1 raze ("TP: "; string side; " gap - expected "; string lastSeq+1;
-             " got "; string seq; " (missed "; string missed; ")");
-    .tp.seq[side]: seq;
-    :`accept_with_gap
-  ];
-
-  / Backward jump - either duplicate (small step backward) or FH restart (big jump)
-  / Duplicate: typical case from heartbeat-driven resend, just drop
-  if[(lastSeq - seq) < .tp.cfg.restartThresh;
-    .tp.dups[side]+: 1;
-    :`drop_duplicate
-  ];
-
-  / Big backward jump - assume FH restarted, accept and resync
-  .tp.restarts[side]+: 1;
-  -1 raze ("TP: "; string side; " FH restart detected - seq from ";
-           string lastSeq; " to "; string seq);
-  .tp.seq[side]: seq;
-  `accept
+/ Seed the counter at startup. With a reservation file: resume at the
+/ reservation (numbers below it may have been handed out before a crash).
+/ Without one (first start on this code): migrate from the NEWEST log in
+/ the log dir, whatever its date - seeding from today's log alone would
+/ seed zero after midnight and WDB would halt.
+.tp.seq.load:{[]
+  f:.tp.cfg.seqFile;
+  if[not () ~ key f;
+    v:@[get; f; {[e] -1 "TP: ERROR reading tpSeqNo reservation - ",e; `error}];
+    if[(not v ~ `error) and (99h = type v) and `reserved in key v;
+      .tp.tpSeqNo:v `reserved;
+      .tp.seq.reserved:v `reserved;
+      -1 raze ("TP: tpSeqNo resumed from reservation file: "; string .tp.tpSeqNo;
+               " (last used before "; string v `tpSeqNo; ", updated "; string v `updated; ")");
+      / Extend immediately so this run has its own reservation on disk.
+      .tp.seq.persist[.tp.tpSeqNo + .tp.cfg.seqReserve];
+      :()];
+    -1 "TP: ERROR tpSeqNo reservation file unreadable or malformed - falling back to log scan"];
+  newest:.tp.newestLog[];
+  seed:0j;
+  if[not newest ~ `;
+    -1 raze ("TP: no tpSeqNo reservation file - migrating: scanning newest log "; string newest);
+    seed:.tp.scanLog[newest] 0;
+    -1 raze ("TP: migration seed from "; string newest; " = "; string seed)];
+  if[newest ~ `; -1 "TP: no tpSeqNo reservation file and no logs - starting tpSeqNo from 0"];
+  cpMax:.tp.wdbCheckpointMax[];
+  if[(not null cpMax) and seed < cpMax;
+    -1 raze ("TP: ERROR migration seed "; string seed; " is BELOW WDB's persisted checkpoint "; string cpMax;
+             " ("; string .tp.cfg.wdbCheckpointFile; ") - WDB will halt; check the log dir for missing logs")];
+  .tp.tpSeqNo:seed;
+  .tp.seq.persist[seed + .tp.cfg.seqReserve];
  };
 
 / -------------------------------------------------------
-/ Update handling (Phase 4 - tpSeqNo stamping + dup suppression)
+/ Sequence Tracking: sessions, gaps, restarts
+/ -------------------------------------------------------
+
+/ Per-table state
+.tp.seq.last:.tp.tables ! 0N 0N 0Nj;        / last accepted fhSeqNo
+.tp.session.id:.tp.tables ! 0N 0N 0Nj;      / current sessionId
+.tp.session.handle:.tp.tables ! 0N 0N 0Ni;  / handle of the current session (0N when away)
+.tp.handleTable:(`int$())!`symbol$();       / registered handle -> table
+.tp.unregisteredSeen:`int$();               / handles we already warned about
+
+/ Per-table counters
+.tp.ctr.gaps:.tp.tables ! 0 0 0j;             / forward jumps in fhSeqNo
+.tp.ctr.missed:.tp.tables ! 0 0 0j;           / rows missed in those jumps (incl. during TP downtime)
+.tp.ctr.restarts:.tp.tables ! 0 0 0j;         / registrations with a new sessionId
+.tp.ctr.reconnects:.tp.tables ! 0 0 0j;       / registrations with the same sessionId on a new handle
+.tp.ctr.outOfOrder:.tp.tables ! 0 0 0j;       / fhSeqNo <= last inside one session (accepted)
+.tp.ctr.unregisteredRows:.tp.tables ! 0 0 0j; / rows from handles that never registered (accepted)
+.tp.ctr.schemaMismatch:.tp.tables ! 0 0 0j;   / rows rejected for wrong width
+.tp.ctr.rejectedRegistrations:0j;             / registrations refused (wrong width / unknown table)
+.tp.ctr.unknownTableRows:0j;                  / rows for tables we don't know (passed through)
+
+/ Registration. Called synchronously by every feed handler right after it
+/ connects (and after every reconnect). Throws on a wrong width or unknown
+/ table so the handler sees an error and exits at its own startup.
+.tp.registerSession:{[tbl; sessionId; nextSeq; width]
+  h:.z.w;
+  if[not tbl in .tp.tables;
+    .tp.ctr.rejectedRegistrations+:1;
+    -1 raze ("TP: REJECTED registration from handle "; string h; " for unknown table "; string tbl);
+    '"unknown table: ", string tbl];
+  if[width <> .tp.fhWidth tbl;
+    .tp.ctr.rejectedRegistrations+:1;
+    -1 raze ("TP: REJECTED registration from handle "; string h; " for "; string tbl;
+             ": row width "; string width; " but schema expects "; string .tp.fhWidth tbl);
+    '"schema width mismatch for ", string[tbl], ": handler sends ", string[width],
+      " columns, schema expects ", string .tp.fhWidth tbl];
+  prevId:.tp.session.id tbl;
+  lastSeq:.tp.seq.last tbl;
+  kind:$[null prevId; `new; sessionId = prevId; `reconnect; `restart];
+  if[kind = `new;
+    / First registration this TP process has seen for the table. If TP
+    / recovered a last fhSeqNo from the log, the handler may have continued
+    / (TP was down: count what it missed) or restarted meanwhile.
+    $[null lastSeq;
+        -1 raze ("TP: session "; string sessionId; " registered for "; string tbl; " (handle "; string h; ", next fhSeqNo "; string nextSeq; ")");
+      (nextSeq - 1) < lastSeq;
+        [.tp.ctr.restarts[tbl]+:1;
+         -1 raze ("TP: FH RESTART detected for "; string tbl; " (handler restarted while TP was down): fhSeqNo was "; string lastSeq; ", resumes at "; string nextSeq)];
+      [missed:(nextSeq - 1) - lastSeq;   / parenthesised: q evaluates right to left
+       if[missed > 0; .tp.ctr.gaps[tbl]+:1; .tp.ctr.missed[tbl]+:missed];
+       -1 raze ("TP: session "; string sessionId; " continues for "; string tbl; " after TP restart: last logged fhSeqNo "; string lastSeq;
+                ", next "; string nextSeq; $[missed > 0; raze (" -> "; string missed; " rows MISSED while TP was down"); ", no gap"])]]];
+  if[kind = `restart;
+    .tp.ctr.restarts[tbl]+:1;
+    -1 raze ("TP: FH RESTART detected for "; string tbl; ": session "; string prevId; " -> "; string sessionId;
+             " (handle "; string h; "), fhSeqNo was "; string lastSeq; ", resumes at "; string nextSeq)];
+  if[kind = `reconnect;
+    .tp.ctr.reconnects[tbl]+:1;
+    missed:$[null lastSeq; 0; (nextSeq - 1) - lastSeq];
+    if[missed > 0; .tp.ctr.gaps[tbl]+:1; .tp.ctr.missed[tbl]+:missed];
+    -1 raze ("TP: FH RECONNECT for "; string tbl; " session "; string sessionId; " (handle "; string h; "): last fhSeqNo "; string lastSeq;
+             ", next "; string nextSeq; $[missed > 0; raze (" -> "; string missed; " rows MISSED"); ", no gap"])];
+  .tp.seq.last[tbl]:nextSeq - 1;
+  .tp.session.id[tbl]:sessionId;
+  .tp.session.handle[tbl]:h;
+  .tp.handleTable[h]:tbl;
+  `ok
+ };
+
+/ Sequence check for one accepted row. Never drops: returns after counting.
+.tp.checkSeq:{[tbl; seq]
+  lastSeq:.tp.seq.last tbl;
+  if[null lastSeq; .tp.seq.last[tbl]:seq; :()];
+  if[seq = lastSeq + 1; .tp.seq.last[tbl]:seq; :()];
+  if[seq > lastSeq + 1;
+    missed:(seq - lastSeq) - 1;   / parenthesised: q evaluates right to left
+    .tp.ctr.gaps[tbl]+:1;
+    .tp.ctr.missed[tbl]+:missed;
+    -1 raze ("TP: "; string tbl; " gap - expected "; string lastSeq+1; " got "; string seq; " (missed "; string missed; ")");
+    .tp.seq.last[tbl]:seq;
+    :()];
+  / seq <= last inside the session: cannot happen over one TCP stream unless
+  / the handler misbehaves; accept, count, keep the high-water mark.
+  .tp.ctr.outOfOrder[tbl]+:1;
+  -1 raze ("TP: "; string tbl; " OUT OF ORDER fhSeqNo "; string seq; " (last "; string lastSeq; ") - accepted and counted");
+ };
+
+/ -------------------------------------------------------
+/ Update handling
 / -------------------------------------------------------
 
 .tp.tsToNs:{[ts] .tp.epochOffset+"j"$ts};
+.tp.mismatchLogCount:0j;
 
 upd:{[tbl;data]
-  / Health messages bypass sequence checks and durability log entirely.
-  / They are best-effort by design (operational visibility, not durable data).
+  / Health messages bypass sequence checks and the durability log entirely.
   if[tbl=`health_feed_handler;
     pubsub.publish[tbl;data];
-    :();
-  ];
-
-  / Sequence check returns one of `accept | `accept_with_gap | `drop_duplicate.
-  / On duplicate, we skip log + publish entirely.
-  result: $[tbl=`trade_binance;
-              .tp.checkSeq[`trade; data .tp.idx.tradeSeq];
-            tbl=`trade_binance_fut;
-              .tp.checkSeq[`aggTrade; data .tp.idx.aggTradeSeq];
-            tbl=`quote_binance;
-              .tp.checkSeq[`quote; data .tp.idx.quoteSeq];
-            `accept];     / unknown tables: just pass through
-
-  if[result = `drop_duplicate; :()];
-
-  / Append TP-side fields: tpRecvTimeUtcNs, tpSeqNo
-  / The schema's last two columns are tpRecvTimeUtcNs and tpSeqNo so they
-  / must be appended to the row in that exact order.
-  .tp.tpSeqNo+: 1;
-  data: data, (.tp.tsToNs[.z.p]; .tp.tpSeqNo);
-
-  / Log first (durability), then publish (best-effort fanout).
-  / If logging throws, we don't publish (consistent durable view).
-  / Note: TP is a router, not a store - we do NOT insert into the local
-  / table copy. Subscribers (WDB) maintain the in-memory copies they
-  / need; TP just fans out.
+    :()];
+  if[not tbl in .tp.tables;
+    / Unknown tables pass through (logged + published) and are counted.
+    .tp.ctr.unknownTableRows+:1;
+    data:data, (.tp.tsToNs[.z.p]; .tp.nextSeqNo[]);
+    .tp.log[tbl; data];
+    pubsub.publish[tbl; data];
+    :()];
+  / Width guard: a row that does not match the schema can neither be logged
+  / nor published safely. Reject, log (rate-limited), count.
+  if[(count data) <> .tp.fhWidth tbl;
+    .tp.ctr.schemaMismatch[tbl]+:1;
+    .tp.mismatchLogCount+:1;
+    if[(.tp.mismatchLogCount <= 10) or 0 = .tp.mismatchLogCount mod 1000;
+      -1 raze ("TP: SCHEMA MISMATCH - rejected "; string tbl; " row with "; string count data;
+               " columns (schema expects "; string .tp.fhWidth tbl; ") from handle "; string .z.w;
+               " (total rejected: "; string sum .tp.ctr.schemaMismatch; ")")];
+    :()];
+  h:.z.w;
+  registered:$[h in key .tp.handleTable; tbl = .tp.handleTable h; 0b];
+  if[not registered;
+    .tp.ctr.unregisteredRows[tbl]+:1;
+    if[not h in .tp.unregisteredSeen;
+      .tp.unregisteredSeen,:h;
+      -1 raze ("TP: handle "; string h; " publishes "; string tbl; " without a session registration - accepting and counting")]];
+  .tp.checkSeq[tbl; data .tp.idx.fhSeqNo tbl];
+  / Append TP-side fields: tpRecvTimeUtcNs, tpSeqNo (the last two schema columns)
+  data:data, (.tp.tsToNs[.z.p]; .tp.nextSeqNo[]);
+  / Log first (durability), then publish (best-effort fanout). TP is a
+  / router, not a store: it does not insert into the local table copies.
   .tp.log[tbl; data];
   pubsub.publish[tbl; data];
   };
 
 / Alias for feed handlers that call .u.upd over IPC.
-/ The Binance trade/quote FH binaries call k(handle, ".u.upd", table, row)
-/ - this matches the standard kdb tickerplant convention. Without this
-/ alias, every FH message hits an undefined-function error on the TP side.
 .u.upd:upd;
 
-/ Phase 4 API helpers (subscribers query these on reconnect to build
-/ a replay request).
-
-/ Highest fhSeqNo accepted per side (for diagnostics).
-/ Returns 0 (not 0N) if no messages received yet, so FH can compare
-/ against its local fhSeqNo_ unambiguously.
-.tp.lastAccepted:{[side]
-  s: .tp.seq[side];
-  $[null s; 0; s]
- };
-
-/ Current tpSeqNo cursor - the latest assigned. Subscribers capture this
-/ at reconnect time as the cutoff for separating replay from live data.
-.tp.currentSeqNo:{[] .tp.tpSeqNo};
-
-/ Replay support: read the durability log and return rows for `tbl`
-/ with tpSeqNo >= fromSeq. Used by subscribers (WDB) on reconnect to
-/ catch up on data missed during disconnect before subscribing live.
-/ ----
-/ Implementation note: kdb's -11! reads a log file by replaying its
-/ entries via a callable named `upd`. We temporarily redefine upd to
-/ accumulate into a scratch table, run the replay, then restore. The
-/ scratch table is held under .tp.replayScratch to avoid polluting
-/ the global namespace.
-.tp.replayFrom:{[tbl; fromSeq]
-  logFile: .tp.logFilePath[];
-  / If no log exists yet, return an empty table of the right shape
-  if[() ~ key logFile; :0#value tbl];
-
-  / Initialize scratch + stash target table in globals so the inner upd
-  / lambda below can see them (q lambdas do not capture local closures,
-  / so we cannot reference outer-scope `tbl` inside the inner function).
-  .tp.replayScratch:: 0#value tbl;
-  .tp.replayTarget:: tbl;
-  oldUpd:: upd;
-  / Only accept rows whose width matches the current schema. Older log
-  / entries from before Phase 4 (no tpSeqNo column) get silently skipped.
-  upd:: {[t;d]
-    if[t = .tp.replayTarget;
-      if[(count d) = count cols value t;
-        .tp.replayScratch,:: enlist d
-      ]
-    ]
+/ Connection close: forget the handle; keep the session so a reconnect with
+/ the same sessionId is recognised. Also let pubsub drop subscriptions.
+.z.pc:{[h]
+  if[h in key .tp.handleTable;
+    tbl:.tp.handleTable h;
+    -1 raze ("TP: handle "; string h; " closed ("; string tbl; " session "; string .tp.session.id tbl; ")");
+    .tp.handleTable:(enlist h) _ .tp.handleTable;
+    if[h = .tp.session.handle tbl; .tp.session.handle[tbl]:0Ni]];
+  .tp.unregisteredSeen:.tp.unregisteredSeen except h;
+  pubsub.closesub[h];
   };
 
-  / Replay - protect so any error restores upd
-  .[{-11!x}; enlist logFile; {[err]
-    -1 raze ("TP: replayFrom error: "; err);
-  }];
+/ -------------------------------------------------------
+/ Query API
+/ -------------------------------------------------------
 
-  / Restore original upd
-  upd:: oldUpd;
+/ Highest fhSeqNo accepted for a table (0 if none).
+.tp.lastAccepted:{[tbl] s:.tp.seq.last tbl; $[null s; 0; s]};
 
-  / Filter to requested seq range and return
-  result: select from .tp.replayScratch where tpSeqNo >= fromSeq;
+/ Current tpSeqNo cursor - the latest assigned. Subscribers capture this at
+/ reconnect time as the cutoff for separating replay from live data.
+.tp.currentSeqNo:{[] .tp.tpSeqNo};
+
+/ Scan a log file: returns (max tpSeqNo; per-table max fhSeqNo dict). Uses
+/ -11! with a temporary upd. Rows whose width does not match the current
+/ schema are ignored.
+.tp.scan.tpMax:0j;
+.tp.scan.fhMax:.tp.tables ! 0N 0N 0Nj;
+.tp.scanUpd:{[t;d]
+  if[not t in .tp.tables; :()];
+  if[(count d) <> count cols value t; :()];
+  .tp.scan.tpMax:.tp.scan.tpMax | last d;
+  .tp.scan.fhMax[t]:.tp.scan.fhMax[t] | d .tp.idx.fhSeqNo t;
+ };
+.tp.scanLog:{[f]
+  .tp.scan.tpMax:0j;
+  .tp.scan.fhMax:.tp.tables ! 0N 0N 0Nj;
+  oldUpd:upd;
+  upd::.tp.scanUpd;
+  .[{-11!x}; enlist f; {[err] -1 "TP: log scan error: ",err}];
+  upd::oldUpd;
+  (.tp.scan.tpMax; .tp.scan.fhMax)
+ };
+
+/ Replay support: rows for `tbl` with tpSeqNo >= fromSeq from today's log.
+/ Used by WDB on reconnect. (Reading only today's log and the full rescan
+/ are known limitations addressed in a later step.)
+.tp.replayFrom:{[tbl; fromSeq]
+  logFile:.tp.logFilePath[];
+  if[() ~ key logFile; :0#value tbl];
+  .tp.replayScratch::0#value tbl;
+  .tp.replayTarget::tbl;
+  oldUpd:upd;
+  upd::{[t;d]
+    if[t = .tp.replayTarget;
+      if[(count d) = count cols value t;
+        .tp.replayScratch,::enlist d]]};
+  .[{-11!x}; enlist logFile; {[err] -1 raze ("TP: replayFrom error: "; err)}];
+  upd::oldUpd;
+  result:select from .tp.replayScratch where tpSeqNo >= fromSeq;
   delete replayScratch from `.tp;
   delete replayTarget from `.tp;
   result
  };
 
-/ Helper called by recoverSeqNo's log replay. Updates per-stream maxes
-/ from each row in the log. Kept as a top-level function rather than an
-/ inline lambda inside recoverSeqNo because deeply-nested if[] bodies
-/ inside a lambda hit parser quirks in KDB-X 5.0. Using `|` (max) keeps
-/ the per-stream merge null-safe: 0N | 5 -> 5, 5 | 3 -> 5, 0N | 0N -> 0N.
-.tp.recoverScan:{[t;d]
-  if[not t in `trade_binance`trade_binance_fut`quote_binance; :()];
-  if[(count d) <> count cols value t; :()];
-  / tpSeqNo is the last column of the persisted row.
-  .tp.recoverTpMax:: .tp.recoverTpMax | last d;
-  / Per-stream max fhSeqNo. Each side has a different idx (spot=tradeSeq,
-  / futures=aggTradeSeq, quote=quoteSeq) since aggTrade has 14 base cols
-  / vs spot's 12 so fhSeqNo sits at a different position in the row.
-  if[t = `trade_binance;
-    .tp.recoverTradeMax:: .tp.recoverTradeMax | d .tp.idx.tradeSeq];
-  if[t = `trade_binance_fut;
-    .tp.recoverAggTradeMax:: .tp.recoverAggTradeMax | d .tp.idx.aggTradeSeq];
-  if[t = `quote_binance;
-    .tp.recoverQuoteMax:: .tp.recoverQuoteMax | d .tp.idx.quoteSeq];
- };
-
-/ Recover .tp.tpSeqNo AND per-side .tp.seq.{trade,aggTrade,quote} from the
-/ durability log on startup. Reads through the log, tracking the maximum
-/ tpSeqNo (global) and the maximum fhSeqNo per side. Seeds the corresponding
-/ state so newly accepted messages continue the sequence and gap detection
-/ correctly flags messages missed during the TP-down window.
-
-/ Critical: must be called BEFORE the log is reopened for new writes,
-/ otherwise the new TP-process's first messages would re-use existing seqs.
-
-/ Without per-side FH recovery, a TP restart while FH continues silently
-/ swallowed gap detection: the first post-restart FH message hit checkSeq's
-/ "first message - initialize, accept" branch and the missing messages
-/ between TP's last accepted seq and the FH's current seq were never
-/ surfaced as gaps. (Fixes review finding #6.)
-.tp.recoverSeqNo:{[]
-  logFile: .tp.logFilePath[];
-  if[() ~ key logFile;
-    -1 "TP: no existing log, starting tpSeqNo from 0";
-    :()
-  ];
-
-  / Track max per-stream sequence numbers during replay.
-  .tp.recoverTpMax::       0j;
-  .tp.recoverTradeMax::    0N;
-  .tp.recoverAggTradeMax:: 0N;
-  .tp.recoverQuoteMax::    0N;
-
-  oldUpd:: upd;
-  upd:: .tp.recoverScan;
-
-  .[{-11!x}; enlist logFile; {[err]
-    -1 raze ("TP: recoverSeqNo error: "; err);
-  }];
-
-  upd:: oldUpd;
-
-  / Seed live state from recovered maxes. tpSeqNo continues monotonically;
-  / per-side fhSeqs are the floor for the next valid message (anything <=
-  / is treated as duplicate or restart per checkSeq's existing logic).
-  .tp.tpSeqNo:      .tp.recoverTpMax;
-  .tp.seq.trade:    .tp.recoverTradeMax;
-  .tp.seq.aggTrade: .tp.recoverAggTradeMax;
-  .tp.seq.quote:    .tp.recoverQuoteMax;
-
-  -1 raze ("TP: recovered tpSeqNo="; string .tp.tpSeqNo;
-           " tradeSeq=";              .Q.s1 .tp.seq.trade;
-           " aggTradeSeq=";           .Q.s1 .tp.seq.aggTrade;
-           " quoteSeq=";              .Q.s1 .tp.seq.quote);
-
-  delete recoverTpMax       from `.tp;
-  delete recoverTradeMax    from `.tp;
-  delete recoverAggTradeMax from `.tp;
-  delete recoverQuoteMax    from `.tp;
+/ Recover per-table last fhSeqNo from today's log so gap detection spans a
+/ TP restart. tpSeqNo itself comes from the reservation file (.tp.seq.load).
+.tp.recoverFhSeq:{[]
+  logFile:.tp.logFilePath[];
+  if[() ~ key logFile; -1 "TP: no log for today - no fhSeqNo to recover"; :()];
+  r:.tp.scanLog[logFile];
+  .tp.seq.last:r 1;
+  -1 raze ("TP: recovered last fhSeqNo per table from today's log: "; .Q.s1 .tp.seq.last;
+           " (log max tpSeqNo "; string r 0; ")");
+  if[(r 0) > .tp.tpSeqNo;
+    -1 raze ("TP: ERROR today's log holds tpSeqNo "; string r 0; " above the reservation "; string .tp.tpSeqNo;
+             " - reservation file out of date? Raising the counter to the log");
+    .tp.tpSeqNo:r 0;
+    .tp.seq.persist[.tp.tpSeqNo + .tp.cfg.seqReserve]];
  };
 
 / -------------------------------------------------------
@@ -441,44 +450,64 @@ upd:{[tbl;data]
 
 / Standardized health check (consistent across all processes)
 .health:{[]
-  st:$[(.tp.gaps.trade > 0) | (.tp.gaps.aggTrade > 0) | .tp.gaps.quote > 0; `degraded; `ok];
-  `process`port`uptime`status`memMB`msgsIn`msgsOut!(
+  st:$[((sum .tp.ctr.schemaMismatch) + .tp.ctr.rejectedRegistrations) > 0; `degraded;
+       (sum .tp.ctr.gaps) > 0; `degraded;
+       `ok];
+  `process`port`uptime`status`memMB`msgsIn`msgsOut`tpSeqNo`gaps`missed`restarts`reconnects`outOfOrder`unregisteredRows`schemaMismatch`rejectedRegistrations!(
     `tp;
     .tp.cfg.port;
     `second$.z.p - .proc.startTime;
     st;
     (`long$.Q.w[][`used]) % 1000000;
     .tp.logCount;
-    .tp.logCount)
+    .tp.logCount;
+    .tp.tpSeqNo;
+    sum .tp.ctr.gaps;
+    sum .tp.ctr.missed;
+    sum .tp.ctr.restarts;
+    sum .tp.ctr.reconnects;
+    sum .tp.ctr.outOfOrder;
+    sum .tp.ctr.unregisteredRows;
+    sum .tp.ctr.schemaMismatch;
+    .tp.ctr.rejectedRegistrations)
   }
 
+/ Per-table detail table
 .tp.status:{[]
-  flip `metric`value!(
-    `port`uptime`logFile`logChunks`logSizeMB`tradeGaps`tradeMissed`tradeRestarts`tradeDups`lastTradeSeq`aggTradeGaps`aggTradeMissed`aggTradeRestarts`aggTradeDups`lastAggTradeSeq`quoteGaps`quoteMissed`quoteRestarts`quoteDups`lastQuoteSeq`tpSeqNo;
-    (.tp.cfg.port;
-     `second$.z.p-.proc.startTime;
-     .tp.logFile;
-     .tp.logCount;
-     0.01*`long$100*(@[hcount;.tp.logFile;0j])%1e6;
-     .tp.gaps.trade;    .tp.missed.trade;    .tp.restarts.trade;    .tp.dups.trade;    .tp.seq.trade;
-     .tp.gaps.aggTrade; .tp.missed.aggTrade; .tp.restarts.aggTrade; .tp.dups.aggTrade; .tp.seq.aggTrade;
-     .tp.gaps.quote;    .tp.missed.quote;    .tp.restarts.quote;    .tp.dups.quote;    .tp.seq.quote;
-     .tp.tpSeqNo))
+  ([] table:.tp.tables;
+      sessionId:value .tp.session.id;
+      handle:value .tp.session.handle;
+      lastFhSeqNo:value .tp.seq.last;
+      gaps:value .tp.ctr.gaps;
+      missed:value .tp.ctr.missed;
+      restarts:value .tp.ctr.restarts;
+      reconnects:value .tp.ctr.reconnects;
+      outOfOrder:value .tp.ctr.outOfOrder;
+      unregisteredRows:value .tp.ctr.unregisteredRows;
+      schemaMismatch:value .tp.ctr.schemaMismatch)
   };
 
-/ Compact status as dictionary (for programmatic use)
+/ Compact status as dictionary. Keys kept from the previous version where
+/ they still mean the same thing; the per-side "dups" keys are gone because
+/ nothing is dropped on a guess any more.
 .tp.statusDict:{[]
-  `port`uptime`logChunks`tradeGaps`tradeMissed`tradeDups`aggTradeGaps`aggTradeMissed`aggTradeDups`quoteGaps`quoteMissed`quoteDups`tpSeqNo!
+  `port`uptime`logFile`logChunks`tpSeqNo`seqReserved`seqFile`tradeGaps`tradeMissed`tradeRestarts`tradeReconnects`tradeOutOfOrder`lastTradeSeq`aggTradeGaps`aggTradeMissed`aggTradeRestarts`aggTradeReconnects`aggTradeOutOfOrder`lastAggTradeSeq`quoteGaps`quoteMissed`quoteRestarts`quoteReconnects`quoteOutOfOrder`lastQuoteSeq`unregisteredRows`schemaMismatch`rejectedRegistrations`unknownTableRows!
    (.tp.cfg.port;
     `second$.z.p-.proc.startTime;
+    .tp.logFile;
     .tp.logCount;
-    .tp.gaps.trade;    .tp.missed.trade;    .tp.dups.trade;
-    .tp.gaps.aggTrade; .tp.missed.aggTrade; .tp.dups.aggTrade;
-    .tp.gaps.quote;    .tp.missed.quote;    .tp.dups.quote;
-    .tp.tpSeqNo)
+    .tp.tpSeqNo;
+    .tp.seq.reserved;
+    .tp.cfg.seqFile;
+    .tp.ctr.gaps`trade_binance; .tp.ctr.missed`trade_binance; .tp.ctr.restarts`trade_binance; .tp.ctr.reconnects`trade_binance; .tp.ctr.outOfOrder`trade_binance; .tp.seq.last`trade_binance;
+    .tp.ctr.gaps`trade_binance_fut; .tp.ctr.missed`trade_binance_fut; .tp.ctr.restarts`trade_binance_fut; .tp.ctr.reconnects`trade_binance_fut; .tp.ctr.outOfOrder`trade_binance_fut; .tp.seq.last`trade_binance_fut;
+    .tp.ctr.gaps`quote_binance; .tp.ctr.missed`quote_binance; .tp.ctr.restarts`quote_binance; .tp.ctr.reconnects`quote_binance; .tp.ctr.outOfOrder`quote_binance; .tp.seq.last`quote_binance;
+    sum .tp.ctr.unregisteredRows;
+    sum .tp.ctr.schemaMismatch;
+    .tp.ctr.rejectedRegistrations;
+    .tp.ctr.unknownTableRows)
   };
 
-/ Log status (unchanged for compatibility)
 .tp.logStatus:{[]
   ([]file:enlist .tp.logFile;chunks:enlist .tp.logCount;sizeMB:enlist(@[hcount;.tp.logFile;0j])%1e6)
   };
@@ -489,54 +518,34 @@ upd:{[tbl;data]
 
 .tp.endOfDay:{[]
   -1 raze ("TP: EOD - chunks:"; string .tp.logCount;
-           " tradeGaps:";    string .tp.gaps.trade;
-           " aggTradeGaps:"; string .tp.gaps.aggTrade;
-           " quoteGaps:";    string .tp.gaps.quote;
-           " tpSeqNo:";      string .tp.tpSeqNo);
+           " gaps:"; .Q.s1 .tp.ctr.gaps;
+           " tpSeqNo:"; string .tp.tpSeqNo);
   pubsub.callendofday[];
   .tp.rotate[];
-  delete from `trade_binance;
-  delete from `trade_binance_fut;
-  delete from `quote_binance;
-  delete from `health_feed_handler;
   .tp.logCount:0j;
-  / Reset per-day operational counters
-  .tp.gaps.trade:0j;
-  .tp.missed.trade:0j;
-  .tp.restarts.trade:0j;
-  .tp.dups.trade:0j;
-  .tp.gaps.aggTrade:0j;
-  .tp.missed.aggTrade:0j;
-  .tp.restarts.aggTrade:0j;
-  .tp.dups.aggTrade:0j;
-  .tp.gaps.quote:0j;
-  .tp.missed.quote:0j;
-  .tp.restarts.quote:0j;
-  .tp.dups.quote:0j;
-  / Keep last fhSeqNo for each side (FH doesn't reset on EOD).
-  / Keep .tp.tpSeqNo monotonic across days so subscribers' cursors remain
-  / valid across midnight. Note: replayFrom currently reads only today's
-  / log; cross-midnight replay is not supported in v1 (TODO Phase 5).
+  / Daily operational counters reset; sessions, last fhSeqNo and tpSeqNo
+  / carry across midnight (handlers do not restart at EOD, and tpSeqNo is
+  / monotonic by construction).
+  .tp.ctr.gaps:.tp.tables ! 0 0 0j;
+  .tp.ctr.missed:.tp.tables ! 0 0 0j;
+  .tp.ctr.restarts:.tp.tables ! 0 0 0j;
+  .tp.ctr.reconnects:.tp.tables ! 0 0 0j;
+  .tp.ctr.outOfOrder:.tp.tables ! 0 0 0j;
+  .tp.ctr.unregisteredRows:.tp.tables ! 0 0 0j;
+  .tp.ctr.schemaMismatch:.tp.tables ! 0 0 0j;
  };
 
-/ -------------------------------------------------------
-/ EOD - Midnight UTC Detection
-/ -------------------------------------------------------
-
-.tp.currentDate:.z.d;
+.tp.currentDate:.tp.today[];
 
 .tp.checkEOD:{[]
-  if[.z.d > .tp.currentDate;
+  if[.tp.today[] > .tp.currentDate;
     -1 "TP: Midnight UTC detected - triggering EOD";
     .tp.endOfDay[];
-    .tp.currentDate:.z.d;
+    .tp.currentDate:.tp.today[];
   ];
   };
 
-/ Timer - check every 60 seconds for date rollover
 .z.ts:{[] .tp.checkEOD[] };
-
-
 
 / -------------------------------------------------------
 / Startup
@@ -544,36 +553,34 @@ upd:{[tbl;data]
 
 system"p ",string .tp.cfg.port;
 
-/ Phase 4: recover tpSeqNo from existing log BEFORE opening for new writes,
-/ so newly accepted messages continue the sequence rather than re-using
-/ existing seq numbers.
-.tp.recoverSeqNo[];
-
+/ Order matters: seed tpSeqNo from the reservation file (or migrate), then
+/ recover per-table fhSeqNo from today's log, then open the log for writes.
+.tp.seq.load[];
+.tp.recoverFhSeq[];
 .tp.openLog[];
 
-system "t 1000";   / Check every 1 second
+system "t 1000";   / EOD check every second
 
 -1"=======================================================";
 -1"TP (KDB-X module) starting on port ",string[.tp.cfg.port];
 -1"=======================================================";
--1"Tables: trade_binance trade_binance_fut quote_binance health_feed_handler";
+-1"Tables: ",(" " sv string .tp.tables)," health_feed_handler";
+-1"Schema: kdb/schemas.q; FH row widths ",.Q.s1[.tp.fhWidth];
+-1"tpSeqNo: ",string[.tp.tpSeqNo]," reserved to ",string[.tp.seq.reserved]," in ",string .tp.cfg.seqFile;
 -1"";
 -1"Monitoring:";
 -1"  .health[]            / Standardized health check";
--1"  .tp.status[]         / Full status table";
+-1"  .tp.status[]         / Per-table sessions and counters";
 -1"  .tp.statusDict[]     / Status as dictionary";
 -1"  .tp.logStatus[]      / Log file status";
 -1"";
--1"Phase 4 API (acks/replay):";
--1"  .tp.lastAccepted[`trade]       / Highest fhSeqNo accepted for spot trades";
--1"  .tp.lastAccepted[`aggTrade]    / Highest fhSeqNo accepted for futures aggTrades";
--1"  .tp.lastAccepted[`quote]       / Highest fhSeqNo accepted for quotes";
--1"  .tp.currentSeqNo[]             / Current monotonic tpSeqNo (replay cutoff)";
--1"  .tp.replayFrom[`trade_binance; fromSeq]      / Replay subset from log";
--1"  .tp.replayFrom[`trade_binance_fut; fromSeq]  / Replay futures subset from log";
+-1"Feed handler API:";
+-1"  .tp.registerSession[tbl; sessionId; nextFhSeqNo; rowWidth]  / once per connection";
+-1"  .u.upd[tbl; row]                                            / per row";
 -1"";
--1"Operations:";
--1"  .tp.endOfDay[]    / Trigger end-of-day";
+-1"Subscriber API:";
+-1"  .tp.currentSeqNo[]             / Current monotonic tpSeqNo (replay cutoff)";
+-1"  .tp.replayFrom[tbl; fromSeq]   / Replay subset from today's log";
 -1"";
 -1"TP ready";
 -1"=======================================================";
