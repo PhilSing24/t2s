@@ -7,6 +7,7 @@
 # Usage (from project root):
 #   ./tests/run_tests.sh
 #   ./tests/run_tests.sh tests/test_schemas.q   # single test
+#   ./tests/run_tests.sh --no-isolation-check   # while the live pipeline runs
 #
 # Exit code: 0 if all pass, 1 if any fail.
 
@@ -29,6 +30,16 @@ fi
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 cd "$PROJECT_ROOT"
+
+# --no-isolation-check skips the production-state snapshot/compare. Only
+# for running the suite while the live pipeline is up, when the live TP and
+# WDB legitimately write to the production log and tmp dirs. The sandbox
+# guard inside each integration test still runs.
+ISOLATION_CHECK=1
+if [[ ${1:-} == "--no-isolation-check" ]]; then
+    ISOLATION_CHECK=0
+    shift
+fi
 
 # Test file selection
 if [[ $# -gt 0 ]]; then
@@ -56,9 +67,13 @@ fi
 # tests/isolation_check.sh. Not valid while the live pipeline is running.
 ISOLATION_SNAP=$(mktemp)
 trap 'rm -f "$ISOLATION_SNAP"' EXIT
-if ! tests/isolation_check.sh record "$ISOLATION_SNAP"; then
-    echo "${RED}Could not record isolation snapshot - aborting${NC}"
-    exit 1
+if [[ $ISOLATION_CHECK -eq 1 ]]; then
+    if ! tests/isolation_check.sh record "$ISOLATION_SNAP"; then
+        echo "${RED}Could not record isolation snapshot - aborting${NC}"
+        exit 1
+    fi
+else
+    echo "${YELLOW}WARNING: --no-isolation-check given; production-state snapshot skipped${NC}"
 fi
 
 echo ""
@@ -107,13 +122,17 @@ done
 
 echo ""
 # -------------------- isolation compare --------------------
-if tests/isolation_check.sh compare "$ISOLATION_SNAP"; then
-    echo "${GREEN}OK${NC}  isolation check (production state unchanged)"
-    PASSED=$((PASSED + 1))
+if [[ $ISOLATION_CHECK -eq 1 ]]; then
+    if tests/isolation_check.sh compare "$ISOLATION_SNAP"; then
+        echo "${GREEN}OK${NC}  isolation check (production state unchanged)"
+        PASSED=$((PASSED + 1))
+    else
+        echo "${RED}FAIL${NC} isolation check (production state changed)"
+        FAILED=$((FAILED + 1))
+        FAILED_TESTS+=("isolation check")
+    fi
 else
-    echo "${RED}FAIL${NC} isolation check (production state changed)"
-    FAILED=$((FAILED + 1))
-    FAILED_TESTS+=("isolation check")
+    echo "${YELLOW}SKIP${NC} isolation check (--no-isolation-check)"
 fi
 
 echo ""
