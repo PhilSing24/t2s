@@ -50,6 +50,18 @@ if [[ ${#TESTS[@]} -eq 0 ]]; then
     exit 1
 fi
 
+# -------------------- isolation snapshot --------------------
+# Record production state (tmp/, hdb/, TP logs, checkpoint) before any test
+# runs; compared after the last test. Any change fails the run. See
+# tests/isolation_check.sh. Not valid while the live pipeline is running.
+ISOLATION_SNAP=$(mktemp)
+trap 'rm -f "$ISOLATION_SNAP"' EXIT
+if ! tests/isolation_check.sh record "$ISOLATION_SNAP"; then
+    echo "${RED}Could not record isolation snapshot - aborting${NC}"
+    exit 1
+fi
+
+echo ""
 echo "Running ${#TESTS[@]} test file(s)..."
 echo ""
 
@@ -92,6 +104,17 @@ for test_file in "${TESTS[@]}"; do
         FAILED_TESTS+=("$test_file")
     fi
 done
+
+echo ""
+# -------------------- isolation compare --------------------
+if tests/isolation_check.sh compare "$ISOLATION_SNAP"; then
+    echo "${GREEN}OK${NC}  isolation check (production state unchanged)"
+    PASSED=$((PASSED + 1))
+else
+    echo "${RED}FAIL${NC} isolation check (production state changed)"
+    FAILED=$((FAILED + 1))
+    FAILED_TESTS+=("isolation check")
+fi
 
 echo ""
 echo "============================================="
