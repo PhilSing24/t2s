@@ -218,6 +218,10 @@ ratio: maxTh % minTh;
 / the files at the end).
 
 .t.case `save_load_roundtrip;
+/ .afml.save/.afml.ld write afml_bars and afml_state relative to the cwd.
+/ Do that inside the test sandbox so nothing lands in the repo root.
+system "mkdir -p tests/sandbox";
+system "cd tests/sandbox";
 preBars:  count .afml.bars;
 preBN:    (first 0!.afml.state)`bn;
 preTheta: (first 0!.afml.state)`theta;
@@ -238,6 +242,8 @@ preTheta: (first 0!.afml.state)`theta;
 / files were never written due to an earlier test failure).
 @[hdel; hsym `$"afml_bars";  {[e] -1 raze ("    note: "; e)}];
 @[hdel; hsym `$"afml_state"; {[e] -1 raze ("    note: "; e)}];
+system "cd ../..";
+@[system; "rmdir tests/sandbox"; {[e] }];
 
 / ============================================================================
 / Report
