@@ -78,6 +78,7 @@ system "g 0";
 .wdb.stats.unexpectedDateRows:0j;    / rows dated in the future or far in the past
 .wdb.stats.counterResets:0j;         / TP tpSeqNo seen below our checkpoint (previous-day checkpoint)
 .wdb.stats.haltedRowsDropped:0j;     / rows dropped while halted (see .wdb.halted)
+.wdb.stats.checkpointBehindDisk:0j;  / startups where tmp.* held tpSeqNo above the checkpoint
 .wdb.lastRollDate:0Nd;
 
 / -------------------------------------------------------
@@ -144,6 +145,11 @@ system "g 0";
 / -------------------------------------------------------
 .wdb.tmpDir:$[count v:getenv `T2S_TMP_DIR; v; "../"];
 .wdb.tmpPath:{[d] `$":",.wdb.tmpDir,"tmp.",string d};
+.wdb.parseTmpDate:{[entryStr]
+  if[14 <> count entryStr; :0Nd];
+  if[not "tmp." ~ 4#entryStr; :0Nd];
+  "D"$ 4_ entryStr
+ };
 
 / -------------------------------------------------------
 / Table schemas (loaded from shared definition)
@@ -211,20 +217,57 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
  };
 
 / Persist the checkpoint atomically: write a temp file, then rename over
-/ the real one so a crash mid-write cannot corrupt it. Stamps today's date
-/ (WDB clock). Returns 1b on success.
-.wdb.saveCheckpoint:{[]
+/ the real one so a crash mid-write cannot corrupt it. `d` is the date to
+/ stamp: today's (WDB clock) for every flush; the previously loaded date
+/ when the startup disk reconciliation merely raises the floor, so the
+/ counter-reset rule still knows which day the checkpoint came from.
+/ Returns 1b on success.
+.wdb.saveCheckpoint:{[d]
   tmpStr:1 _ string .wdb.cfg.checkpointFile;
   tmpFile:hsym `$ raze (tmpStr; ".tmp");
-  payload:`seq`date!(.wdb.lastTpSeqNo; .wdb.today[]);
+  payload:`seq`date!(.wdb.lastTpSeqNo; d);
   result:.[set; (tmpFile; payload); {[err]
     -1 raze ("WDB: ERROR writing checkpoint tmp - "; err);
     `error}];
   if[result ~ `error; :0b];
   cmd:raze ("mv "; tmpStr; ".tmp "; tmpStr);
   ok:@[{[c] system c; 1b}; cmd; {[err] -1 raze ("WDB: ERROR renaming checkpoint - "; err); 0b}];
-  if[ok; .wdb.checkpointDate:.wdb.today[]];
+  if[ok; .wdb.checkpointDate:d];
   ok
+ };
+
+/ -------------------------------------------------------
+/ Startup reconciliation: the disk is the truth, the checkpoint may lag it
+/ -------------------------------------------------------
+/ A crash between a tmp write and the checkpoint save leaves rows on disk
+/ with tpSeqNo above the checkpoint. Replaying from the checkpoint would
+/ re-deliver them, so before connecting WDB scans the tpSeqNo column of
+/ every tmp.<date>/<table> and raises each table's floor to the maximum
+/ found. Only tmp.* is scanned: rows reach an HDB partition only after a
+/ successful checkpoint (the roll aborts otherwise), and HDB partitions may
+/ hold rows from an earlier TP counter epoch whose sequence numbers would
+/ wrongly raise the floor.
+.wdb.diskMaxSeq:{[t]
+  tmpRoot:hsym `$ .wdb.tmpDir;
+  entries:@[key; tmpRoot; {[err] `symbol$()}];
+  dates:.wdb.parseTmpDate each string entries;
+  dates:dates where not null dates;
+  if[0 = count dates; :0j];
+  paths:{[t;d] ` sv (.wdb.tmpPath d), t, `tpSeqNo}[t] each dates;
+  vals:{[p] $[() ~ key p; 0Nj; @[{max get x}; p; {[e] 0Nj}]]} each paths;
+  0j | max `long$vals
+ };
+
+.wdb.reconcileCheckpointWithDisk:{[]
+  diskMax:.wdb.tables ! .wdb.diskMaxSeq each .wdb.tables;
+  behind:where diskMax > .wdb.lastTpSeqNo;
+  if[0 = count behind; -1 "WDB: checkpoint consistent with tmp.* on disk"; :()];
+  .wdb.stats.checkpointBehindDisk+:1;
+  -1 raze ("WDB: checkpoint BEHIND disk for "; ", " sv string behind;
+           " - checkpoint "; .Q.s1 .wdb.lastTpSeqNo behind; " disk "; .Q.s1 diskMax behind;
+           " (crash between write and checkpoint?) -> raising checkpoint to disk");
+  .wdb.lastTpSeqNo[behind]:diskMax behind;
+  .wdb.saveCheckpoint[.wdb.checkpointDate];
  };
 
 / -------------------------------------------------------
@@ -317,7 +360,7 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
   advance:$[0 = count remaining; 1b; maxWritten < min remaining`tpSeqNo];
   if[advance and maxWritten > .wdb.lastTpSeqNo[t];
     .wdb.lastTpSeqNo[t]:maxWritten;
-    if[not .wdb.saveCheckpoint[]; ok:0b]];
+    if[not .wdb.saveCheckpoint[.wdb.today[]]; ok:0b]];
   if[not advance;
     -1 raze ("WDB: checkpoint for "; string t; " NOT advanced - unwritten rows have lower tpSeqNo")];
   ok
@@ -331,12 +374,6 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
 / -------------------------------------------------------
 / One routine serves three triggers: WDB's own clock passing midnight (after
 / a grace period), TP's endofday message, and startup orphan recovery.
-
-.wdb.parseTmpDate:{[entryStr]
-  if[14 <> count entryStr; :0Nd];
-  if[not "tmp." ~ 4#entryStr; :0Nd];
-  "D"$ 4_ entryStr
- };
 
 / tmp.<date> entries with date < today, oldest first.
 .wdb.pendingTmpDates:{[]
@@ -522,7 +559,7 @@ endofday:{[]
              " < today "; string today;
              " -> treating TP log as a new epoch, resetting checkpoints to 0");
     .wdb.lastTpSeqNo:.wdb.tables ! 0 0 0j;
-    .wdb.saveCheckpoint[];
+    .wdb.saveCheckpoint[today];
     :1b];
   .wdb.halted:1b;
   .wdb.haltReason:raze ("TP tpSeqNo "; string cutoff; " below today's checkpoint for ";
@@ -563,7 +600,7 @@ endofday:{[]
  };
 
 .wdb.replayStatus:{[]
-  `lastTpSeqNoTrade`lastTpSeqNoAggTrade`lastTpSeqNoQuote`checkpointDate`replayMode`replayCutoff`replayRowsApplied`replayDupsFiltered`duplicatesDropped`lateRows`unexpectedDateRows`counterResets`halted`haltReason`haltedRowsDropped`lastRollDate`bufferTrades`bufferAggTrades`bufferQuotes!(
+  `lastTpSeqNoTrade`lastTpSeqNoAggTrade`lastTpSeqNoQuote`checkpointDate`replayMode`replayCutoff`replayRowsApplied`replayDupsFiltered`duplicatesDropped`lateRows`unexpectedDateRows`counterResets`checkpointBehindDisk`halted`haltReason`haltedRowsDropped`lastRollDate`bufferTrades`bufferAggTrades`bufferQuotes!(
     .wdb.lastTpSeqNo`trade_binance;
     .wdb.lastTpSeqNo`trade_binance_fut;
     .wdb.lastTpSeqNo`quote_binance;
@@ -576,6 +613,7 @@ endofday:{[]
     .wdb.stats.lateRows;
     .wdb.stats.unexpectedDateRows;
     .wdb.stats.counterResets;
+    .wdb.stats.checkpointBehindDisk;
     .wdb.halted;
     .wdb.haltReason;
     .wdb.stats.haltedRowsDropped;
@@ -798,6 +836,7 @@ system "mkdir -p ",1 _ string .wdb.cfg.hdbDir;
 cp:.wdb.loadCheckpoint[];
 .wdb.lastTpSeqNo:cp 0;
 .wdb.checkpointDate:cp 1;
+.wdb.reconcileCheckpointWithDisk[];
 
 / Roll any tmp.<date> left behind by a previous run (orphan recovery) before
 / accepting live data.
