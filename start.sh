@@ -6,6 +6,14 @@
 #   ./start.sh --markets spot      - spot trade FH + quote FH (same as default)
 #   ./start.sh --markets futures   - futures trade FH + quote FH (no spot)
 #   ./start.sh --markets spot,futures - both spot and futures trade FH + quote FH
+#   ./start.sh --headless ...      - start and return without attaching to tmux
+#                                    (for scheduled / unattended starts)
+#
+# Start-up is health-based, not timed: TP must answer .health[] ok before
+# WDB starts; WDB must be connected with its replay complete before the feed
+# handlers start; each handler must have registered its session with TP.
+# Any step that does not happen within its timeout fails the start with
+# the process's log tail.
 #
 # The --markets flag controls which trade feed handlers are launched. The
 # rest of the pipeline (TP, WDB, quote FH) is unconditional and
@@ -26,6 +34,7 @@ NC='\033[0m' # No Color
 # Parse --markets flag
 # --------------------------------------------------------------------------
 MARKETS="spot"  # default: spot trade FH only
+HEADLESS=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --markets)
@@ -34,6 +43,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --markets=*)
             MARKETS="${1#*=}"
+            shift
+            ;;
+        --headless)
+            HEADLESS=1
             shift
             ;;
         -h|--help)
@@ -107,32 +120,89 @@ echo "$MARKETS" > "$BASEDIR/run/markets.active"
 
 echo "Starting t2s pipeline (markets=$MARKETS)..."
 
+# --------------------------------------------------------------------------
+# Health-based waits
+# --------------------------------------------------------------------------
+PORT_TP=5010
+PORT_WDB=5011
+
+# Evaluate a q expression against a process over IPC; prints the result as
+# a string, or nothing if the process cannot be reached.
+q_eval() {  # port expr
+    q -q -p 0 < /dev/null 2>/dev/null <<QEOF
+h:@[hopen; (\`\$":localhost:$1"; 2000); {0N}];
+if[null h; exit 1];
+r:@[h; "$2"; {\`error}]; hclose h;
+-1 \$[10h = type r; r; -11h = type r; string r; .Q.s1 r];
+system "sleep 0.05"; exit 0
+QEOF
+}
+
+fail_start() {  # window message
+    echo -e "${RED}Start failed: $2${NC}"
+    echo "--- last lines of tmux window '$1' ---"
+    tmux capture-pane -t "$SESSION:$1" -p 2>/dev/null | grep -v '^$' | tail -15
+    echo "---"
+    echo "The session '$SESSION' is left running for inspection; ./stop.sh to tear it down."
+    exit 1
+}
+
+# wait_for "label" window timeout_sec check_command [args]
+wait_for() {
+    local label=$1 window=$2 timeout=$3; shift 3
+    local deadline=$(( $(date +%s) + timeout ))
+    while (( $(date +%s) < deadline )); do
+        if "$@"; then echo -e "  ${GREEN}✓${NC} $label"; return 0; fi
+        sleep 0.5
+    done
+    fail_start "$window" "$label did not happen within ${timeout}s"
+}
+
+tp_ok()         { [[ "$(q_eval $PORT_TP '.health[]`status')" == "ok" ]]; }
+wdb_ready()     { [[ "$(q_eval $PORT_WDB '(.wdb.conn.state = `connected) and not .wdb.replayMode')" == "1b" ]]; }
+wdb_healthy()   { local s; s=$(q_eval $PORT_WDB '.health[]`status'); [[ "$s" == "ok" || "$s" == "degraded" ]]; }
+# A handler has registered when TP has a session for its table
+fh_registered() { [[ "$(q_eval $PORT_TP "not null .tp.session.id\`$1")" == "1b" ]]; }
+
 # Window 0: Tickerplant (primary) - port 5010
 tmux new-session -d -s $SESSION -n "tp"
 tmux send-keys -t $SESSION:tp "cd $BASEDIR/kdb/tick && q tp.q" C-m
-# Window 1: WDB (write-only -> HDB) - port 5011
-tmux new-window -t $SESSION -n "wdb"
-tmux send-keys -t $SESSION:wdb "sleep 2 && cd $BASEDIR/kdb/tick && q wdb.q" C-m
+wait_for "TP listening and healthy on $PORT_TP" tp 30 tp_ok
 
-# Spot trade feed handler (conditional)
+# Window 1: WDB (write-only -> HDB) - port 5011. It connects to TP and
+# replays before accepting live rows; a long replay (after a long outage)
+# is normal, so the timeout is generous.
+tmux new-window -t $SESSION -n "wdb"
+tmux send-keys -t $SESSION:wdb "cd $BASEDIR/kdb/tick && q wdb.q" C-m
+wait_for "WDB connected to TP with replay complete" wdb 600 wdb_ready
+wait_for "WDB healthy" wdb 10 wdb_healthy
+
+# Feed handlers. Each registers a session with TP once it has connected;
+# a missing registration within the timeout usually means no route to
+# Binance or a schema mismatch (see the handler's window).
 if [[ $LAUNCH_SPOT -eq 1 ]]; then
     tmux new-window -t $SESSION -n "trade-fh"
-    tmux send-keys -t $SESSION:trade-fh "sleep 8 && cd $BASEDIR && ./build/trade_feed_handler" C-m
+    tmux send-keys -t $SESSION:trade-fh "cd $BASEDIR && ./build/trade_feed_handler" C-m
 fi
-
-# Futures trade feed handler (conditional)
 if [[ $LAUNCH_FUT -eq 1 ]]; then
     tmux new-window -t $SESSION -n "trade-fh-fut"
-    tmux send-keys -t $SESSION:trade-fh-fut "sleep 8 && cd $BASEDIR && ./build/trade_feed_handler_fut" C-m
+    tmux send-keys -t $SESSION:trade-fh-fut "cd $BASEDIR && ./build/trade_feed_handler_fut" C-m
 fi
-
 # Quote feed handler (unconditional; spot only for now - futures L5 is a follow-up ADR)
 tmux new-window -t $SESSION -n "quote-fh"
-tmux send-keys -t $SESSION:quote-fh "sleep 9 && cd $BASEDIR && ./build/quote_feed_handler" C-m
+tmux send-keys -t $SESSION:quote-fh "cd $BASEDIR && ./build/quote_feed_handler" C-m
+
+if [[ $LAUNCH_SPOT -eq 1 ]]; then
+    wait_for "spot trade handler registered with TP" trade-fh 60 fh_registered trade_binance
+fi
+if [[ $LAUNCH_FUT -eq 1 ]]; then
+    wait_for "futures trade handler registered with TP" trade-fh-fut 60 fh_registered trade_binance_fut
+fi
+wait_for "quote handler registered with TP" quote-fh 60 fh_registered quote_binance
 
 # Select first window
 tmux select-window -t $SESSION:tp
-echo -e "${GREEN}✓ Pipeline starting (markets=$MARKETS)${NC}"
+echo -e "${GREEN}✓ Pipeline up (markets=$MARKETS)${NC}"
 echo ""
 echo "Architecture:"
 echo "  Primary TP:5010 -> WDB:5011 -> HDB"
@@ -151,5 +221,10 @@ echo "  Ctrl+B 0-9     jump to window"
 echo "  Ctrl+B D       detach (keeps running)"
 echo ""
 echo "Reattach: tmux attach -t $SESSION"
+echo "Status:   ./status.sh"
 echo ""
+if [[ $HEADLESS -eq 1 ]]; then
+    echo "Headless start: not attaching."
+    exit 0
+fi
 tmux attach -t $SESSION
