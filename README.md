@@ -18,16 +18,9 @@ Each downstream process auto-reconnects with exponential backoff. The TP writes 
 | Trade FH Fut | —     | Binance WS    | USD-M futures aggTrade feed handler (C++)              |
 | Quote FH     | —     | Binance WS    | L5 order book feed handler (C++) with REST snapshots   |
 | TP           | 5010  | FHs           | Tickerplant — pub/sub hub with daily durability log    |
-| CTP          | 5014  | TP            | Chained tickerplant — 1s batching for downstream fanout|
 | WDB          | 5011  | TP            | Write-only DB — buffers and writes to HDB at EOD       |
-| RDB          | 5017  | CTP           | Real-time DB — in-memory queries, 60min retention      |
-| RTE          | 5015  | CTP           | Analytics — VWAP, realized vol, OBI (EMA-smoothed)     |
-| TEL          | 5016  | CTP           | Telemetry — feed handler latency aggregation           |
-| SIG          | 5012  | TP, CTP       | RSI signal generator — publishes positions to CTP      |
-| PNL          | 5018  | CTP           | P&L and position monitoring                            |
-| MLE          | 5032  | TP            | ML engine (research, not auto-started) — dollar-imbalance bars, threshold adaptation |
 
-The table above describes the live ingestion + analytics pipeline. Research-side code (`kdb/framework/` — backtest framework, `kdb/strategies/` — strategy files, `kdb/ml/` — feature engineering) is run on-demand against the historical HDB, not as long-running processes. See **Backtest Framework** and **Research Workflow** below.
+The table above describes the live ingestion pipeline. Research-side code (`kdb/framework/` — backtest framework, `kdb/strategies/` — strategy files, `kdb/ml/` — feature engineering) is run on-demand against the historical HDB, not as long-running processes. See **Backtest Framework** and **Research Workflow** below.
 
 ## The System in Action
 
@@ -80,17 +73,9 @@ t2s/
 │       └── kdb/                      # k.h and c.o for kdb+ IPC
 ├── kdb/
 │   ├── schemas.q             # Shared table schemas (single source of truth, includes futures aggTrade)
-│   ├── tick/                 # Tickerplant chain
+│   ├── tick/                 # Tickerplant and writedown
 │   │   ├── tp.q              # Primary tickerplant (durability log)
-│   │   ├── chained_tp.q      # Batched fanout to downstream
-│   │   ├── rdb.q             # Real-time DB
 │   │   └── wdb.q             # Write-only DB → HDB
-│   ├── analytics/            # Real-time analytics
-│   │   ├── rte.q             # VWAP, vol, OBI
-│   │   ├── tel.q             # Latency telemetry
-│   │   ├── sig.q             # RSI signals
-│   │   ├── pnl.q             # P&L tracking
-│   │   └── mle.q             # ML engine (dollar-imbalance bars)
 │   ├── ml/                   # ML feature pipeline (in progress)
 │   │   ├── afml.q            # AFML primitives (López de Prado)
 │   │   ├── features.q        # Feature engineering (dollar-imbalance bars, etc.)
@@ -129,19 +114,13 @@ t2s/
 │   ├── test_trade_fh_row_construction.cpp   # C++ unit tests for buildTradeRow (both schemas)
 │   ├── test_stream_path.cpp             # C++ unit tests for buildStreamPath (combined-stream URL builder)
 │   └── test_aggtrade_parse.cpp          # C++ unit tests for futures aggTrade JSON parsing
-├── mcp/                      # MCP server — conversational query surface (Python sidecar)
-│   ├── server.py             # get_volatility tool → calls .rte.getVol[] over IPC
-│   ├── requirements.txt      # mcp, pykx
-│   └── README.md             # setup + Claude Desktop wiring notes
 ├── config/                   # Feed handler JSON configs
 │   ├── trade_feed_handler.json       # Spot trade FH
 │   ├── trade_feed_handler_fut.json   # USD-M futures aggTrade FH
 │   └── quote_feed_handler.json       # L5 quote FH
-├── dashboards/               # KX Dashboards (Analytics, DataFlow, FH, Trades/Quotes)
 ├── hdb/                      # Live HDB partitions (gitignored, populated at EOD)
 ├── tmp/                      # WDB intraday writedown directory (gitignored)
 ├── hdb_binancedata/          # Historical research HDB (gitignored)
-├── notebooks/                # Jupyter research notebooks
 ├── markdown_docs/            # Design notes, guides
 ├── run/                      # Runtime status files written by start.sh (gitignored)
 ├── CMakeLists.txt
@@ -192,21 +171,12 @@ Stop everything:
 ./stop.sh
 ```
 
-`start.sh` brings up TP, CTP, WDB, RDB, RTE, TEL, SIG, PNL plus the feed handlers selected by `--markets`. The futures FH is `trade_feed_handler_fut`; it loads `config/trade_feed_handler_fut.json` and ingests `@aggTrade` events into the `trade_binance_fut` table alongside spot trades. MLE is research-only and is started manually when needed:
-```bash
-q kdb/analytics/mle.q
-```
+`start.sh` brings up TP and WDB plus the feed handlers selected by `--markets`. The futures FH is `trade_feed_handler_fut`; it loads `config/trade_feed_handler_fut.json` and ingests `@aggTrade` events into the `trade_binance_fut` table alongside spot trades.
 
 Individual processes can also be started manually. From the project root:
 ```bash
 q kdb/tick/tp.q
-q kdb/tick/chained_tp.q
 q kdb/tick/wdb.q
-q kdb/tick/rdb.q
-q kdb/analytics/rte.q
-q kdb/analytics/tel.q
-q kdb/analytics/sig.q
-q kdb/analytics/pnl.q
 ./build/trade_feed_handler config/trade_feed_handler.json
 ./build/trade_feed_handler_fut config/trade_feed_handler_fut.json
 ./build/quote_feed_handler config/quote_feed_handler.json
@@ -222,9 +192,9 @@ Feed handler runtime config lives in `config/`:
 - `trade_feed_handler_fut.json` — USD-M futures aggTrade FH: same shape, but with `host=fstream.binance.com`, `port=443`, `stream_suffix=@aggTrade`, `tp_table=trade_binance_fut`, `schema=futures_agg_trade`
 - `quote_feed_handler.json` — same fields, used by the L5 quote handler
 
-Each q process has its own config block at the top of its file (e.g. `.tp.cfg`, `.rdb.cfg`). Edit and reload to change ports, retention, batch intervals, etc.
+Each q process has its own config block at the top of its file (e.g. `.tp.cfg`, `.wdb.cfg`). Edit and reload to change ports, retention, batch intervals, etc.
 
-Pipeline-wide table schemas live in `kdb/schemas.q` and are loaded by every q process. Adding or modifying a column there propagates everywhere on the next restart; field indices used by TP gap detection, TEL latency parsing, and RTE analytics are all derived from the schema (no magic numbers).
+Pipeline-wide table schemas live in `kdb/schemas.q` and are loaded by every q process. Adding or modifying a column there propagates everywhere on the next restart; field indices used by TP gap detection and WDB replay are derived from the schema (no magic numbers).
 
 ## Tests
 
@@ -238,7 +208,7 @@ The runner discovers `tests/test_*.q`, `tests/test_*.sh`, and any compiled binar
 - **`test_schemas.q`** — schemas.q column counts, types, and derived index positions. Catches accidental schema changes that would break the rest of the pipeline.
 - **`test_afml.q`** — Q tests for AFML primitives in `kdb/ml/afml.q`.
 - **`test_labels.q`** — Q tests for labeling primitives in `kdb/ml/labels.q`.
-- **`test_smoke.sh`** — starts each q process (tp, ctp, rdb, wdb, sig, pnl, rte, tel) in isolation against test ports, asserts `.health[]` returns a sane response. Catches load-time errors and missing `.health[]` interface.
+- **`test_smoke.sh`** — starts each q process (tp, wdb) in isolation against test ports, asserts `.health[]` returns a sane response. Catches load-time errors and missing `.health[]` interface.
 - **`test_wdb_eod.sh`** — full TP→WDB integration test: publishes synthetic data, forces EOD, verifies a partition lands in the sandbox HDB with correct row counts. Validates the EOD persistence path end-to-end.
 - **`build/test_order_book`** — C++ unit tests (Catch2) for `OrderBookManager`: state machine (INIT→SYNCING→VALID→INVALID), snapshot truncation/padding, delta semantics (insert/update/delete via qty=0), sequence-gap detection, multi-symbol independence, and Binance-spec compliance for overlapping deltas, boundary cases, and entirely-stale events.
 - **`build/test_snapshot_worker`** — C++ unit tests (Catch2) for `SnapshotWorker`: bounded-queue semantics, drop-oldest on overflow, worker thread lifecycle, request-id stale-result discard, shutdown signalling.
@@ -256,20 +226,6 @@ Tests run on isolated ports (production + 10000) so they're safe to run while th
 Connect with `q -p` or any kdb+ client. A few examples:
 
 ```q
-// RDB (port 5017) — recent trades and quotes
-select from trade_binance where sym=`BTCUSDT
-.rdb.tradeSummary[]
-.rdb.lastQuotes[10]
-
-// RTE (port 5015) — analytics
-.rte.getVwap[]
-.rte.getOBI[`smooth]
-.rte.getOBIHistory[`BTCUSDT;30]
-.rte.getVolComparison[]
-
-// TEL (port 5016) — feed handler latency
-.tel.vsFhStatus[]
-
 // TP (port 5010) — durability log status, sequence tracking, replay
 .tp.statusDict[]              / counters: gaps, dups, tpSeqNo, log chunks
 .tp.lastAccepted[`trade]      / highest fhSeqNo accepted from trade FH
@@ -279,57 +235,11 @@ select from trade_binance where sym=`BTCUSDT
 // WDB (port 5011) — Phase 4 replay state
 .wdb.replayStatus[]           / lastTpSeqNo, replayMode, replay counters
 
-// PNL (port 5018) — positions and P&L
-// (see kdb/analytics/pnl.q for the query interface)
-
 // All processes — standardized health check
 .health[]
 ```
 
 WDB persists its replay checkpoint to `$T2S_TMP_DIR/wdb.lastTpSeqNo` after every successful flush. On restart, it loads this and asks TP to replay everything since, so disk-persisted data is recoverable across WDB or TP restarts.
-
-## Conversational Query Interface (MCP)
-
-The analytics are also reachable in plain English through an [MCP](https://modelcontextprotocol.io) server (`mcp/server.py`), which exposes the live RTE process to an MCP host such as Claude Desktop. Instead of opening a q session and calling `.rte.getVol[]`, you can ask:
-
-![Conversational volatility queries via MCP](images/MCPChatbotView.jpg)
-
-The server is a **read-only sidecar**: a separate Python process that connects to RTE (port 5015) as an ordinary kdb+ IPC client via [PyKX](https://code.kx.com/pykx/), so it sits alongside the pipeline and is never in the tick hot path. It recomputes nothing — each tool call invokes an existing q function and returns the result as structured data. The current tool, `get_volatility`, wraps `.rte.getVol[]`:
-
-- `get_volatility(symbol)` returns that symbol's current annualized realized volatility (case-insensitive, e.g. `BTCUSDT`).
-- `get_volatility()` with no symbol returns volatility for all tracked symbols.
-
-Each result carries `annualizedVol`, `returnCount`, and `isValid`, plus a readable note. Because vol is computed over a fixed 60-minute rolling window (~120 samples at one per 30s), `isValid` is only `true` once that window is fully loaded; readings in the first ~60 minutes after startup (or after an EOD reset) are returned but flagged as warming up, so a preliminary estimate is never mistaken for a steady-state one.
-
-**Setup.** Install the dependencies into the project venv, then point an MCP host at the server:
-
-```bash
-cd mcp
-python -m pip install -r requirements.txt   # mcp; pykx assumed present (KDB-X)
-```
-
-For Claude Desktop on Windows + WSL, the server is registered as a local MCP extension that launches the WSL-side process:
-
-```
-command:  wsl.exe
-args:     -d Ubuntu-22.04 --exec bash -lc
-          "/home/<user>/t2s/.venv/bin/python /home/<user>/t2s/mcp/server.py"
-```
-
-With RTE running, the host discovers the `get_volatility` tool and routes natural-language volatility questions to it, while general questions (e.g. "what *is* annualized volatility?") are answered from the model's own knowledge without a tool call. See `mcp/README.md` for full wiring and troubleshooting notes.
-
-The server is intentionally minimal — one read-only tool — but the pattern extends directly to the other RTE query functions (`.rte.getOBI`, `.rte.getSpread`, `.rte.getOrderBook`) and to the history functions (`.rte.getVolHistory`, `.rte.getOBIHistory`), which return time series suitable for charting.
-
-## Dashboards
-
-Four KX Dashboard JSONs are provided in `dashboards/`:
-
-- `TradesQuotes.json` — live trade and quote tables
-- `Analytics.json` — VWAP, volatility, OBI charts
-- `FeedhandlerMonitoring.json` — FH connection state and message rates
-- `DataFlowMonitoring.json` — per-process throughput across the pipeline
-
-Import into KX Dashboards and point each panel at the appropriate process port.
 
 ## Backtest Framework
 
@@ -428,8 +338,6 @@ Range mode skips dates whose partition already exists (so backfills are idempote
 ```
 
 **ML feature pipeline (in progress).** `kdb/ml/` contains an in-progress implementation of feature engineering primitives from López de Prado's *Advances in Financial Machine Learning*. Currently includes dollar-imbalance bars (`afml.q`, `features.q`) — see `markdown_docs/dollar_imbalance_bars_guide.md` for design notes. Expect breaking changes.
-
-**Notebooks.** Jupyter notebooks for ad-hoc analysis live in `notebooks/`. They connect to the running processes or directly to the HDB.
 
 ## Documentation
 

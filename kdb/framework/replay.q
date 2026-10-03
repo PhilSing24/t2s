@@ -5,7 +5,7 @@
 //
 // Reads historical market events from hdb_binancedata/ and drives the
 // framework as if they were arriving live. Same framework code, different
-// driver - in a future live runner, CTP subscription would take this file's
+// driver - in a future live runner, a TP subscription would take this file's
 // place.
 //
 // Inputs (from caller):

@@ -284,7 +284,7 @@ upd:{[tbl;data]
   / Log first (durability), then publish (best-effort fanout).
   / If logging throws, we don't publish (consistent durable view).
   / Note: TP is a router, not a store - we do NOT insert into the local
-  / table copy. Subscribers (WDB, CTP) maintain the in-memory copies they
+  / table copy. Subscribers (WDB) maintain the in-memory copies they
   / need; TP just fans out.
   .tp.log[tbl; data];
   pubsub.publish[tbl; data];

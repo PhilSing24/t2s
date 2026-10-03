@@ -189,7 +189,7 @@
 // ----------------------------------------------------------------------------
 // Market event entry point
 //
-// Called by the replay driver (or, in a future live runner, by a CTP
+// Called by the replay driver (or, in a future live runner, by a TP
 // subscription handler) for each incoming trade event. Updates the virtual
 // clock first (injecting any due timer/funding events), then dispatches the
 // trade.

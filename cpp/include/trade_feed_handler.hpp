@@ -12,7 +12,7 @@
  * MarketConfig at construction. See ADR-013.
  *
  * Architecture role:
- *   Binance WebSocket -> [Trade Feed Handler] -> Tickerplant -> RDB/RTE
+ *   Binance WebSocket -> [Trade Feed Handler] -> Tickerplant -> WDB
  *
  * @see docs/decisions/adr-001-Timestamps-and-latency-measurement.md
  * @see docs/decisions/adr-002-Feed-handler-to-kdb-ingestion-path.md
