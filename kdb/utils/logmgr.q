@@ -5,6 +5,8 @@
 /   q kdb/utils/logmgr.q -retention            dry run: what would be deleted and why
 /   q kdb/utils/logmgr.q -retention -apply     delete what the dry run lists
 /   q kdb/utils/logmgr.q -summary              completeness of every log vs the HDB
+/   q kdb/utils/logmgr.q -check-eod [DATE]     one day (default yesterday): partition vs log,
+/                                              exit 0 if complete, 1 otherwise (for cron)
 / -
 / Retention policy. A day's log (and its .idx) is deleted only if ALL hold:
 /   (a) the HDB partition for that date exists
@@ -163,6 +165,19 @@ system "l ",.lm.dir,"/../schemas.q";
 / -------------------------------------------------------
 
 .lm.args:.z.x;
+if["-check-eod" in .lm.args;
+  i:.lm.args ? "-check-eod";
+  d:$[(i + 1) < count .lm.args; "D"$.lm.args i + 1; .z.d - 1];
+  if[null d; -2 "LOG: bad date"; exit 2];
+  if[() ~ key .log.logPath d;
+    -1 "LOG: check-eod ",string[d],": no log for that date in ",.log.cfg.logDir;
+    system "sleep 0.1"; exit 1];
+  a:.log.assess d;
+  -1 "LOG: check-eod ",string[d],": ",$[a `complete; "COMPLETE"; "INCOMPLETE"]," - ",a `reason;
+  -1 "LOG:   ",a `detail;
+  -1 "LOG:   log ",string[a `sizeMB]," MB, ",string[a `logRows]," rows; partition ",$[.log.partitionExists d; "present"; "MISSING"];
+  system "sleep 0.1";
+  exit $[a `complete; 0; 1]];
 if["-retention" in .lm.args;
   .log.retention["-apply" in .lm.args];
   system "sleep 0.1";
