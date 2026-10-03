@@ -623,11 +623,14 @@ endofday:{[]
 .wdb.readLogs:{[info]
   logDir:info `logDir;
   cutoff:info `cutoff;
-  / Per-table start: just above the floor, but never before the first
-  / tpSeqNo TP logged for that table today (a table WDB has never seen
-  / would otherwise force a scan from the top of the day).
+  / Per-table start: just above the floor. A table WDB has never seen
+  / (floor 0) starts at the first tpSeqNo TP logged for it today, or is
+  / skipped if TP logged nothing for it today; without that hint an idle
+  / table (e.g. futures on a spot-only run) would force a scan from the top
+  / of the day on every reconnect. The hint is NOT applied once a floor
+  / exists: the floor may sit in an earlier day's log.
   firstTp:info `firstTpSeqNo;
-  starts:{[t; firstTp] f:1 + .wdb.floor t; ft:firstTp t; $[null ft; 0Nj; f | ft]}[; firstTp] each .wdb.tables;
+  starts:{[t; firstTp] fl:.wdb.floor t; ft:firstTp t; $[fl > 0; 1 + fl; null ft; 0Nj; ft]}[; firstTp] each .wdb.tables;
   starts:starts where not null starts;
   if[0 = count starts; :`logs`seekOffset`segments`bytes`rows`ms!(`date$(); 0Nj; 0j; 0j; 0j; 0j)];
   startSeq:min starts;
@@ -677,7 +680,7 @@ endofday:{[]
   .wdb.stageFloor:.wdb.tables ! .wdb.floor each .wdb.tables;
   .wdb.stageCutoff:.wdb.replayCutoff;
   .wdb.replayAcc.segs:0j; .wdb.replayAcc.bytes:0j; .wdb.replayAcc.seek:0Nj;
-  r:@[.wdb.readLogs; info; {[e] `error, e}];
+  r:@[.wdb.readLogs; info; {[e] (`error; e)}];
   @[hdel; .wdb.replay.tmpFile; {}];
   if[(0h = type r) and (first r) ~ `error;
     .wdb.stats.replayFailures+:1;

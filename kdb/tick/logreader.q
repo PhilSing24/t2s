@@ -53,9 +53,8 @@
   .lr.fn::fn;
   old:upd;
   upd::{[t; d] .lr.fn[t; d]};
-  r:.[{-11! x}; enlist f; {[e] `error, e}];
+  r:.[{-11! x}; enlist f; {[e] (`error; e)}];
   upd::old;
-  if[10h = type r; '"logreader: replay failed: ", r];
   if[(0h = type r) and (first r) ~ `error; '"logreader: replay failed: ", last r];
   r};
 
