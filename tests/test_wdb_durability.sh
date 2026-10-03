@@ -282,8 +282,13 @@ begin_scenario 4 "missed midnight: rows land in their own date partitions" && {
     step -step publish -table quote_binance -rows 20 -date "$D_MINUS_1"
     start_wdb T2S_WDB_ROLL_GRACE_SEC=0 "T2S_WDB_FAKE_DATE=$D_MINUS_1"
     step -step assert_status -key replayRowsApplied -value 90
-    step -step assert_status -key bufferTrades -value 70
-    # WDB's own clock passes midnight: roll both past dates
+    # The startup roll runs right after the first replay: everything is
+    # flushed by date, and D-2 (a past date for a WDB whose today is D-1)
+    # is already in the HDB; D-1 rows sit in tmp.D-1.
+    step -step assert_partition -table trade_binance -date "$D_MINUS_2" -rows 40
+    step -step assert_tmp -table trade_binance -date "$D_MINUS_1" -rows 30
+    step -step assert_tmp -table quote_binance -date "$D_MINUS_1" -rows 20
+    # WDB's own clock passes midnight: roll D-1
     step -step set_clock -date "$TODAY"
     wait_roll 7
     step -step assert_partition -table trade_binance -date "$D_MINUS_2" -rows 40
@@ -335,9 +340,10 @@ begin_scenario 5 "TP restart on a new day with no log: counter continues, WDB he
     step -step assert_status -key status -value ok
     step -step assert_status -key duplicatesDropped -value 0
     step -step assert_status -key replayRowsApplied -value 20
-    step -step assert_status -key tradesRecv -value 10
-    # yesterday's tmp dir was rolled at start-up (it is a past date now)
+    # yesterday's tmp dir was rolled right after the first replay (it is a
+    # past date now); today's replayed rows were flushed by the same roll
     step -step assert_partition -table trade_binance -date "$D_MINUS_1" -rows 50
+    step -step assert_tmp -table trade_binance -date "$TODAY" -rows 10
     graceful_stop
     step -step assert_tmp -table trade_binance -date "$TODAY" -rows 10
     step -step assert_checkpoint -table trade_binance -date "$TODAY"

@@ -15,8 +15,14 @@
 /     for the interval flush, the roll, the manual flush, the graceful
 /     shutdown and the SIGTERM exit flush.
 /   - Every row received (live, replayed, or drained from the reconnect
-/     buffer) is dropped if its tpSeqNo is at or below the table's
-/     checkpoint, so a replay or a restart can never append duplicates.
+/     buffer) is dropped if its tpSeqNo is at or below the table's floor
+/     (checkpoint or in-memory buffer), so a replay or a restart can never
+/     append duplicates.
+/   - Replay reads TP's logs directly (kdb/tick/logreader.q), seeking with
+/     the index TP writes, across as many daily logs as the gap spans. TP's
+/     live path is never involved. Replayed rows are staged and only merged
+/     once every segment was read and validated; any error fails the replay
+/     explicitly, leaves the checkpoint untouched, and is retried later.
 /   - Nothing is dropped silently: duplicates, late rows and unexpected
 /     dates are logged and counted; counters are exposed in .health[] and
 /     .wdb.replayStatus[].
@@ -42,6 +48,14 @@
 / A row dated more than this many days before today is "unexpected" (it is
 / still written, to tmp.<date>, but counted and logged).
 .wdb.cfg.maxPastDays:7;
+/ The startup roll of past-date tmp dirs waits for the first successful
+/ replay (so rows for yesterday that arrive by replay are not "late"). If TP
+/ cannot be reached for this long, roll anyway. T2S_WDB_ROLL_FALLBACK_SEC
+/ is a test hook; production is 600.
+.wdb.cfg.rollFallbackSec:$[count v:getenv `T2S_WDB_ROLL_FALLBACK_SEC; "J"$v; 600];
+/ TEST HOOK: sleep this long after each replayed segment, to make a replay
+/ observable from outside (TP must stay live meanwhile). Production: 0.
+.wdb.cfg.replayDelayMs:$[count v:getenv `T2S_WDB_REPLAY_DELAY_MS; "J"$v; 0];
 
 / Enable compression for HDB writes
 / zstd, 2^17 block, level 1
@@ -78,6 +92,9 @@ system "g 0";
 .wdb.stats.unexpectedDateRows:0j;    / rows dated in the future or far in the past
 .wdb.stats.haltedRowsDropped:0j;     / rows dropped while halted (see .wdb.halted)
 .wdb.stats.checkpointBehindDisk:0j;  / startups where tmp.* held tpSeqNo above the checkpoint
+.wdb.stats.replayFailures:0j;        / replays that failed explicitly (nothing merged, checkpoint untouched)
+.wdb.lastReplayError:"";
+.wdb.lastReplay:`logs`seekOffset`segments`bytes`rows`ms!(`date$(); 0Nj; 0j; 0j; 0j; 0j);
 .wdb.lastRollDate:0Nd;
 
 / -------------------------------------------------------
@@ -98,6 +115,7 @@ system "g 0";
 / scheduled after the grace period.
 .wdb.currentDate:.wdb.today[];
 .wdb.rollDueAt:0Np;
+.wdb.startupRollDone:0b;
 
 / -------------------------------------------------------
 / Halt state (counter-goes-backwards safety net)
@@ -153,6 +171,10 @@ system "g 0";
 / -------------------------------------------------------
 .wdb.tmpDir:$[count v:getenv `T2S_TMP_DIR; v; "../"];
 .wdb.tmpPath:{[d] `$":",.wdb.tmpDir,"tmp.",string d};
+/ Scratch file for replayed log segments (see kdb/tick/logreader.q).
+.wdb.replay.tmpFile:`$":",.wdb.tmpDir,"wdb.replay.seg";
+
+\l logreader.q
 .wdb.parseTmpDate:{[entryStr]
   if[14 <> count entryStr; :0Nd];
   if[not "tmp." ~ 4#entryStr; :0Nd];
@@ -450,14 +472,14 @@ disksort:{[t;c;a]
   1b
  };
 
+/ Daily receive/flush counters reset at each roll. Replay counters are
+/ since-start and are left alone.
 .wdb.resetDailyStats:{[]
   .wdb.stats.flushCount:0j;
   .wdb.stats.rowsWritten:0j;
   .wdb.stats.tradesReceived:0j;
   .wdb.stats.aggTradesReceived:0j;
   .wdb.stats.quotesReceived:0j;
-  .wdb.stats.replayRowsApplied:0j;
-  .wdb.stats.replayDuplicatesFiltered:0j;
  };
 
 / Flush everything (so buffered rows for past dates land in their tmp dirs),
@@ -571,37 +593,116 @@ endofday:{[]
   0b
  };
 
+/ ---- Replay: read TP's logs directly, seek with the index, stage, merge ----
+
+/ Staging area: rows (pre-WDB-stamp lists) per table, kept until the whole
+/ replay has succeeded.
+.wdb.stage:.wdb.tables ! ((); (); ());
+.wdb.stageFloor:.wdb.tables ! 0 0 0j;
+.wdb.stageCutoff:0j;
+
+/ Called by the log reader for every chunk: keep rows strictly between the
+/ table's floor and the cutoff; everything else is either already on disk /
+/ in memory or will arrive live.
+/ A logged row has the schema's columns minus WDB's own wdbRecvTimeUtcNs.
+.wdb.logRowWidth:.wdb.tables ! {[t] -1 + count cols value t} each .wdb.tables;
+
+.wdb.stageRow:{[tbl; row]
+  if[not tbl in .wdb.tables; :()];
+  if[(count row) <> .wdb.logRowWidth tbl; :()];
+  seq:row .wdb.idx.tpSeqNo[tbl];
+  if[(seq > .wdb.stageFloor tbl) and seq <= .wdb.stageCutoff;
+    .wdb.stage[tbl],:enlist row];
+  };
+
+.wdb.afterSegment:{[]
+  if[.wdb.cfg.replayDelayMs > 0; system "sleep ",string .wdb.cfg.replayDelayMs % 1000]};
+
+/ Decide which logs to read and from where, then read them. Throws on any
+/ failure. Returns the lastReplay summary dict.
+.wdb.readLogs:{[info]
+  logDir:info `logDir;
+  cutoff:info `cutoff;
+  / Per-table start: just above the floor, but never before the first
+  / tpSeqNo TP logged for that table today (a table WDB has never seen
+  / would otherwise force a scan from the top of the day).
+  firstTp:info `firstTpSeqNo;
+  starts:{[t; firstTp] f:1 + .wdb.floor t; ft:firstTp t; $[null ft; 0Nj; f | ft]}[; firstTp] each .wdb.tables;
+  starts:starts where not null starts;
+  if[0 = count starts; :`logs`seekOffset`segments`bytes`rows`ms!(`date$(); 0Nj; 0j; 0j; 0j; 0j)];
+  startSeq:min starts;
+  if[startSeq > cutoff; :`logs`seekOffset`segments`bytes`rows`ms!(`date$(); 0Nj; 0j; 0j; 0j; 0j)];
+  dates:.lr.listLogs logDir;
+  if[0 = count dates; '"replay: no logs in ", logDir];
+  tpToday:info `today;
+  / Newest log whose first tpSeqNo is at or below startSeq; read it and
+  / every newer one. A log that is empty or whose first row is above
+  / startSeq is skipped as a candidate for the start but still read if newer.
+  firsts:{[logDir; d] .lr.firstSeq[.lr.logPath[logDir; d]; .wdb.replay.tmpFile]}[logDir] each dates;
+  cand:where (not null firsts) and firsts <= startSeq;
+  startIdx:$[count cand; last cand; 0];
+  toRead:startIdx _ dates;
+  -1 raze ("WDB: replay from tpSeqNo "; string startSeq; " to "; string cutoff; " over log(s) "; " " sv string toRead);
+  t0:.z.p; segs:0j; bytes:0j; seekOff:0Nj;
+  {[logDir; tpToday; startSeq; info; d]
+    f:.lr.logPath[logDir; d];
+    / Today's log is still being written: read only to the length TP
+    / reported as committed at cutoff time. Older logs are closed.
+    endOffset:$[d = tpToday; info `committedBytes; hcount f];
+    r:.lr.replayFrom[f; startSeq; endOffset; .wdb.replay.tmpFile; .wdb.stageRow; .wdb.afterSegment];
+    -1 raze ("WDB: replayed "; string d; " from offset "; string r `seekOffset; " to "; string r `endOffset;
+             " ("; string r `segments; " segment(s), "; string r `bytes; " bytes)");
+    .wdb.replayAcc.segs+:r `segments; .wdb.replayAcc.bytes+:r `bytes;
+    if[null .wdb.replayAcc.seek; .wdb.replayAcc.seek:r `seekOffset];
+   }[logDir; tpToday; startSeq; info] each toRead;
+  `logs`seekOffset`segments`bytes`rows`ms!(toRead; .wdb.replayAcc.seek; .wdb.replayAcc.segs; .wdb.replayAcc.bytes;
+                                            sum count each .wdb.stage; `long$(.z.p - t0) % 1000000)
+ };
+
 .wdb.runReplay:{[h]
   -1 raze ("WDB: starting replay - checkpoint: trade="; string .wdb.lastTpSeqNo`trade_binance;
            " aggTrade="; string .wdb.lastTpSeqNo`trade_binance_fut;
            " quote="; string .wdb.lastTpSeqNo`quote_binance;
            " date="; string .wdb.checkpointDate);
-  .wdb.replayCutoff:h ".tp.currentSeqNo[]";
-  -1 raze ("WDB: replay cutoff = "; string .wdb.replayCutoff);
+  info:h ".tp.replayInfo[]";
+  .wdb.replayCutoff:info `cutoff;
+  -1 raze ("WDB: replay cutoff = "; string .wdb.replayCutoff; ", TP logs in "; info `logDir;
+           ", today's log committed to "; string info `committedBytes; " bytes");
   if[not .wdb.checkCounterReset .wdb.replayCutoff;
     / Halted: discard the live buffer (counted) and stay out of replay mode
     {[tbl] n:count .wdb.replayLiveBuffer[tbl]; .wdb.stats.haltedRowsDropped+:n; .wdb.replayLiveBuffer[tbl]:()} each .wdb.tables;
     .wdb.replayMode:0b; .wdb.replayCutoff:0j;
-    :()];
-  {[h;tbl]
-    fromSeq:1 + .wdb.floor tbl;
-    if[.wdb.replayCutoff < fromSeq;
-      -1 raze ("WDB: nothing to replay for "; string tbl;
-               " (cutoff "; string .wdb.replayCutoff; " < fromSeq "; string fromSeq; ")");
-      :()];
-    replayRows:h (`.tp.replayFrom; tbl; fromSeq);
-    -1 raze ("WDB: replaying "; string count replayRows; " "; string tbl;
-             " rows from tpSeqNo "; string fromSeq);
-    {[tbl;rowDict] .wdb.ingest[tbl; value rowDict; `replay]}[tbl;] each replayRows;
-  }[h;] each .wdb.tables;
+    :1b];
+  .wdb.stage:.wdb.tables ! ((); (); ());
+  .wdb.stageFloor:.wdb.tables ! .wdb.floor each .wdb.tables;
+  .wdb.stageCutoff:.wdb.replayCutoff;
+  .wdb.replayAcc.segs:0j; .wdb.replayAcc.bytes:0j; .wdb.replayAcc.seek:0Nj;
+  r:@[.wdb.readLogs; info; {[e] `error, e}];
+  @[hdel; .wdb.replay.tmpFile; {}];
+  if[(0h = type r) and (first r) ~ `error;
+    .wdb.stats.replayFailures+:1;
+    .wdb.lastReplayError:last r;
+    -1 raze ("WDB: REPLAY FAILED - "; last r; " - nothing merged, checkpoint untouched, will retry");
+    .wdb.stage:.wdb.tables ! ((); (); ());
+    {[tbl] .wdb.replayLiveBuffer[tbl]:()} each .wdb.tables;
+    .wdb.replayMode:0b; .wdb.replayCutoff:0j;
+    :0b];
+  / Every segment read and validated: merge staged rows through the normal
+  / dedupe + buffer path, then drain what arrived live meanwhile.
+  {[tbl] .wdb.ingest[tbl;;`replay] each .wdb.stage[tbl]} each .wdb.tables;
+  -1 raze ("WDB: replay merged "; string r `rows; " rows from "; string count r `logs; " log(s) in "; string r `ms; " ms");
+  .wdb.stage:.wdb.tables ! ((); (); ());
+  .wdb.lastReplay:r;
+  .wdb.lastReplayError:"";
   .wdb.drainLiveBuffer each .wdb.tables;
   .wdb.replayMode:0b;
   .wdb.replayCutoff:0j;
   -1 "WDB: replay complete, switching to live mode";
+  1b
  };
 
 .wdb.replayStatus:{[]
-  `lastTpSeqNoTrade`lastTpSeqNoAggTrade`lastTpSeqNoQuote`checkpointDate`replayMode`replayCutoff`replayRowsApplied`replayDupsFiltered`duplicatesDropped`lateRows`unexpectedDateRows`checkpointBehindDisk`halted`haltReason`haltedRowsDropped`lastRollDate`bufferTrades`bufferAggTrades`bufferQuotes!(
+  `lastTpSeqNoTrade`lastTpSeqNoAggTrade`lastTpSeqNoQuote`checkpointDate`replayMode`replayCutoff`replayRowsApplied`replayDupsFiltered`duplicatesDropped`lateRows`unexpectedDateRows`checkpointBehindDisk`replayFailures`lastReplayError`lastReplayLogs`lastReplaySeekOffset`lastReplaySegments`lastReplayBytes`lastReplayRows`lastReplayMs`halted`haltReason`haltedRowsDropped`lastRollDate`bufferTrades`bufferAggTrades`bufferQuotes!(
     .wdb.lastTpSeqNo`trade_binance;
     .wdb.lastTpSeqNo`trade_binance_fut;
     .wdb.lastTpSeqNo`quote_binance;
@@ -614,6 +715,14 @@ endofday:{[]
     .wdb.stats.lateRows;
     .wdb.stats.unexpectedDateRows;
     .wdb.stats.checkpointBehindDisk;
+    .wdb.stats.replayFailures;
+    .wdb.lastReplayError;
+    .wdb.lastReplay `logs;
+    .wdb.lastReplay `seekOffset;
+    .wdb.lastReplay `segments;
+    .wdb.lastReplay `bytes;
+    .wdb.lastReplay `rows;
+    .wdb.lastReplay `ms;
     .wdb.halted;
     .wdb.haltReason;
     .wdb.stats.haltedRowsDropped;
@@ -648,8 +757,7 @@ endofday:{[]
     -1 "WDB: Subscribed to ",string first first res;
     res:h(`pubsub.subscribe;`quote_binance;`);
     -1 "WDB: Subscribed to ",string first first res;
-    .wdb.runReplay[h];
-    1b
+    .wdb.runReplay[h]
   }; h; {[err]
     .wdb.replayMode:: 0b;
     -1 "WDB: Subscription/replay failed - ",err;
@@ -665,6 +773,10 @@ endofday:{[]
   .wdb.conn.state:`connected;
   .wdb.conn.retryCount:0;
   -1 "WDB: Connected successfully (handle ",string[h],")";
+  / First successful connect + replay: now roll any past-date tmp dirs.
+  if[not .wdb.startupRollDone;
+    .wdb.startupRollDone:1b;
+    .wdb.roll["startup, after first replay"]];
   1b
   };
 
@@ -707,11 +819,12 @@ upd:{[tbl;data]
 .health:{[]
   memMB:(`long$.Q.w[][`used]) % 1000000;
   st:$[.wdb.halted; `error;
+       (.wdb.conn.state <> `connected) and 0 < count .wdb.lastReplayError; `error;
        .wdb.conn.state = `connected;
          $[(.wdb.stats.lateRows > 0) or .wdb.stats.unexpectedDateRows > 0; `degraded; `ok];
        .wdb.conn.state = `connecting; `degraded;
        `disconnected];
-  `process`port`uptime`status`connState`memMB`tradesRecv`aggTradesRecv`quotesRecv`flushes`rowsWritten`bufferTrades`bufferAggTrades`bufferQuotes`duplicatesDropped`lateRows`unexpectedDateRows`halted`haltedRowsDropped`lastRollDate!(
+  `process`port`uptime`status`connState`memMB`tradesRecv`aggTradesRecv`quotesRecv`flushes`rowsWritten`bufferTrades`bufferAggTrades`bufferQuotes`duplicatesDropped`lateRows`unexpectedDateRows`replayFailures`halted`haltedRowsDropped`lastRollDate!(
     `wdb;
     .wdb.cfg.port;
     `second$.z.p - .proc.startTime;
@@ -729,6 +842,7 @@ upd:{[tbl;data]
     .wdb.stats.duplicatesDropped;
     .wdb.stats.lateRows;
     .wdb.stats.unexpectedDateRows;
+    .wdb.stats.replayFailures;
     .wdb.halted;
     .wdb.stats.haltedRowsDropped;
     .wdb.lastRollDate
@@ -806,6 +920,10 @@ upd:{[tbl;data]
 
 .z.ts:{[]
   if[null .wdb.conn.handle; .wdb.connect[]];
+  if[(not .wdb.startupRollDone) and (.z.p - .proc.startTime) > `long$.wdb.cfg.rollFallbackSec * 1000000000;
+    .wdb.startupRollDone:1b;
+    -1 raze ("WDB: no replay within "; string .wdb.cfg.rollFallbackSec; "s of start - rolling past-date tmp dirs anyway");
+    .wdb.roll["startup fallback"]];
   .wdb.checkRoll[];
   };
 
@@ -837,9 +955,10 @@ cp:.wdb.loadCheckpoint[];
 .wdb.checkpointDate:cp 1;
 .wdb.reconcileCheckpointWithDisk[];
 
-/ Roll any tmp.<date> left behind by a previous run (orphan recovery) before
-/ accepting live data.
-.wdb.roll["startup"];
+/ Past-date tmp dirs left by a previous run are rolled after the first
+/ successful replay (see .wdb.connect), or after rollFallbackSec without one.
+pending:.wdb.pendingTmpDates[];
+if[count pending; -1 raze ("WDB: "; string count pending; " past-date tmp dir(s) pending roll after first replay: "; " " sv string pending)];
 
 connected:.wdb.connect[];
 

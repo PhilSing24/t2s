@@ -21,6 +21,11 @@
 /     a handle that never registered are accepted and counted
 /     (unregisteredRows); a backward fhSeqNo inside one session is accepted
 /     and counted (outOfOrder).
+/   - Replay never runs inside TP. TP writes a seek index next to each log
+/     (<date>.idx, one entry per .tp.cfg.indexEvery rows) and answers
+/     .tp.replayInfo[] with the log dir, the committed length of today's
+/     log and the current tpSeqNo; WDB reads the logs itself (see
+/     kdb/tick/logreader.q). The live path is never blocked by a replay.
 
 / -------------------------------------------------------
 / Configuration
@@ -37,6 +42,15 @@
 / must never delete it (see .tp.seq.* below and the README).
 .tp.cfg.seqFile:hsym `$ $[count v:getenv `T2S_TP_SEQ_FILE; v; .tp.cfg.logDir,"/tp.tpSeqNo"];
 .tp.cfg.seqReserve:10000;
+
+/ Replay index: one (tpSeqNo; byte offset; chunk) entry per this many rows,
+/ written next to the log as <date>.idx, so WDB can seek instead of
+/ rescanning the day. See kdb/tick/logreader.q.
+.tp.cfg.indexEvery:$[count v:getenv `T2S_TP_INDEX_EVERY; "J"$v; 10000];   / env: test hook
+
+/ Disk-space health: .health[] degrades when the log dir's filesystem has
+/ less than this many MB free. T2S_TP_MIN_FREE_MB overrides; default 5 GB.
+.tp.cfg.minFreeMB:$[count v:getenv `T2S_TP_MIN_FREE_MB; "J"$v; 5120];
 
 / WDB's checkpoint, read-only, only to warn at migration time if the seeded
 / counter would be below what WDB has already persisted (WDB would halt).
@@ -105,6 +119,38 @@ pubsub.init[]
 
 .tp.logFilePath:{[] hsym`$(.tp.cfg.logDir,"/",string[.tp.today[]],".log")};
 
+/ ---- seek index for the current log ----
+.tp.idx.entries:([] tpSeqNo:`long$(); offset:`long$(); chunk:`long$());
+.tp.idx.forceNext:1b;      / record an entry at the first write after (re)open
+
+.tp.idx.filePath:{[logFile] hsym `$ (-4 _ 1 _ string logFile),".idx"};
+
+.tp.idx.load:{[logFile]
+  f:.tp.idx.filePath logFile;
+  if[() ~ key f; :0#.tp.idx.entries];
+  r:@[get; f; {[e] `error}];
+  $[(not r ~ `error) and 98h = type r; r; 0#.tp.idx.entries]};
+
+/ Atomic rewrite (temp file + rename); the table is a few hundred rows a day.
+.tp.idx.save:{[]
+  f:.tp.idx.filePath .tp.logFile;
+  fStr:1 _ string f;
+  tmpFile:hsym `$ fStr,".tmp";
+  r:.[set; (tmpFile; .tp.idx.entries); {[e] -1 "TP: ERROR writing index - ",e; `error}];
+  if[r ~ `error; :()];
+  @[{[c] system c; 1b}; "mv ",fStr,".tmp ",fStr; {[e] -1 "TP: ERROR renaming index - ",e; 0b}];
+  };
+
+/ Called before each chunk is written: record (tpSeqNo of the chunk; its
+/ byte offset; its chunk number) every indexEvery chunks, and always for the
+/ first chunk after the log is opened so a restart point is seekable.
+.tp.idx.maybeRecord:{[seq]
+  if[.tp.idx.forceNext or 0 = .tp.logCount mod .tp.cfg.indexEvery;
+    .tp.idx.forceNext:0b;
+    .tp.idx.entries,:(seq; hcount .tp.logFile; .tp.logCount);
+    .tp.idx.save[]];
+  };
+
 .tp.initLog:{[f]
   if[0=@[hcount;f;0j];f set()];
   hopen f
@@ -116,7 +162,10 @@ pubsub.init[]
   .tp.logFile:.tp.logFilePath[];
   .tp.logHandle:.tp.initLog[.tp.logFile];
   .tp.logCount:@[{-11!(-2;x)};.tp.logFile;0j];
-  -1"TP: Log file: ",string[.tp.logFile]," (",string[.tp.logCount]," chunks)";
+  if[0h = type .tp.logCount; .tp.logCount:first .tp.logCount];   / (chunks; bytes) if the tail is bad
+  .tp.idx.entries:.tp.idx.load .tp.logFile;
+  .tp.idx.forceNext:1b;
+  -1"TP: Log file: ",string[.tp.logFile]," (",string[.tp.logCount]," chunks, ",string[count .tp.idx.entries]," index entries)";
   };
 
 .tp.closeLog:{[]
@@ -127,6 +176,7 @@ pubsub.init[]
 .tp.log:{[tbl;data]
   if[not .tp.cfg.logEnabled;:()];
   if[tbl=`health_feed_handler;:()];
+  .tp.idx.maybeRecord[last data];
   .tp.logHandle enlist(`upd;tbl;data);
   .tp.logCount+:1;
   };
@@ -233,6 +283,7 @@ pubsub.init[]
 
 / Per-table state
 .tp.seq.last:.tp.tables ! 0N 0N 0Nj;        / last accepted fhSeqNo
+.tp.seq.firstTp:.tp.tables ! 0N 0N 0Nj;     / first tpSeqNo logged today per table (replay start hint)
 .tp.session.id:.tp.tables ! 0N 0N 0Nj;      / current sessionId
 .tp.session.handle:.tp.tables ! 0N 0N 0Ni;  / handle of the current session (0N when away)
 .tp.handleTable:(`int$())!`symbol$();       / registered handle -> table
@@ -354,6 +405,7 @@ upd:{[tbl;data]
   .tp.checkSeq[tbl; data .tp.idx.fhSeqNo tbl];
   / Append TP-side fields: tpRecvTimeUtcNs, tpSeqNo (the last two schema columns)
   data:data, (.tp.tsToNs[.z.p]; .tp.nextSeqNo[]);
+  if[null .tp.seq.firstTp tbl; .tp.seq.firstTp[tbl]:last data];
   / Log first (durability), then publish (best-effort fanout). TP is a
   / router, not a store: it does not insert into the local table copies.
   .tp.log[tbl; data];
@@ -395,41 +447,41 @@ upd:{[tbl;data]
 / temporary upd; rows whose width does not match the schema are ignored.
 .tp.scan.tpMax:0j;
 .tp.scan.fhLast:.tp.tables ! 0N 0N 0Nj;
+.tp.scan.tpFirst:.tp.tables ! 0N 0N 0Nj;
 .tp.scanUpd:{[t;d]
   if[not t in .tp.tables; :()];
   if[(count d) <> count cols value t; :()];
   .tp.scan.tpMax:.tp.scan.tpMax | last d;
   .tp.scan.fhLast[t]:d .tp.idx.fhSeqNo t;
+  if[null .tp.scan.tpFirst t; .tp.scan.tpFirst[t]:last d];
  };
 .tp.scanLog:{[f]
   .tp.scan.tpMax:0j;
   .tp.scan.fhLast:.tp.tables ! 0N 0N 0Nj;
+  .tp.scan.tpFirst:.tp.tables ! 0N 0N 0Nj;
   oldUpd:upd;
   upd::.tp.scanUpd;
   .[{-11!x}; enlist f; {[err] -1 "TP: log scan error: ",err}];
   upd::oldUpd;
-  (.tp.scan.tpMax; .tp.scan.fhLast)
+  (.tp.scan.tpMax; .tp.scan.fhLast; .tp.scan.tpFirst)
  };
 
-/ Replay support: rows for `tbl` with tpSeqNo >= fromSeq from today's log.
-/ Used by WDB on reconnect. (Reading only today's log and the full rescan
-/ are known limitations addressed in a later step.)
-.tp.replayFrom:{[tbl; fromSeq]
-  logFile:.tp.logFilePath[];
-  if[() ~ key logFile; :0#value tbl];
-  .tp.replayScratch::0#value tbl;
-  .tp.replayTarget::tbl;
-  oldUpd:upd;
-  upd::{[t;d]
-    if[t = .tp.replayTarget;
-      if[(count d) = count cols value t;
-        .tp.replayScratch,::enlist d]]};
-  .[{-11!x}; enlist logFile; {[err] -1 raze ("TP: replayFrom error: "; err)}];
-  upd::oldUpd;
-  result:select from .tp.replayScratch where tpSeqNo >= fromSeq;
-  delete replayScratch from `.tp;
-  delete replayTarget from `.tp;
-  result
+/ Replay support. TP does not read its logs for anyone: it tells WDB where
+/ they are and how far today's log is committed, and WDB reads them itself
+/ with the index (kdb/tick/logreader.q). committedBytes is the length of
+/ today's log at this instant; every write is synchronous, so everything
+/ below it is complete. firstTpSeqNo gives, per table, the first tpSeqNo
+/ logged today (null if none), so a subscriber that has never seen a table
+/ knows where that table's rows start instead of scanning from the top.
+.tp.replayInfo:{[]
+  `logDir`today`todayLog`committedBytes`cutoff`indexEvery`firstTpSeqNo!(
+    first system "realpath -m ",.tp.cfg.logDir;
+    .tp.today[];
+    string .tp.logFilePath[];
+    @[hcount; .tp.logFilePath[]; 0j];
+    .tp.tpSeqNo;
+    .tp.cfg.indexEvery;
+    .tp.seq.firstTp)
  };
 
 / Recover per-table last fhSeqNo from today's log so gap detection spans a
@@ -439,6 +491,7 @@ upd:{[tbl;data]
   if[() ~ key logFile; -1 "TP: no log for today - no fhSeqNo to recover"; :()];
   r:.tp.scanLog[logFile];
   .tp.seq.last:r 1;
+  .tp.seq.firstTp:r 2;
   -1 raze ("TP: recovered fhSeqNo of the last logged row per table: "; .Q.s1 .tp.seq.last;
            " (log max tpSeqNo "; string r 0; ")");
   if[(r 0) > .tp.tpSeqNo;
@@ -449,6 +502,21 @@ upd:{[tbl;data]
  };
 
 / -------------------------------------------------------
+/ Disk-space health
+/ -------------------------------------------------------
+.tp.disk.freeMB:0Nj;
+.tp.disk.check:{[]
+  r:@[system; "df -Pk ",.tp.cfg.logDir; {[e] ()}];
+  if[2 > count r; .tp.disk.freeMB:0Nj; :()];
+  toks:{x where 0 < count each x} " " vs r 1;
+  if[4 > count toks; .tp.disk.freeMB:0Nj; :()];
+  .tp.disk.freeMB:("J"$toks 3) div 1024;
+  if[.tp.disk.freeMB < .tp.cfg.minFreeMB;
+    -1 raze ("TP: WARNING low disk space for logs: "; string .tp.disk.freeMB; " MB free (threshold "; string .tp.cfg.minFreeMB; " MB)")];
+  };
+.tp.disk.low:{[] (not null .tp.disk.freeMB) and .tp.disk.freeMB < .tp.cfg.minFreeMB};
+
+/ -------------------------------------------------------
 / Status and Monitoring
 / -------------------------------------------------------
 
@@ -456,8 +524,9 @@ upd:{[tbl;data]
 .health:{[]
   st:$[((sum .tp.ctr.schemaMismatch) + .tp.ctr.rejectedRegistrations) > 0; `degraded;
        (sum .tp.ctr.gaps) > 0; `degraded;
+       .tp.disk.low[]; `degraded;
        `ok];
-  `process`port`uptime`status`memMB`msgsIn`msgsOut`tpSeqNo`gaps`missed`restarts`reconnects`outOfOrder`unregisteredRows`schemaMismatch`rejectedRegistrations!(
+  `process`port`uptime`status`memMB`msgsIn`msgsOut`tpSeqNo`gaps`missed`restarts`reconnects`outOfOrder`unregisteredRows`schemaMismatch`rejectedRegistrations`diskFreeMB`diskLow!(
     `tp;
     .tp.cfg.port;
     `second$.z.p - .proc.startTime;
@@ -473,7 +542,9 @@ upd:{[tbl;data]
     sum .tp.ctr.outOfOrder;
     sum .tp.ctr.unregisteredRows;
     sum .tp.ctr.schemaMismatch;
-    .tp.ctr.rejectedRegistrations)
+    .tp.ctr.rejectedRegistrations;
+    .tp.disk.freeMB;
+    .tp.disk.low[])
   }
 
 / Per-table detail table
@@ -537,6 +608,7 @@ upd:{[tbl;data]
   .tp.ctr.outOfOrder:.tp.tables ! 0 0 0j;
   .tp.ctr.unregisteredRows:.tp.tables ! 0 0 0j;
   .tp.ctr.schemaMismatch:.tp.tables ! 0 0 0j;
+  .tp.seq.firstTp:.tp.tables ! 0N 0N 0Nj;
  };
 
 .tp.currentDate:.tp.today[];
@@ -549,7 +621,12 @@ upd:{[tbl;data]
   ];
   };
 
-.z.ts:{[] .tp.checkEOD[] };
+.tp.ticks:0j;
+.z.ts:{[]
+  .tp.checkEOD[];
+  .tp.ticks+:1;
+  if[0 = .tp.ticks mod 60; .tp.disk.check[]];
+  };
 
 / -------------------------------------------------------
 / Startup
@@ -562,6 +639,7 @@ system"p ",string .tp.cfg.port;
 .tp.seq.load[];
 .tp.recoverFhSeq[];
 .tp.openLog[];
+.tp.disk.check[];
 
 system "t 1000";   / EOD check every second
 
@@ -571,6 +649,7 @@ system "t 1000";   / EOD check every second
 -1"Tables: ",(" " sv string .tp.tables)," health_feed_handler";
 -1"Schema: kdb/schemas.q; FH row widths ",.Q.s1[.tp.fhWidth];
 -1"tpSeqNo: ",string[.tp.tpSeqNo]," reserved to ",string[.tp.seq.reserved]," in ",string .tp.cfg.seqFile;
+-1"Replay index: every ",string[.tp.cfg.indexEvery]," rows; disk free ",string[.tp.disk.freeMB]," MB (threshold ",string[.tp.cfg.minFreeMB]," MB)";
 -1"";
 -1"Monitoring:";
 -1"  .health[]            / Standardized health check";
@@ -584,7 +663,7 @@ system "t 1000";   / EOD check every second
 -1"";
 -1"Subscriber API:";
 -1"  .tp.currentSeqNo[]             / Current monotonic tpSeqNo (replay cutoff)";
--1"  .tp.replayFrom[tbl; fromSeq]   / Replay subset from today's log";
+-1"  .tp.replayInfo[]               / Log dir, committed length, cutoff, index step (WDB reads the logs itself)";
 -1"";
 -1"TP ready";
 -1"=======================================================";
