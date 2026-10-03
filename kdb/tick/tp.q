@@ -4,8 +4,11 @@
 / Configuration
 / -------------------------------------------------------
 
-.tp.cfg.port:5010;
-.tp.cfg.logDir:"logs";
+/ Port and log directory can be overridden by environment variables so a
+/ test harness can sandbox the process without editing this file. Defaults
+/ are the production values.
+.tp.cfg.port:$[count v:getenv `T2S_TP_PORT; "J"$v; 5010];
+.tp.cfg.logDir:$[count v:getenv `T2S_TP_LOG_DIR; v; "logs"];
 .tp.cfg.logEnabled:1b;
 
 system "g 0";

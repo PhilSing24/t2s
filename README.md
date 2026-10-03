@@ -194,6 +194,18 @@ Feed handler runtime config lives in `config/`:
 
 Each q process has its own config block at the top of its file (e.g. `.tp.cfg`, `.wdb.cfg`). Edit and reload to change ports, retention, batch intervals, etc.
 
+Paths and ports can also be set per process through environment variables, which is how the test suite sandboxes TP and WDB without editing source. Unset variables fall back to the defaults below.
+
+| Variable             | Process | Default                     | Meaning                                  |
+|----------------------|---------|-----------------------------|------------------------------------------|
+| `T2S_TP_PORT`        | TP      | `5010`                      | Listen port                              |
+| `T2S_TP_LOG_DIR`     | TP      | `logs` (relative to cwd)    | Durability log directory                 |
+| `T2S_WDB_PORT`       | WDB     | `5011`                      | Listen port                              |
+| `T2S_WDB_TP_PORT`    | WDB     | `5010`                      | Port of the TP to subscribe to           |
+| `T2S_HDB_DIR`        | WDB     | `../hdb` (relative to cwd)  | HDB root for EOD partitions and sym file |
+| `T2S_TMP_DIR`        | WDB     | `../` (relative to cwd)     | Parent of the intraday `tmp.<date>` dirs |
+| `T2S_WDB_CHECKPOINT` | WDB     | `$T2S_TMP_DIR/wdb.lastTpSeqNo` | Replay checkpoint file                |
+
 Pipeline-wide table schemas live in `kdb/schemas.q` and are loaded by every q process. Adding or modifying a column there propagates everywhere on the next restart; field indices used by TP gap detection and WDB replay are derived from the schema (no magic numbers).
 
 ## Tests

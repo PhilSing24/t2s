@@ -6,8 +6,10 @@
 / Configuration
 / -------------------------------------------------------
 
-.wdb.cfg.port:5011;
-.wdb.cfg.tpPort:5010;
+/ Ports can be overridden by environment variables so a test harness can
+/ sandbox the process without editing this file. Defaults are production.
+.wdb.cfg.port:$[count v:getenv `T2S_WDB_PORT; "J"$v; 5011];
+.wdb.cfg.tpPort:$[count v:getenv `T2S_WDB_TP_PORT; "J"$v; 5010];
 / HDB directory: read from env var, fall back to a relative path.
 / Override at launch with T2S_HDB_DIR=/path/to/hdb (recommended: absolute path).
 .wdb.cfg.hdbDir:hsym `$ $[count v:getenv `T2S_HDB_DIR; v; "../hdb"];
@@ -51,7 +53,8 @@ system "g 0";
 
 / Checkpoint file: small file persisted alongside the tmp directory.
 / Uses T2S_TMP_DIR if set (same env var as TMPSAVE) for consistency.
-.wdb.cfg.checkpointFile:hsym `$ raze ($[count v:getenv `T2S_TMP_DIR; v; "../"]; "wdb.lastTpSeqNo");
+/ T2S_WDB_CHECKPOINT overrides the full path (used by the test harness).
+.wdb.cfg.checkpointFile:hsym `$ $[count v:getenv `T2S_WDB_CHECKPOINT; v; raze ($[count v:getenv `T2S_TMP_DIR; v; "../"]; "wdb.lastTpSeqNo")];
 
 / Highest tpSeqNo successfully flushed to disk PER TABLE. Loaded from
 / checkpoint on startup, advanced after each table's flush, persisted on
