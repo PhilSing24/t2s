@@ -1,0 +1,94 @@
+#!/bin/bash
+# status.sh - the pipeline in a few lines: processes, TP and WDB health,
+# rows today, the counters that matter, disk, logs, clock, and an
+# "attention" list. Exit code 1 when anything needs attention (so it can
+# run from cron), 0 otherwise.
+#
+# Paths and ports come from the environment the processes use
+# (T2S_TP_LOG_DIR, T2S_HDB_DIR, T2S_TMP_DIR, T2S_TP_PORT, T2S_WDB_PORT)
+# with the same defaults.
+
+set -u
+BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SESSION="t2s"
+PORT_TP=${T2S_TP_PORT:-5010}
+PORT_WDB=${T2S_WDB_PORT:-5011}
+LOG_DIR=${T2S_TP_LOG_DIR:-$BASEDIR/kdb/tick/logs}
+TMP_DIR=${T2S_TMP_DIR:-$BASEDIR/kdb/}
+HDB_DIR=${T2S_HDB_DIR:-$BASEDIR/hdb}
+CLOCK_DRIFT_WARN_SEC=2
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+ATTN=()
+note() { ATTN+=("$1"); }
+
+echo "t2s status  $(date -u +%Y-%m-%dT%H:%M:%SZ)  ($BASEDIR)"
+
+# ---------------- processes ----------------
+listener() { lsof -ti TCP:"$1" -sTCP:LISTEN 2>/dev/null | head -1; }
+fh_pid()   { pgrep -f "^(\./)?build/$1( |$)" 2>/dev/null | head -1; }
+TP_PID=$(listener "$PORT_TP"); WDB_PID=$(listener "$PORT_WDB")
+SPOT=$(fh_pid trade_feed_handler); FUT=$(fh_pid trade_feed_handler_fut); QUOTE=$(fh_pid quote_feed_handler)
+up() { if [[ -n "$2" ]]; then echo -n "$1 up(pid $2)  "; else echo -n "$1 DOWN  "; fi; }
+echo -n "PROC : "; up tp "$TP_PID"; up wdb "$WDB_PID"; up spot-fh "$SPOT"; up fut-fh "$FUT"; up quote-fh "$QUOTE"
+if tmux has-session -t $SESSION 2>/dev/null; then echo "tmux:$SESSION"; else echo "tmux:none"; fi
+[[ -z "$TP_PID" ]]  && note "TP is down"
+[[ -z "$WDB_PID" ]] && note "WDB is down"
+MARKETS=$(cat "$BASEDIR/run/markets.active" 2>/dev/null || echo "")
+if [[ -n "$TP_PID" ]]; then
+    [[ "$MARKETS" == *spot* && -z "$SPOT" ]] && note "spot trade handler is down (markets.active=$MARKETS)"
+    [[ "$MARKETS" == *futures* && -z "$FUT" ]] && note "futures trade handler is down (markets.active=$MARKETS)"
+    [[ -z "$QUOTE" ]] && note "quote handler is down"
+fi
+
+# ---------------- TP / WDB internals ----------------
+T2S_TP_PORT=$PORT_TP T2S_WDB_PORT=$PORT_WDB T2S_TMP_DIR="$TMP_DIR" q "$BASEDIR/kdb/utils/status.q" < /dev/null 2>/dev/null
+QRC=$?
+# status.q prints its own ATTN lines; fold its verdict into ours
+[[ $QRC -ne 0 ]] && note "see the items reported by TP/WDB above"
+
+# ---------------- disk, logs, tmp ----------------
+if [[ -d "$LOG_DIR" ]]; then
+    FREE=$(df -Pk "$LOG_DIR" 2>/dev/null | awk 'NR==2{printf "%.1f", $4/1048576}')
+    LOGS=$(du -sh "$LOG_DIR" 2>/dev/null | cut -f1)
+    NLOGS=$(ls "$LOG_DIR"/*.log 2>/dev/null | wc -l)
+    echo "DISK : ${FREE:-?} GB free on the log filesystem; $LOG_DIR holds $NLOGS log(s), $LOGS"
+else
+    echo "DISK : log dir $LOG_DIR missing"; note "log dir missing"
+fi
+PENDING=$(ls -d "$TMP_DIR"/tmp.* 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')
+TODAY=$(date -u +%Y.%m.%d)
+OLD_TMP=""
+for t in $PENDING; do [[ "$t" != "tmp.$TODAY" ]] && OLD_TMP="$OLD_TMP $t"; done
+echo "TMP  : ${PENDING:-none}  (HDB partitions: $(ls -d "$HDB_DIR"/????.??.?? 2>/dev/null | wc -l), latest $(ls -d "$HDB_DIR"/????.??.?? 2>/dev/null | tail -1 | xargs -n1 basename 2>/dev/null))"
+[[ -n "$OLD_TMP" ]] && note "past-date tmp dir(s) not rolled:$OLD_TMP"
+
+# ---------------- clock (WSL vs Windows host) ----------------
+if command -v powershell.exe >/dev/null 2>&1; then
+    WIN=$(powershell.exe -NoProfile -Command "[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()" 2>/dev/null | tr -d '\r\n ')
+    LIN=$(date -u +%s)
+    if [[ "$WIN" =~ ^[0-9]+$ ]]; then
+        DRIFT=$(( LIN - WIN ))
+        ADRIFT=${DRIFT#-}
+        if (( ADRIFT > CLOCK_DRIFT_WARN_SEC )); then
+            echo -e "CLOCK: ${RED}WSL clock is ${DRIFT}s off the Windows clock${NC}"
+            echo "       fix: sudo hwclock -s   (then ./status.sh again; partitions are dated by this clock)"
+            note "WSL clock drift ${DRIFT}s - run: sudo hwclock -s"
+        else
+            echo "CLOCK: WSL vs Windows ${DRIFT}s (ok)"
+        fi
+    else
+        echo "CLOCK: could not read the Windows clock through interop"
+    fi
+else
+    echo "CLOCK: no Windows interop (not WSL?) - drift check skipped"
+fi
+
+# ---------------- verdict ----------------
+if [[ ${#ATTN[@]} -eq 0 ]]; then
+    echo -e "${GREEN}OK   : nothing needs attention${NC}"
+    exit 0
+fi
+echo -e "${YELLOW}ATTN : ${#ATTN[@]} item(s)${NC}"
+for a in "${ATTN[@]}"; do echo "       - $a"; done
+exit 1
