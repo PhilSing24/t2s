@@ -206,6 +206,8 @@ Paths and ports can also be set per process through environment variables, which
 | `T2S_TMP_DIR`        | WDB     | `../` (relative to cwd)     | Parent of the intraday `tmp.<date>` dirs |
 | `T2S_WDB_CHECKPOINT` | WDB     | `$T2S_TMP_DIR/wdb.lastTpSeqNo` | Replay checkpoint file                |
 
+**Partition date.** WDB routes every row to the HDB partition for the date of its own `time` column, which is the feed handler's UTC receive timestamp, for all three tables. Rows are never assigned a date by when an end-of-day message arrived, and WDB rolls on its own clock, so a missed or late end-of-day cannot mix two days into one partition. Trade-off: Binance's archive files are split by exchange time, so a live partition and an archive day differ by the handful of rows whose exchange timestamp falls on one side of midnight and whose receive timestamp falls on the other. Comparing the two needs those few rows from the neighbouring partition.
+
 Pipeline-wide table schemas live in `kdb/schemas.q` and are loaded by every q process. Adding or modifying a column there propagates everywhere on the next restart; field indices used by TP gap detection and WDB replay are derived from the schema (no magic numbers).
 
 ## Tests
