@@ -87,14 +87,22 @@ to install; nothing happens while you are not looking.
 
 ## Daily checks (cron inside WSL)
 
-cron is running in this WSL. The entries added by the ops step run, in
-UTC: `check_eod.sh` shortly after midnight (confirms yesterday's partition
-against its log), log retention with `-apply` ten minutes later (deletes
-logs older than 7 days whose rows are all in the HDB; switched from a dry
-run on 2026-10-03 after the first real run removed 10.6 GB), and
-`status.sh` for a morning summary. Each writes to `ops/cron/*.log` under
-the repo. See the crontab itself (`crontab -l`) for the exact lines; they
-are appended after the existing entries of other projects.
+cron is running in this WSL. The entries added by the ops step:
+`check_eod.sh` at 00:30 UTC (confirms yesterday's UTC partition against its
+log), log retention with `-apply` at 00:40 UTC (deletes logs older than 7
+days whose rows are all in the HDB; switched from a dry run on 2026-10-03
+after the first real run removed 10.6 GB), and `status.sh` at 07:00 UTC
+for a summary. Each writes to `ops/cron/*.log` under the repo.
+
+The crontab is scheduled in local time. This WSL's zone is Asia/Singapore
+(UTC+8, no daylight saving) and Debian's cron 3.0pl1 ignores `CRON_TZ`
+(verified on 2026-10-03: an entry for 18:45 fired at 18:45 local), so the
+entries are written as 08:30, 08:40 and 15:00 local with the UTC time in
+their comments. If the system zone ever changes, shift them. The scripts
+themselves use UTC throughout: `check_eod.sh` takes yesterday with
+`date -u`, and logmgr's default date is q's `.z.d`, which is UTC. See the
+crontab itself (`crontab -l`) for the exact lines; they are appended after
+the existing entries of other projects.
 
 ## Resources and the WSL memory cap
 
