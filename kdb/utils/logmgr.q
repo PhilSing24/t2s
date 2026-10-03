@@ -15,15 +15,16 @@
 /       partitioned by their own `time`, so a midnight straddle lands next
 /       door; this check is exact, not a count comparison)
 /   (c) the log is older than T2S_LOG_RETENTION_DAYS (default 7)
-/ Never deleted: today's log, any date in T2S_LOG_PROTECTED (default
-/ 2026.06.08, protected until that day is rebuilt), and tp.tpSeqNo (the
-/ tpSeqNo reservation file; only date-named *.log files are candidates).
+/ Never deleted: today's log, any date in T2S_LOG_PROTECTED (default none;
+/ 2026.06.08 was protected until its partition was rebuilt on 2026-10-03),
+/ and tp.tpSeqNo (the tpSeqNo reservation file; only date-named *.log files
+/ are candidates).
 / -
 / Configuration (environment):
 /   T2S_TP_LOG_DIR          log dir      (default <repo>/kdb/tick/logs)
 /   T2S_HDB_DIR             HDB root     (default <repo>/hdb)
 /   T2S_LOG_RETENTION_DAYS  days         (default 7)
-/   T2S_LOG_PROTECTED       dates, comma separated (default 2026.06.08)
+/   T2S_LOG_PROTECTED       dates, comma separated (default none)
 
 \c 25 400
 
@@ -35,7 +36,8 @@ system "l ",.lm.dir,"/../schemas.q";
 .log.cfg.logDir:$[count v:getenv `T2S_TP_LOG_DIR; v; .lm.dir,"/../tick/logs"];
 .log.cfg.hdbDir:$[count v:getenv `T2S_HDB_DIR; v; .lm.dir,"/../../hdb"];
 .log.cfg.retentionDays:$[count v:getenv `T2S_LOG_RETENTION_DAYS; "J"$v; 7];
-.log.cfg.protected:$[count v:getenv `T2S_LOG_PROTECTED; "D"$"," vs v; enlist 2026.06.08];
+.log.cfg.protected:$[count v:getenv `T2S_LOG_PROTECTED; "D"$"," vs v; `date$()];
+.log.protectedStr:{[] $[count .log.cfg.protected; ", " sv string .log.cfg.protected; "none"]};
 .log.cfg.tables:`trade_binance`trade_binance_fut`quote_binance;
 
 / Logged row widths (feed-handler columns + tpRecvTimeUtcNs + tpSeqNo)
@@ -140,7 +142,7 @@ system "l ",.lm.dir,"/../schemas.q";
 .log.retention:{[apply]
   -1 "LOG: retention ",$[apply; "APPLY"; "DRY RUN"],
      " - log dir ",.log.cfg.logDir,", HDB ",.log.cfg.hdbDir,
-     ", retention ",string[.log.cfg.retentionDays]," days, protected ",(", " sv string .log.cfg.protected);
+     ", retention ",string[.log.cfg.retentionDays]," days, protected ",.log.protectedStr[];
   t:.log.summary[];
   show select date, sizeMB, logRows, complete, status, reason from t;
   del:select from t where status = `delete;
@@ -192,7 +194,7 @@ if["-summary" in .lm.args;
 -1 "=======================================================";
 -1 "  Log directory: ",.log.cfg.logDir;
 -1 "  HDB:           ",.log.cfg.hdbDir;
--1 "  Retention:     ",string[.log.cfg.retentionDays]," days; protected: ",", " sv string .log.cfg.protected;
+-1 "  Retention:     ",string[.log.cfg.retentionDays]," days; protected: ",.log.protectedStr[];
 -1 "";
 show .log.list[];
 -1 "";
