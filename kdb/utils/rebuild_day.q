@@ -58,18 +58,32 @@ system "l ",.rb.dir,"/../schemas.q";
 / Collect: rows dated D from the logs of D-1, D, D+1
 / -------------------------------------------------------
 .rb.acc:.rb.schema;   / empty typed tables, one per table
+.rb.buf:.rb.cfg.tables ! ((); (); ());   / rows awaiting a batched append
+.rb.cfg.batch:50000;
 .rb.unknown:0j;
 .rb.scanned:0j;
+/ Rows are appended one at a time inside the -11! callback only to a plain
+/ list; every batch they are turned into columns and appended to the typed
+/ table in one vectorised upsert. Row-by-row table inserts were ~100x
+/ slower on a 1 GB log.
+.rb.flushBuf:{[t]
+  b:.rb.buf t;
+  if[0 = count b; :()];
+  .rb.acc[t]:.rb.acc[t] upsert flip (cols .rb.schema t) ! flip b;
+  .rb.buf[t]:();
+  };
 .rb.collectUpd:{[t;d]
   .rb.scanned+:1;
   if[not (t in .rb.cfg.tables) and (count d) = .rb.width t; .rb.unknown+:1; :()];
   if[not .rb.day = `date$ d 0; :()];
-  .rb.acc[t]:.rb.acc[t] upsert d;
+  .rb.buf[t],:enlist d;
+  if[.rb.cfg.batch <= count .rb.buf t; .rb.flushBuf t];
   };
 
 .rb.collect:{[d]
   .rb.day::d;
   .rb.acc::.rb.schema;
+  .rb.buf::.rb.cfg.tables ! ((); (); ());
   .rb.unknown::0j; .rb.scanned::0j;
   logs:.rb.logPath each d + -1 0 1;
   logs:logs where not () ~/: key each logs;
@@ -77,6 +91,7 @@ system "l ",.rb.dir,"/../schemas.q";
   .rb.say raze ("scanning "; ", " sv string logs);
   upd::.rb.collectUpd;
   {[f] t0:.z.p; n:-11! f; .rb.say raze ("  "; string f; ": "; string n; " chunks in "; string `long$(.z.p - t0) % 1000000000; " s")} each logs;
+  .rb.flushBuf each .rb.cfg.tables;
   .rb.say raze ("rows dated "; string d; ": "; ", " sv {[t] raze (string t; "="; string count .rb.acc t)} each .rb.cfg.tables;
                 "  ("; string .rb.unknown; " rows of unknown table/shape skipped)");
   };
