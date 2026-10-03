@@ -75,18 +75,22 @@ stop_pids() {
     return 0
 }
 
-# Match the process NAME exactly (pgrep -x). A pattern match on the command
-# line (pgrep -f) also hits any shell or editor whose arguments mention the
-# binary, and once killed the operator's own session mid-stop.
-pids_by_name() { pgrep -x "$1" 2>/dev/null || true; }
-pid_by_port()  { lsof -ti:"$1" 2>/dev/null || true; }
+# Feed handlers: match the START of the command line (the binary path as
+# start.sh launches it). An unanchored pgrep -f also hits any shell or
+# editor whose arguments mention the binary (and once killed the operator's
+# own session mid-stop); pgrep -x cannot be used because the kernel
+# truncates process names to 15 characters ("trade_feed_hand").
+fh_pids() { pgrep -f '^(\./)?build/(trade_feed_handler|trade_feed_handler_fut|quote_feed_handler)( |$)' 2>/dev/null || true; }
+# The process LISTENING on a port, not its clients (lsof -ti:PORT alone
+# also returns every process connected to it, e.g. the handlers on TP's port).
+pid_by_port() { lsof -ti TCP:"$1" -sTCP:LISTEN 2>/dev/null || true; }
 
 echo "Stopping t2s pipeline..."
 
 # ---------------------------------------------------------------------------
 # 1. Feed handlers
 # ---------------------------------------------------------------------------
-FH_PIDS=$( { pids_by_name trade_feed_handler; pids_by_name trade_feed_handler_fut; pids_by_name quote_feed_handler; } | sort -u )
+FH_PIDS=$(fh_pids | sort -u)
 # shellcheck disable=SC2086
 stop_pids "feed handlers" $FH_PIDS
 
