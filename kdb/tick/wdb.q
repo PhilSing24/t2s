@@ -76,7 +76,6 @@ system "g 0";
 .wdb.stats.duplicatesDropped:0j;     / rows with tpSeqNo <= checkpoint, dropped
 .wdb.stats.lateRows:0j;              / rows dated for a day already moved to HDB
 .wdb.stats.unexpectedDateRows:0j;    / rows dated in the future or far in the past
-.wdb.stats.counterResets:0j;         / TP tpSeqNo seen below our checkpoint (previous-day checkpoint)
 .wdb.stats.haltedRowsDropped:0j;     / rows dropped while halted (see .wdb.halted)
 .wdb.stats.checkpointBehindDisk:0j;  / startups where tmp.* held tpSeqNo above the checkpoint
 .wdb.lastRollDate:0Nd;
@@ -101,12 +100,14 @@ system "g 0";
 .wdb.rollDueAt:0Np;
 
 / -------------------------------------------------------
-/ Halt state (counter-reset safeguard)
+/ Halt state (counter-goes-backwards safety net)
 / -------------------------------------------------------
-/ If TP's tpSeqNo is below a checkpoint that was written TODAY, something
-/ is wrong that replay cannot fix (two TPs? a hand-edited checkpoint?).
-/ WDB then refuses to write anything until an operator intervenes: rows
-/ are dropped (counted, rate-limited log) and .health[] reports `error.
+/ TP's tpSeqNo is monotonic by construction (reservation file, see tp.q).
+/ If it is nevertheless below any table's checkpoint, something is wrong
+/ that replay cannot fix (TP started with its reservation file and logs
+/ removed, two TPs, a hand-edited checkpoint). WDB then refuses to write
+/ anything until an operator intervenes: rows are dropped (counted,
+/ rate-limited log) and .health[] reports `error.
 .wdb.halted:0b;
 .wdb.haltReason:"";
 
@@ -124,9 +125,16 @@ system "g 0";
 / Highest tpSeqNo successfully flushed to disk PER TABLE. A global cursor
 / would advance past unflushed rows of the other tables, so it is per table.
 .wdb.lastTpSeqNo:`trade_binance`trade_binance_fut`quote_binance ! 0 0 0j;
-/ Date (WDB clock) at which the checkpoint was last written. Null means a
-/ legacy checkpoint without a date, treated as "a previous day".
+/ Date (WDB clock) at which the checkpoint was last written (diagnostics;
+/ null for a legacy checkpoint without a date).
 .wdb.checkpointDate:0Nd;
+
+/ Highest tpSeqNo currently held in each in-memory buffer. The dedupe floor
+/ is the max of this and the checkpoint: after a TP restart WDB reconnects
+/ and replays from the floor, and rows still sitting unflushed in memory
+/ must not be delivered a second time.
+.wdb.bufMaxSeq:`trade_binance`trade_binance_fut`quote_binance ! 0 0 0j;
+.wdb.floor:{[tbl] .wdb.lastTpSeqNo[tbl] | .wdb.bufMaxSeq[tbl]};
 
 / Replay stats (reset at roll)
 .wdb.stats.replayRowsApplied:0j;
@@ -281,12 +289,14 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
 / counts and returns 0b. `source` is `live, `replay or `drain for the log.
 .wdb.acceptRow:{[tbl;row;source]
   seq:row .wdb.idx.tpSeqNo[tbl];
-  if[seq <= .wdb.lastTpSeqNo[tbl];
+  if[seq <= .wdb.floor tbl;
     .wdb.stats.duplicatesDropped+:1;
     -1 raze ("WDB: DUPLICATE dropped - "; string tbl; " tpSeqNo="; string seq;
-             " checkpoint="; string .wdb.lastTpSeqNo[tbl]; " source="; string source);
+             " floor="; string .wdb.floor tbl; " (checkpoint "; string .wdb.lastTpSeqNo[tbl];
+             ", buffer "; string .wdb.bufMaxSeq[tbl]; ") source="; string source);
     :0b
   ];
+  .wdb.bufMaxSeq[tbl]:.wdb.bufMaxSeq[tbl] | seq;
   1b
  };
 
@@ -543,31 +553,18 @@ endofday:{[]
   .wdb.replayLiveBuffer[tbl]:();
  };
 
-/ Counter-reset safeguard. TP's tpSeqNo (cutoff) below any table's
-/ checkpoint means TP's counter went backwards (a restart on a day with no
-/ log, review finding 4). If the checkpoint was written on a previous day
-/ (or has no date), TP's log is a fresh epoch and nothing in it is on our
-/ disk: reset the checkpoints to zero, log loudly, count it, and let replay
-/ start from the beginning of the new log. If the checkpoint was written
-/ TODAY, that cannot be explained by a day roll: halt and wait for an
-/ operator. Returns 1b if replay may proceed.
+/ Counter-goes-backwards safety net. TP's tpSeqNo (cutoff) below any
+/ table's checkpoint can no longer be a normal day roll: tp.q keeps the
+/ counter monotonic across restarts and days with its reservation file.
+/ Whatever the checkpoint's date, halt and wait for an operator. Returns 1b
+/ if replay may proceed.
 .wdb.checkCounterReset:{[cutoff]
   behind:where cutoff < .wdb.lastTpSeqNo;
   if[0 = count behind; :1b];
-  today:.wdb.today[];
-  if[(null .wdb.checkpointDate) or .wdb.checkpointDate < today;
-    .wdb.stats.counterResets+:1;
-    -1 raze ("WDB: ERROR TP tpSeqNo "; string cutoff; " is below checkpoint for ";
-             ", " sv string behind; " ("; .Q.s1 .wdb.lastTpSeqNo;
-             "); checkpoint dated "; string .wdb.checkpointDate;
-             " < today "; string today;
-             " -> treating TP log as a new epoch, resetting checkpoints to 0");
-    .wdb.lastTpSeqNo:.wdb.tables ! 0 0 0j;
-    .wdb.saveCheckpoint[today];
-    :1b];
   .wdb.halted:1b;
-  .wdb.haltReason:raze ("TP tpSeqNo "; string cutoff; " below today's checkpoint for ";
-                        ", " sv string behind; " ("; .Q.s1 .wdb.lastTpSeqNo; ")");
+  .wdb.haltReason:raze ("TP tpSeqNo "; string cutoff; " below checkpoint for ";
+                        ", " sv string behind; " ("; .Q.s1 .wdb.lastTpSeqNo;
+                        ", dated "; string .wdb.checkpointDate; ")");
   -1 raze ("WDB: HALTED - "; .wdb.haltReason;
            ". Not writing until an operator intervenes (fix checkpoint "; string .wdb.cfg.checkpointFile;
            " and restart).");
@@ -587,7 +584,7 @@ endofday:{[]
     .wdb.replayMode:0b; .wdb.replayCutoff:0j;
     :()];
   {[h;tbl]
-    fromSeq:.wdb.lastTpSeqNo[tbl] + 1;
+    fromSeq:1 + .wdb.floor tbl;
     if[.wdb.replayCutoff < fromSeq;
       -1 raze ("WDB: nothing to replay for "; string tbl;
                " (cutoff "; string .wdb.replayCutoff; " < fromSeq "; string fromSeq; ")");
@@ -604,7 +601,7 @@ endofday:{[]
  };
 
 .wdb.replayStatus:{[]
-  `lastTpSeqNoTrade`lastTpSeqNoAggTrade`lastTpSeqNoQuote`checkpointDate`replayMode`replayCutoff`replayRowsApplied`replayDupsFiltered`duplicatesDropped`lateRows`unexpectedDateRows`counterResets`checkpointBehindDisk`halted`haltReason`haltedRowsDropped`lastRollDate`bufferTrades`bufferAggTrades`bufferQuotes!(
+  `lastTpSeqNoTrade`lastTpSeqNoAggTrade`lastTpSeqNoQuote`checkpointDate`replayMode`replayCutoff`replayRowsApplied`replayDupsFiltered`duplicatesDropped`lateRows`unexpectedDateRows`checkpointBehindDisk`halted`haltReason`haltedRowsDropped`lastRollDate`bufferTrades`bufferAggTrades`bufferQuotes!(
     .wdb.lastTpSeqNo`trade_binance;
     .wdb.lastTpSeqNo`trade_binance_fut;
     .wdb.lastTpSeqNo`quote_binance;
@@ -616,7 +613,6 @@ endofday:{[]
     .wdb.stats.duplicatesDropped;
     .wdb.stats.lateRows;
     .wdb.stats.unexpectedDateRows;
-    .wdb.stats.counterResets;
     .wdb.stats.checkpointBehindDisk;
     .wdb.halted;
     .wdb.haltReason;
@@ -715,7 +711,7 @@ upd:{[tbl;data]
          $[(.wdb.stats.lateRows > 0) or .wdb.stats.unexpectedDateRows > 0; `degraded; `ok];
        .wdb.conn.state = `connecting; `degraded;
        `disconnected];
-  `process`port`uptime`status`connState`memMB`tradesRecv`aggTradesRecv`quotesRecv`flushes`rowsWritten`bufferTrades`bufferAggTrades`bufferQuotes`duplicatesDropped`lateRows`unexpectedDateRows`counterResets`halted`haltedRowsDropped`lastRollDate!(
+  `process`port`uptime`status`connState`memMB`tradesRecv`aggTradesRecv`quotesRecv`flushes`rowsWritten`bufferTrades`bufferAggTrades`bufferQuotes`duplicatesDropped`lateRows`unexpectedDateRows`halted`haltedRowsDropped`lastRollDate!(
     `wdb;
     .wdb.cfg.port;
     `second$.z.p - .proc.startTime;
@@ -733,7 +729,6 @@ upd:{[tbl;data]
     .wdb.stats.duplicatesDropped;
     .wdb.stats.lateRows;
     .wdb.stats.unexpectedDateRows;
-    .wdb.stats.counterResets;
     .wdb.halted;
     .wdb.stats.haltedRowsDropped;
     .wdb.lastRollDate

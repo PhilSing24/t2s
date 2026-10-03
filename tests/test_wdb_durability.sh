@@ -23,12 +23,14 @@
 #                        each date lands in its own partition, nothing
 #                        mixed; a row for an already-rolled date is kept in
 #                        a fresh tmp dir and counted as late
-#   5 counter reset      TP restarted with no log (tpSeqNo back to 0) and
-#     (previous day)     the WDB checkpoint dated yesterday: checkpoints
-#                        auto-reset, replay proceeds, counted
-#   6 counter reset      same but the checkpoint is dated today: WDB halts,
-#     (same day)         health = error, rows dropped and counted, nothing
-#                        written
+#   5 TP restart on a    TP restarted on a day with no log (fake date =
+#     new day            tomorrow) keeps its tpSeqNo from the reservation
+#                        file: WDB stays healthy, no halt, no rows dropped,
+#                        everything on disk
+#   6 counter backwards  TP started with BOTH its reservation file and its
+#                        logs removed hands out numbers below WDB's
+#                        checkpoint: WDB halts, health = error, rows dropped
+#                        and counted, nothing written
 #
 # Exit code 0 if every scenario passes.
 
@@ -78,6 +80,8 @@ export SANDBOX_CHECKPOINT=$T2S_SB_CHECKPOINT
 TODAY=$(date -u +%Y.%m.%d)
 D_MINUS_1=$(date -u -d 'yesterday' +%Y.%m.%d)
 D_MINUS_2=$(date -u -d '2 days ago' +%Y.%m.%d)
+D_PLUS_1=$(date -u -d 'tomorrow' +%Y.%m.%d)
+TP_EXTRA=()
 
 fail() { echo "  FAIL: $*"; FAILURES=$((FAILURES + 1)); }
 
@@ -90,7 +94,7 @@ step() {
 }
 
 start_tp() {
-    TP_PID=$(t2s_spawn_tp "$T2S_PORT_TP" "$T2S_SANDBOX/tp_${SCENARIO}.log")
+    TP_PID=$(t2s_spawn_tp "$T2S_PORT_TP" "$T2S_SANDBOX/tp_${SCENARIO}.log" "${TP_EXTRA[@]}")
     if ! t2s_wait_port "$T2S_PORT_TP" 6; then fail "TP did not start"; cat "$T2S_SANDBOX/tp_${SCENARIO}.log"; return 1; fi
     t2s_guard tp "$T2S_PORT_TP" > /dev/null || { fail "TP guard"; return 1; }
     return 0
@@ -305,37 +309,49 @@ begin_scenario 4 "missed midnight: rows land in their own date partitions" && {
 end_scenario
 
 # ============================================================================
-# Scenario 5: TP counter reset with a previous-day checkpoint -> auto reset
+# Scenario 5: TP restart on a new day with no log -> tpSeqNo continues
 # ============================================================================
-begin_scenario 5 "TP tpSeqNo reset, checkpoint from yesterday: auto-reset" && {
+begin_scenario 5 "TP restart on a new day with no log: counter continues, WDB healthy" && {
     start_wdb T2S_WDB_ROLL_GRACE_SEC=0 "T2S_WDB_FAKE_DATE=$D_MINUS_1"
-    step -step publish -table trade_binance -rows 50 -date "$D_MINUS_1"
+    step -step publish -table trade_binance     -rows 50 -date "$D_MINUS_1"
+    step -step publish -table quote_binance     -rows 20 -date "$D_MINUS_1"
+    step -step publish -table trade_binance_fut -rows 10 -date "$D_MINUS_1"
     sleep 1
     step -step flush
     step -step assert_checkpoint -table trade_binance -date "$D_MINUS_1"
     graceful_stop
-    # TP restarts with no log: tpSeqNo starts again from 1
+    # "Next day": TP restarted with a fake date for which no log exists. The
+    # reservation file keeps tpSeqNo monotonic.
     stop_tp
-    rm -f "$T2S_SB_TPLOGS"/*.log "$T2S_SANDBOX/fhseq"
+    TP_EXTRA=("T2S_TP_FAKE_DATE=$D_PLUS_1")
     start_tp
-    step -step publish -table trade_binance -rows 10 -date "$TODAY"
+    grep -q "T2S_TP_FAKE_DATE is set" "$T2S_SANDBOX/tp_${SCENARIO}.log" || fail "TP log lacks the fake-date warning"
+    grep -q "no log for today" "$T2S_SANDBOX/tp_${SCENARIO}.log" || fail "TP did not report a missing log for its (fake) today"
+    step -step publish -table trade_binance     -rows 10 -date "$TODAY"
+    step -step publish -table quote_binance     -rows 5  -date "$TODAY"
+    step -step publish -table trade_binance_fut -rows 5  -date "$TODAY"
     start_wdb T2S_WDB_ROLL_GRACE_SEC=0
-    step -step assert_status -key counterResets -value 1
     step -step assert_status -key halted -value 0
-    step -step assert_status -key replayRowsApplied -value 10
+    step -step assert_status -key status -value ok
+    step -step assert_status -key duplicatesDropped -value 0
+    step -step assert_status -key replayRowsApplied -value 20
     step -step assert_status -key tradesRecv -value 10
     # yesterday's tmp dir was rolled at start-up (it is a past date now)
     step -step assert_partition -table trade_binance -date "$D_MINUS_1" -rows 50
     graceful_stop
     step -step assert_tmp -table trade_binance -date "$TODAY" -rows 10
     step -step assert_checkpoint -table trade_binance -date "$TODAY"
+    step -step assert_vs_tplog -table trade_binance
+    step -step assert_vs_tplog -table quote_binance
+    step -step assert_vs_tplog -table trade_binance_fut
+    TP_EXTRA=()
 }
 end_scenario
 
 # ============================================================================
-# Scenario 6: TP counter reset with a same-day checkpoint -> halt
+# Scenario 6: tpSeqNo really goes backwards -> WDB halts (safety net)
 # ============================================================================
-begin_scenario 6 "TP tpSeqNo reset, checkpoint from today: halt" && {
+begin_scenario 6 "TP counter goes backwards (seq file and logs removed): halt" && {
     start_wdb T2S_WDB_ROLL_GRACE_SEC=0
     step -step publish -table trade_binance -rows 50 -date "$TODAY"
     sleep 1
@@ -343,13 +359,14 @@ begin_scenario 6 "TP tpSeqNo reset, checkpoint from today: halt" && {
     step -step assert_checkpoint -table trade_binance -date "$TODAY"
     graceful_stop
     stop_tp
-    rm -f "$T2S_SB_TPLOGS"/*.log "$T2S_SANDBOX/fhseq"
+    # Remove the reservation file AND every log: TP can only seed from 0.
+    rm -f "$T2S_SB_TPLOGS"/*.log "$T2S_SB_TPSEQ" "$T2S_SANDBOX/fhseq"
     start_tp
+    grep -q "BELOW WDB's persisted checkpoint" "$T2S_SANDBOX/tp_${SCENARIO}.log" || fail "TP did not warn that its seed is below WDB's checkpoint"
     step -step publish -table trade_binance -rows 10 -date "$TODAY"
     start_wdb T2S_WDB_ROLL_GRACE_SEC=0
     step -step assert_status -key halted -value 1
     step -step assert_status -key status -value error
-    step -step assert_status -key counterResets -value 0
     step -step assert_status -key replayRowsApplied -value 0
     step -step publish -table trade_binance -rows 5 -date "$TODAY"
     sleep 1

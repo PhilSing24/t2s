@@ -35,103 +35,7 @@
 / -
 / Exit code 0 on success, 1 on any failed assertion.
 
-\c 25 400
-\l kdb/schemas.q
-
-.d.opt:.Q.opt .z.x;
-.d.arg:{[k] $[k in key .d.opt; first .d.opt k; ""]};
-.d.step:.d.arg `step;
-.d.tpPort:"J"$getenv `TEST_TP_PORT;
-.d.wdbPort:"J"$getenv `TEST_WDB_PORT;
-.d.sbTmp:getenv `SANDBOX_TMP_PATH;
-.d.sbHdb:getenv `SANDBOX_HDB_PATH;
-.d.tpLogDir:getenv `SANDBOX_TPLOG_PATH;
-.d.checkpoint:hsym `$ getenv `SANDBOX_CHECKPOINT;
-
-.d.fail:{[msg] -2 raze ("  FAIL: "; msg); system "sleep 0.1"; exit 1};
-.d.pass:{[msg] -1 raze ("  PASS: "; msg)};
-.d.done:{[] system "sleep 0.1"; exit 0};
-
-.d.open:{[port]
-  h:@[hopen; (`$":localhost:",string port; 5000); {[e] 0N}];
-  if[null h; .d.fail raze ("cannot connect to port "; string port)];
-  h};
-
-/ ---------------------------------------------------------------------------
-/ Synthetic rows. fhSeqNo must stay contiguous per side for the whole life of
-/ a TP (its gap/dup detection), so the counter lives in a file in the sandbox
-/ and continues across invocations. It is reset by the shell when the TP is.
-/ ---------------------------------------------------------------------------
-.d.seqFile:hsym `$ .d.sbTmp, "../fhseq";
-.d.nextSeq:{[side]
-  d:$[() ~ key .d.seqFile; `trade`quote`aggTrade!0 0 0j; get .d.seqFile];
-  d[side]+:1;
-  .d.seqFile set d;
-  d side};
-
-/ Base timestamp for rows dated D: noon, so they stay well inside the day.
-.d.baseTs:{[d] ("p"$d) + 0D12:00:00};
-
-.d.mkTrade:{[ts;i;seq]
-  (ts; `BTCUSDT; 100000+i; 78000.0+i*0.5; 0.001+i*0.0001; 0b;
-   `long$1700000000000+i; `long$1700000000000+i; "j"$ts; 10j; 15j; seq)};
-
-/ Quote prices are deliberately SMALL (~100): the per-table tpSeqNo index
-/ regression (a trade-schema index applied to quotes read askPrice2) only
-/ shows when that misread value is below the checkpoint.
-.d.mkQuote:{[ts;i;seq]
-  (ts; `BTCUSDT;
-   100.0+i*0.01; 100.5+i*0.01; 101.0+i*0.01; 101.5+i*0.01; 102.0+i*0.01;
-   1.0; 0.9; 0.8; 0.7; 0.6;
-   102.5+i*0.01; 103.0+i*0.01; 103.5+i*0.01; 104.0+i*0.01; 104.5+i*0.01;
-   1.0; 0.9; 0.8; 0.7; 0.6;
-   1b; `long$1700000000000+i; "j"$ts; 10j; 15j; seq)};
-
-/ Futures aggTrade row: 14 feed-handler columns (aggTradeId, firstTradeId,
-/ lastTradeId between sym and price). fhSeqNo sits at index 13, which is
-/ where the trade-schema tpSeqNo index would look.
-.d.mkAggTrade:{[ts;i;seq]
-  (ts; `BTCUSDT; 500000+i; 900000+2*i; 900001+2*i; 78000.0+i*0.5; 0.002+i*0.0001; 1b;
-   `long$1700000000000+i; `long$1700000000000+i; "j"$ts; 10j; 15j; seq)};
-
-/ ---------------------------------------------------------------------------
-/ Disk readers
-/ ---------------------------------------------------------------------------
-.d.tmpTable:{[d;t] hsym `$ .d.sbTmp, "tmp.", string[d], "/", string t};
-.d.hdbTable:{[d;t] hsym `$ .d.sbHdb, "/", string[d], "/", string t};
-.d.col:{[dir;c] @[get; ` sv dir, c; {[e] ()}]};
-
-/ All tpSeqNo for table t across every tmp.* dir and every HDB partition.
-.d.allDiskSeqs:{[t]
-  tmpRoot:hsym `$ .d.sbTmp;
-  tmpEntries:@[key; tmpRoot; {[e] `symbol$()}];
-  tmpDirs:tmpEntries where (string tmpEntries) like "tmp.*";
-  tmpSeqs:raze {[root;t;e] .d.col[` sv root, e, t; `tpSeqNo]}[tmpRoot; t] each tmpDirs;
-  hdbRoot:hsym `$ .d.sbHdb;
-  parts:@[key; hdbRoot; {[e] `symbol$()}];
-  parts:parts where not null "D"$ string parts;
-  hdbSeqs:raze {[root;t;p] .d.col[` sv root, p, t; `tpSeqNo]}[hdbRoot; t] each parts;
-  (tmpSeqs; hdbSeqs)};
-
-/ tpSeqNo of every row for table t in the sandbox TP log (today's file).
-.d.tpLogSeqs:{[t]
-  f:hsym `$ .d.tpLogDir, "/", string[.z.d], ".log";
-  if[() ~ key f; :`long$()];
-  .d.acc::`long$();
-  .d.tgt::t;
-  upd::{[tb;d] if[tb = .d.tgt; .d.acc,:last d]};
-  -11! f;
-  .d.acc};
-
-/ Shape check shared by assert_tmp and assert_partition.
-.d.checkRows:{[what;dir;d;n]
-  seqs:.d.col[dir; `tpSeqNo];
-  times:.d.col[dir; `time];
-  if[n <> count seqs; .d.fail raze (what; " "; string dir; ": expected "; string n; " rows, got "; string count seqs)];
-  if[n <> count distinct seqs; .d.fail raze (what; " "; string dir; ": duplicate tpSeqNo ("; string count seqs; " rows, "; string count distinct seqs; " distinct)")];
-  bad:distinct (`date$times) except d;
-  if[count bad; .d.fail raze (what; " "; string dir; ": rows dated "; .Q.s1 bad; " in a "; string d; " location")];
-  .d.pass raze (what; " "; string dir; ": "; string n; " rows, distinct tpSeqNo, all dated "; string d)};
+\l tests/t_dur_lib.q
 
 / ---------------------------------------------------------------------------
 / Steps
@@ -139,14 +43,7 @@
 if[.d.step ~ "publish";
   t:`$.d.arg `table; n:"J"$.d.arg `rows; d:"D"$.d.arg `date;
   h:.d.open .d.tpPort;
-  base:.d.baseTs d;
-  $[t = `trade_binance;
-    {[h;base;i] h (`upd; `trade_binance; .d.mkTrade[base + i*0D00:00:00.001; i; .d.nextSeq `trade])}[h;base] each til n;
-    t = `quote_binance;
-    {[h;base;i] h (`upd; `quote_binance; .d.mkQuote[base + i*0D00:00:00.001; i; .d.nextSeq `quote])}[h;base] each til n;
-    t = `trade_binance_fut;
-    {[h;base;i] h (`upd; `trade_binance_fut; .d.mkAggTrade[base + i*0D00:00:00.001; i; .d.nextSeq `aggTrade])}[h;base] each til n;
-    .d.fail "publish: unknown table"];
+  .d.publishRows[h;t;n;d];
   hclose h;
   -1 raze ("  published "; string n; " "; string t; " rows dated "; string d);
   .d.done[]];
@@ -174,7 +71,7 @@ if[.d.step ~ "rewind_checkpoint";
 
 if[.d.step ~ "inject_dup";
   t:`$.d.arg `table; seq:"J"$.d.arg `seq; d:"D"$.d.arg `date;
-  row:$[t = `trade_binance; .d.mkTrade[.d.baseTs d; 0; 0]; t = `trade_binance_fut; .d.mkAggTrade[.d.baseTs d; 0; 0]; .d.mkQuote[.d.baseTs d; 0; 0]];
+  row:.d.mkRow[t; .d.baseTs d; 0; 0j];
   / shape as TP would deliver it: FH row + tpRecvTimeUtcNs + tpSeqNo
   row:row, ("j"$.z.p; seq);
   h:.d.open .d.wdbPort; neg[h] (`upd; t; row); h ""; hclose h;
@@ -225,7 +122,7 @@ if[.d.step ~ "assert_status";
   / .health[] first: it holds the in-memory buffer counts (bufferTrades etc.);
   / .wdb.replayStatus[] reuses those names for the reconnect buffer.
   v:$[k in key hd; hd k; k in key rs; rs k; .d.fail raze ("unknown status key "; string k)];
-  got:$[10h = type v; v; string v];
+  got:.d.fmt v;
   if[not got ~ want; .d.fail raze (string k; " = "; got; ", expected "; want)];
   .d.pass raze (string k; " = "; got); .d.done[]];
 
