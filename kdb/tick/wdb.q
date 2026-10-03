@@ -164,9 +164,13 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
 
 .wdb.tables:`trade_binance`trade_binance_fut`quote_binance;
 
-/ Position of tpSeqNo in the incoming row (the same in all three schemas:
-/ second-to-last, since wdbRecvTimeUtcNs is appended last).
-.wdb.idx.tpSeqNo:(cols trade_binance)?`tpSeqNo;
+/ Position of tpSeqNo in the incoming row, PER TABLE. The three schemas have
+/ different widths (12, 14 and 28 feed-handler columns), so the index differs:
+/ 13 for trade_binance, 15 for trade_binance_fut, 29 for quote_binance. A
+/ single index taken from the trade schema read askPrice2 for quotes and
+/ fhSeqNo for futures and dropped live rows as duplicates once the
+/ checkpoint was non-zero (found in the first live run of this code).
+.wdb.idx.tpSeqNo:.wdb.tables ! {[t] (cols value t)?`tpSeqNo} each .wdb.tables;
 
 / -------------------------------------------------------
 / Utility Functions
@@ -276,7 +280,7 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
 / Returns 1b if the row (pre-WDB-stamp list) should be accepted, else logs,
 / counts and returns 0b. `source` is `live, `replay or `drain for the log.
 .wdb.acceptRow:{[tbl;row;source]
-  seq:row .wdb.idx.tpSeqNo;
+  seq:row .wdb.idx.tpSeqNo[tbl];
   if[seq <= .wdb.lastTpSeqNo[tbl];
     .wdb.stats.duplicatesDropped+:1;
     -1 raze ("WDB: DUPLICATE dropped - "; string tbl; " tpSeqNo="; string seq;
@@ -528,7 +532,7 @@ endofday:{[]
 .wdb.drainLiveBuffer:{[tbl]
   buf:.wdb.replayLiveBuffer[tbl];
   if[0 = count buf; :()];
-  bufSeqs:{x[.wdb.idx.tpSeqNo]} each buf;
+  bufSeqs:{[tbl;r] r .wdb.idx.tpSeqNo[tbl]}[tbl] each buf;
   isDup:bufSeqs <= .wdb.replayCutoff;
   dupCount:sum isDup;
   newRows:buf where not isDup;
@@ -690,7 +694,7 @@ upd:{[tbl;data]
     .wdb.stats.haltedRowsDropped+:1;
     .wdb.haltLogCount+:1;
     if[(.wdb.haltLogCount <= 10) or 0 = .wdb.haltLogCount mod 10000;
-      -1 raze ("WDB: HALTED - dropping "; string tbl; " tpSeqNo="; string data .wdb.idx.tpSeqNo;
+      -1 raze ("WDB: HALTED - dropping "; string tbl; " tpSeqNo="; string data .wdb.idx.tpSeqNo[tbl];
                " (dropped so far: "; string .wdb.stats.haltedRowsDropped; ")")];
     :()];
   / During replay-mode, stash live messages for the post-replay drain.

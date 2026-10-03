@@ -165,15 +165,19 @@ wait_roll() { sleep "${1:-7}"; }
 # ============================================================================
 begin_scenario 1 "graceful stop flushes and checkpoints" && {
     start_wdb T2S_WDB_ROLL_GRACE_SEC=0
-    step -step publish -table trade_binance -rows 100 -date "$TODAY"
-    step -step publish -table quote_binance -rows 50  -date "$TODAY"
+    step -step publish -table trade_binance     -rows 100 -date "$TODAY"
+    step -step publish -table quote_binance     -rows 50  -date "$TODAY"
+    step -step publish -table trade_binance_fut -rows 30  -date "$TODAY"
     sleep 1
     step -step assert_status -key bufferTrades -value 100
+    step -step assert_status -key bufferAggTrades -value 30
     graceful_stop
-    step -step assert_tmp -table trade_binance -date "$TODAY" -rows 100
-    step -step assert_tmp -table quote_binance -date "$TODAY" -rows 50
-    step -step assert_checkpoint -table trade_binance -date "$TODAY"
-    step -step assert_checkpoint -table quote_binance -date "$TODAY"
+    step -step assert_tmp -table trade_binance     -date "$TODAY" -rows 100
+    step -step assert_tmp -table quote_binance     -date "$TODAY" -rows 50
+    step -step assert_tmp -table trade_binance_fut -date "$TODAY" -rows 30
+    step -step assert_checkpoint -table trade_binance     -date "$TODAY"
+    step -step assert_checkpoint -table quote_binance     -date "$TODAY"
+    step -step assert_checkpoint -table trade_binance_fut -date "$TODAY"
 
     # ------------------------------------------------------------------
     # Scenario 2 (continues in the same sandbox): restart after clean stop
@@ -184,14 +188,22 @@ begin_scenario 1 "graceful stop flushes and checkpoints" && {
     start_wdb T2S_WDB_ROLL_GRACE_SEC=0
     step -step assert_status -key replayRowsApplied -value 0
     step -step assert_status -key duplicatesDropped -value 0
-    step -step publish -table trade_binance -rows 100 -date "$TODAY"
+    # With a non-zero checkpoint, every table must still accept live rows
+    # (regression: a wrong per-table tpSeqNo index drops quotes/futures here)
+    step -step publish -table trade_binance     -rows 100 -date "$TODAY"
+    step -step publish -table quote_binance     -rows 50  -date "$TODAY"
+    step -step publish -table trade_binance_fut -rows 30  -date "$TODAY"
     sleep 1
     step -step assert_status -key duplicatesDropped -value 0
+    step -step assert_status -key quotesRecv -value 50
+    step -step assert_status -key aggTradesRecv -value 30
     graceful_stop
-    step -step assert_tmp -table trade_binance -date "$TODAY" -rows 200
-    step -step assert_tmp -table quote_binance -date "$TODAY" -rows 50
+    step -step assert_tmp -table trade_binance     -date "$TODAY" -rows 200
+    step -step assert_tmp -table quote_binance     -date "$TODAY" -rows 100
+    step -step assert_tmp -table trade_binance_fut -date "$TODAY" -rows 60
     step -step assert_vs_tplog -table trade_binance
     step -step assert_vs_tplog -table quote_binance
+    step -step assert_vs_tplog -table trade_binance_fut
 }
 end_scenario
 
@@ -200,20 +212,25 @@ end_scenario
 # ============================================================================
 begin_scenario 3 "kill -9 mid-run, restart, overlap replay deduped" && {
     start_wdb T2S_WDB_ROLL_GRACE_SEC=0 T2S_WDB_MAXROWS=25
-    step -step publish -table trade_binance -rows 100 -date "$TODAY"
-    step -step publish -table quote_binance -rows 40  -date "$TODAY"
+    step -step publish -table trade_binance     -rows 100 -date "$TODAY"
+    step -step publish -table quote_binance     -rows 40  -date "$TODAY"
+    step -step publish -table trade_binance_fut -rows 30  -date "$TODAY"
     sleep 1
     hard_kill_wdb
     # Restart: replay from the checkpoint written by the last interval flush
     start_wdb T2S_WDB_ROLL_GRACE_SEC=0 T2S_WDB_MAXROWS=25
     step -step assert_status -key halted -value 0
-    step -step publish -table trade_binance -rows 50 -date "$TODAY"
+    step -step publish -table trade_binance     -rows 50 -date "$TODAY"
+    step -step publish -table quote_binance     -rows 20 -date "$TODAY"
+    step -step publish -table trade_binance_fut -rows 10 -date "$TODAY"
     sleep 1
     graceful_stop
     step -step assert_vs_tplog -table trade_binance
     step -step assert_vs_tplog -table quote_binance
-    step -step assert_tmp -table trade_binance -date "$TODAY" -rows 150
-    step -step assert_tmp -table quote_binance -date "$TODAY" -rows 40
+    step -step assert_vs_tplog -table trade_binance_fut
+    step -step assert_tmp -table trade_binance     -date "$TODAY" -rows 150
+    step -step assert_tmp -table quote_binance     -date "$TODAY" -rows 60
+    step -step assert_tmp -table trade_binance_fut -date "$TODAY" -rows 40
     # Simulate a crash between the tmp write and the checkpoint save: rewind
     # the checkpoint below what is on disk. The next start must raise it back
     # from the tmp dirs and replay nothing, so no duplicates are written.
@@ -224,19 +241,26 @@ begin_scenario 3 "kill -9 mid-run, restart, overlap replay deduped" && {
     step -step assert_status -key checkpointBehindDisk -value 1
     step -step assert_status -key replayRowsApplied -value 0
     step -step assert_status -key duplicatesDropped -value 0
-    step -step assert_status -key lastTpSeqNoTrade -value 190
+    step -step assert_status -key lastTpSeqNoTrade -value 220
     # A resend of an already-persisted row (tpSeqNo below the floor) must be
     # dropped at receipt, logged and counted.
-    step -step inject_dup -table trade_binance -seq 150 -date "$TODAY"
+    step -step inject_dup -table trade_binance     -seq 150 -date "$TODAY"
+    step -step inject_dup -table quote_binance     -seq 150 -date "$TODAY"
+    step -step inject_dup -table trade_binance_fut -seq 150 -date "$TODAY"
     sleep 1
-    step -step assert_status -key duplicatesDropped -value 1
+    step -step assert_status -key duplicatesDropped -value 3
     step -step assert_status -key bufferTrades -value 0
-    grep -q "DUPLICATE dropped - trade_binance tpSeqNo=150" "$WDB_LOG" || fail "WDB log lacks DUPLICATE line"
+    step -step assert_status -key bufferQuotes -value 0
+    step -step assert_status -key bufferAggTrades -value 0
+    grep -q "DUPLICATE dropped - trade_binance tpSeqNo=150" "$WDB_LOG" || fail "WDB log lacks DUPLICATE line (trade)"
+    grep -q "DUPLICATE dropped - quote_binance tpSeqNo=150" "$WDB_LOG" || fail "WDB log lacks DUPLICATE line (quote)"
+    grep -q "DUPLICATE dropped - trade_binance_fut tpSeqNo=150" "$WDB_LOG" || fail "WDB log lacks DUPLICATE line (fut)"
     step -step publish -table trade_binance -rows 10 -date "$TODAY"
     sleep 1
     graceful_stop
     step -step assert_vs_tplog -table trade_binance
     step -step assert_vs_tplog -table quote_binance
+    step -step assert_vs_tplog -table trade_binance_fut
     step -step assert_tmp -table trade_binance -date "$TODAY" -rows 160
 }
 end_scenario

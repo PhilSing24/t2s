@@ -64,7 +64,7 @@
 / ---------------------------------------------------------------------------
 .d.seqFile:hsym `$ .d.sbTmp, "../fhseq";
 .d.nextSeq:{[side]
-  d:$[() ~ key .d.seqFile; `trade`quote!0 0j; get .d.seqFile];
+  d:$[() ~ key .d.seqFile; `trade`quote`aggTrade!0 0 0j; get .d.seqFile];
   d[side]+:1;
   .d.seqFile set d;
   d side};
@@ -76,13 +76,23 @@
   (ts; `BTCUSDT; 100000+i; 78000.0+i*0.5; 0.001+i*0.0001; 0b;
    `long$1700000000000+i; `long$1700000000000+i; "j"$ts; 10j; 15j; seq)};
 
+/ Quote prices are deliberately SMALL (~100): the per-table tpSeqNo index
+/ regression (a trade-schema index applied to quotes read askPrice2) only
+/ shows when that misread value is below the checkpoint.
 .d.mkQuote:{[ts;i;seq]
   (ts; `BTCUSDT;
-   78000.0+i*0.5; 78000.5+i*0.5; 78001.0+i*0.5; 78001.5+i*0.5; 78002.0+i*0.5;
+   100.0+i*0.01; 100.5+i*0.01; 101.0+i*0.01; 101.5+i*0.01; 102.0+i*0.01;
    1.0; 0.9; 0.8; 0.7; 0.6;
-   78002.5+i*0.5; 78003.0+i*0.5; 78003.5+i*0.5; 78004.0+i*0.5; 78004.5+i*0.5;
+   102.5+i*0.01; 103.0+i*0.01; 103.5+i*0.01; 104.0+i*0.01; 104.5+i*0.01;
    1.0; 0.9; 0.8; 0.7; 0.6;
    1b; `long$1700000000000+i; "j"$ts; 10j; 15j; seq)};
+
+/ Futures aggTrade row: 14 feed-handler columns (aggTradeId, firstTradeId,
+/ lastTradeId between sym and price). fhSeqNo sits at index 13, which is
+/ where the trade-schema tpSeqNo index would look.
+.d.mkAggTrade:{[ts;i;seq]
+  (ts; `BTCUSDT; 500000+i; 900000+2*i; 900001+2*i; 78000.0+i*0.5; 0.002+i*0.0001; 1b;
+   `long$1700000000000+i; `long$1700000000000+i; "j"$ts; 10j; 15j; seq)};
 
 / ---------------------------------------------------------------------------
 / Disk readers
@@ -134,6 +144,8 @@ if[.d.step ~ "publish";
     {[h;base;i] h (`upd; `trade_binance; .d.mkTrade[base + i*0D00:00:00.001; i; .d.nextSeq `trade])}[h;base] each til n;
     t = `quote_binance;
     {[h;base;i] h (`upd; `quote_binance; .d.mkQuote[base + i*0D00:00:00.001; i; .d.nextSeq `quote])}[h;base] each til n;
+    t = `trade_binance_fut;
+    {[h;base;i] h (`upd; `trade_binance_fut; .d.mkAggTrade[base + i*0D00:00:00.001; i; .d.nextSeq `aggTrade])}[h;base] each til n;
     .d.fail "publish: unknown table"];
   hclose h;
   -1 raze ("  published "; string n; " "; string t; " rows dated "; string d);
@@ -162,7 +174,7 @@ if[.d.step ~ "rewind_checkpoint";
 
 if[.d.step ~ "inject_dup";
   t:`$.d.arg `table; seq:"J"$.d.arg `seq; d:"D"$.d.arg `date;
-  row:$[t = `trade_binance; .d.mkTrade[.d.baseTs d; 0; 0]; .d.mkQuote[.d.baseTs d; 0; 0]];
+  row:$[t = `trade_binance; .d.mkTrade[.d.baseTs d; 0; 0]; t = `trade_binance_fut; .d.mkAggTrade[.d.baseTs d; 0; 0]; .d.mkQuote[.d.baseTs d; 0; 0]];
   / shape as TP would deliver it: FH row + tpRecvTimeUtcNs + tpSeqNo
   row:row, ("j"$.z.p; seq);
   h:.d.open .d.wdbPort; neg[h] (`upd; t; row); h ""; hclose h;
