@@ -69,9 +69,3 @@
 
 .t.ports.tp:15010;
 .t.ports.wdb:15011;
-.t.ports.sig:15012;
-.t.ports.ctp:15014;
-.t.ports.rte:15015;
-.t.ports.tel:15016;
-.t.ports.rdb:15017;
-.t.ports.pnl:15018;

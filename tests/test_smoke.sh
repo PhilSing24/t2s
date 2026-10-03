@@ -1,7 +1,7 @@
 #!/bin/bash
 # test_smoke.sh - Smoke test for each q process.
 #
-# For each q process (tp, ctp, rdb, wdb, sig, pnl, rte, tel):
+# For each q process (tp, wdb):
 #   1. Copy its .q file into a sandbox with patched test ports
 #   2. Start it
 #   3. Wait for its listening port to come up
@@ -27,26 +27,14 @@ SANDBOX="$PROJECT_ROOT/tests/sandbox"
 declare -A LISTEN_PORT
 LISTEN_PORT[tp]=15010
 LISTEN_PORT[wdb]=15011
-LISTEN_PORT[sig]=15012
-LISTEN_PORT[ctp]=15014
-LISTEN_PORT[rte]=15015
-LISTEN_PORT[tel]=15016
-LISTEN_PORT[rdb]=15017
-LISTEN_PORT[pnl]=15018
 
 # Where each .q file lives, relative to project root
 declare -A SRC_PATH
 SRC_PATH[tp]="kdb/tick/tp.q"
-SRC_PATH[ctp]="kdb/tick/chained_tp.q"
-SRC_PATH[rdb]="kdb/tick/rdb.q"
 SRC_PATH[wdb]="kdb/tick/wdb.q"
-SRC_PATH[sig]="kdb/analytics/sig.q"
-SRC_PATH[pnl]="kdb/analytics/pnl.q"
-SRC_PATH[rte]="kdb/analytics/rte.q"
-SRC_PATH[tel]="kdb/analytics/tel.q"
 
 # Order matters only for readability; each is independent
-PROCESSES=(tp ctp rdb wdb sig pnl rte tel)
+PROCESSES=(tp wdb)
 
 # -------------------- cleanup --------------------
 CHILD_PID=""
@@ -84,7 +72,7 @@ done
 
 # -------------------- sandbox setup --------------------
 rm -rf "$SANDBOX"
-mkdir -p "$SANDBOX/kdb/pubsub" "$SANDBOX/kdb/tick" "$SANDBOX/kdb/analytics" "$SANDBOX/logs"
+mkdir -p "$SANDBOX/kdb/pubsub" "$SANDBOX/kdb/tick" "$SANDBOX/logs"
 
 # Shared infrastructure: schemas + pubsub module
 cp "$PROJECT_ROOT/kdb/schemas.q"       "$SANDBOX/kdb/schemas.q"
@@ -118,20 +106,8 @@ run_smoke() {
     # lines to point at unreachable test ports so they stay in degraded mode.
     # Each line matches at most one process; the rest are no-ops.
     sed -e "s|^\.tp\.cfg\.port:.*$|.tp.cfg.port:${listen_port};|" \
-        -e "s|^\.ctp\.cfg\.port:.*$|.ctp.cfg.port:${listen_port};|" \
-        -e "s|^\.rdb\.cfg\.port:.*$|.rdb.cfg.port:${listen_port};|" \
         -e "s|^\.wdb\.cfg\.port:.*$|.wdb.cfg.port:${listen_port};|" \
-        -e "s|^\.sig\.cfg\.port:.*$|.sig.cfg.port:${listen_port};|" \
-        -e "s|^\.pnl\.cfg\.port:.*$|.pnl.cfg.port:${listen_port};|" \
-        -e "s|^\.rte\.cfg\.port:.*$|.rte.cfg.port:${listen_port};|" \
-        -e "s|^\.tel\.cfg\.port:.*$|.tel.cfg.port:${listen_port};|" \
         -e "s|^\.wdb\.cfg\.tpPort:.*$|.wdb.cfg.tpPort:25010;|" \
-        -e "s|^\.sig\.cfg\.tpPort:.*$|.sig.cfg.tpPort:25010;|" \
-        -e "s|^\.rte\.cfg\.tpPort:.*$|.rte.cfg.tpPort:25010;|" \
-        -e "s|^\.tel\.cfg\.tpPort:.*$|.tel.cfg.tpPort:25010;|" \
-        -e "s|^\.rdb\.cfg\.tpPort:.*$|.rdb.cfg.tpPort:25010;|" \
-        -e "s|^\.pnl\.cfg\.tpPort:.*$|.pnl.cfg.tpPort:25010;|" \
-        -e "s|^\.ctp\.cfg\.primaryTP:.*$|.ctp.cfg.primaryTP:25010;|" \
         -e "s|^\.tp\.cfg\.logDir:.*$|.tp.cfg.logDir:\"${SANDBOX}/logs\";|" \
         "$src" > "$dst"
 

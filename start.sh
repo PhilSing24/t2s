@@ -8,8 +8,8 @@
 #   ./start.sh --markets spot,futures - both spot and futures trade FH + quote FH
 #
 # The --markets flag controls which trade feed handlers are launched. The
-# rest of the pipeline (TP, CTP, WDB, RDB, RTE, SIG, TEL, PNL, quote FH)
-# is unconditional and market-agnostic. See ADR-013.
+# rest of the pipeline (TP, WDB, quote FH) is unconditional and
+# market-agnostic. See ADR-013.
 set -e  # Exit on error
 SESSION="t2s"
 # Resolve the project root from the script's own location so this works
@@ -71,7 +71,7 @@ if tmux has-session -t $SESSION 2>/dev/null; then
     exit 1
 fi
 # Check critical ports
-PORTS=(5010 5011 5012 5014 5015 5016 5017 5018)
+PORTS=(5010 5011)
 for port in "${PORTS[@]}"; do
     if lsof -ti:$port >/dev/null 2>&1; then
         echo -e "${RED}Error: Port $port already in use${NC}"
@@ -103,26 +103,6 @@ tmux send-keys -t $SESSION:tp "cd $BASEDIR/kdb/tick && q tp.q" C-m
 # Window 1: WDB (write-only -> HDB) - port 5011
 tmux new-window -t $SESSION -n "wdb"
 tmux send-keys -t $SESSION:wdb "sleep 2 && cd $BASEDIR/kdb/tick && q wdb.q" C-m
-# Window 2: Chained TP (batched publisher) - port 5014
-# Must start before SIG (SIG publishes positions to CTP)
-tmux new-window -t $SESSION -n "ctp"
-tmux send-keys -t $SESSION:ctp "sleep 3 && cd $BASEDIR/kdb/tick && q chained_tp.q" C-m
-# Window 3: SIG (signal generator) - port 5012
-# Subscribes to TP, publishes to CTP
-tmux new-window -t $SESSION -n "sig"
-tmux send-keys -t $SESSION:sig "sleep 5 && cd $BASEDIR/kdb/analytics && q sig.q" C-m
-# Window 4: RTE (real-time analytics) - port 5015
-tmux new-window -t $SESSION -n "rte"
-tmux send-keys -t $SESSION:rte "sleep 5 && cd $BASEDIR/kdb/analytics && q rte.q" C-m
-# Window 5: TEL (telemetry) - port 5016
-tmux new-window -t $SESSION -n "tel"
-tmux send-keys -t $SESSION:tel "sleep 5 && cd $BASEDIR/kdb/analytics && q tel.q" C-m
-# Window 6: RDB (user queries) - port 5017
-tmux new-window -t $SESSION -n "rdb"
-tmux send-keys -t $SESSION:rdb "sleep 6 && cd $BASEDIR/kdb/tick && q rdb.q" C-m
-# Window 7: PNL (P&L monitoring) - port 5018
-tmux new-window -t $SESSION -n "pnl"
-tmux send-keys -t $SESSION:pnl "sleep 6 && cd $BASEDIR/kdb/analytics && q pnl.q" C-m
 
 # Spot trade feed handler (conditional)
 if [[ $LAUNCH_SPOT -eq 1 ]]; then
@@ -145,9 +125,7 @@ tmux select-window -t $SESSION:tp
 echo -e "${GREEN}✓ Pipeline starting (markets=$MARKETS)${NC}"
 echo ""
 echo "Architecture:"
-echo "  Primary TP:5010 -> WDB:5011, SIG:5012"
-echo "  Primary TP:5010 -> Chained TP:5014 -> RTE:5015, TEL:5016, RDB:5017, PNL:5018"
-echo "  SIG:5012 -> Chained TP:5014 (positions)"
+echo "  Primary TP:5010 -> WDB:5011 -> HDB"
 if [[ $LAUNCH_SPOT -eq 1 ]]; then
     echo "  trade_feed_handler     -> TP:5010 (trade_binance)"
 fi
