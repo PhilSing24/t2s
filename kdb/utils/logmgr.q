@@ -167,7 +167,9 @@ system "l ",.lm.dir,"/../schemas.q";
 / -------------------------------------------------------
 
 .lm.args:.z.x;
-if["-check-eod" in .lm.args;
+/ `in` on an empty .z.x compares per character; match each argument instead.
+.lm.has:{[flag] any .lm.args ~\: flag};
+if[.lm.has "-check-eod";
   i:.lm.args ? "-check-eod";
   d:$[(i + 1) < count .lm.args; "D"$.lm.args i + 1; .z.d - 1];
   if[null d; -2 "LOG: bad date"; exit 2];
@@ -180,11 +182,11 @@ if["-check-eod" in .lm.args;
   -1 "LOG:   log ",string[a `sizeMB]," MB, ",string[a `logRows]," rows; partition ",$[.log.partitionExists d; "present"; "MISSING"];
   system "sleep 0.1";
   exit $[a `complete; 0; 1]];
-if["-retention" in .lm.args;
-  .log.retention["-apply" in .lm.args];
+if[.lm.has "-retention";
+  .log.retention[.lm.has "-apply"];
   system "sleep 0.1";
   exit 0];
-if["-summary" in .lm.args;
+if[.lm.has "-summary";
   show select date, sizeMB, logRows, complete, status, reason, detail from .log.summary[];
   system "sleep 0.1";
   exit 0];
