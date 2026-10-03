@@ -14,10 +14,12 @@
 tpPort:"J"$getenv `TEST_TP_PORT;
 wdbPort:"J"$getenv `TEST_WDB_PORT;
 hdbPath:getenv `SANDBOX_HDB_PATH;
+tmpPath:getenv `SANDBOX_TMP_PATH;
 
 if[null tpPort; -1 "ERROR: TEST_TP_PORT not set"; exit 1];
 if[null wdbPort; -1 "ERROR: TEST_WDB_PORT not set"; exit 1];
 if[0 = count hdbPath; -1 "ERROR: SANDBOX_HDB_PATH not set"; exit 1];
+if[0 = count tmpPath; -1 "ERROR: SANDBOX_TMP_PATH not set"; exit 1];
 
 -1 .t.msg ("Test TP port: "; string tpPort);
 -1 .t.msg ("Test WDB port: "; string wdbPort);
@@ -135,11 +137,11 @@ quoteRows:@[{count get x}; quoteSymCol; {[err] -1 "ERR reading quote sym col: ",
 .t.assertEq["trade splay has expected row count"; nTrades; tradeRows];
 .t.assertEq["quote splay has expected row count"; nQuotes; quoteRows];
 
-/ Temp directory should be gone after successful move.
+/ Temp directory should be gone after successful move. WDB's tmp.<date>
+/ dirs live under the sandbox tmp dir (T2S_TMP_DIR for the sandboxed WDB).
 / Compare counts (not values) since `key` returns a typed empty symbol list,
 / which doesn't match-equal the generic `()` even when both are empty.
-sandboxParent:hsym `$ hdbPath,"/..";
-tmpDirs:key sandboxParent;
+tmpDirs:key hsym `$ tmpPath;
 tmpRemaining:tmpDirs where tmpDirs like "tmp.*";
 .t.assertEq["no leftover tmp directories"; 0; count tmpRemaining];
 

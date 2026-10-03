@@ -1,39 +1,30 @@
 #!/bin/bash
-# test_smoke.sh - Smoke test for each q process.
+# test_smoke.sh - Smoke test for each q process (tp, wdb).
 #
-# For each q process (tp, wdb):
-#   1. Copy its .q file into a sandbox with patched test ports
-#   2. Start it
-#   3. Wait for its listening port to come up
+# For each process:
+#   1. Start the REAL kdb/tick/<proc>.q with every path and port pointed at
+#      tests/sandbox and the test port range (see tests/t_lib.sh). No
+#      source is copied or patched.
+#   2. Wait for its listening port to come up
+#   3. Run the isolation guard (tests/t_guard.q): the process reports the
+#      config it actually resolved; any path outside the sandbox or port
+#      outside the test range fails the test
 #   4. Connect via IPC and call .health[]
 #   5. Assert the response has a `status` key with a sane value
 #   6. Kill it cleanly
 #
-# Each process is exercised independently. Upstream connections will be
-# in `disconnected` state because we don't start the upstream - that is
-# acceptable for a smoke test (we are checking that the file loads
+# Each process is exercised independently. WDB's upstream TP port is set to
+# a test-range port nothing listens on, so it sits in `disconnected` state;
+# that is acceptable for a smoke test (we are checking that the file loads
 # without errors, not that the full pipeline works).
 
 set -u
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-PROJECT_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
-cd "$PROJECT_ROOT"
+# shellcheck source=t_lib.sh
+source "$SCRIPT_DIR/t_lib.sh"
+cd "$T2S_TEST_ROOT"
 
-SANDBOX="$PROJECT_ROOT/tests/sandbox"
-
-# Listen ports = production + 10000
-# Upstream ports = production + 20000 (intentionally unreachable -> degraded mode)
-declare -A LISTEN_PORT
-LISTEN_PORT[tp]=15010
-LISTEN_PORT[wdb]=15011
-
-# Where each .q file lives, relative to project root
-declare -A SRC_PATH
-SRC_PATH[tp]="kdb/tick/tp.q"
-SRC_PATH[wdb]="kdb/tick/wdb.q"
-
-# Order matters only for readability; each is independent
 PROCESSES=(tp wdb)
 
 # -------------------- cleanup --------------------
@@ -44,40 +35,28 @@ cleanup() {
         kill -TERM "$CHILD_PID" 2>/dev/null || true
         wait "$CHILD_PID" 2>/dev/null || true
     fi
-    # Belt-and-braces: kill anything still on test ports
-    for proc in "${PROCESSES[@]}"; do
-        local port=${LISTEN_PORT[$proc]}
-        local pid
-        pid=$(lsof -ti:$port 2>/dev/null || true)
-        [[ -n "$pid" ]] && kill -9 "$pid" 2>/dev/null || true
-    done
+    # Belt-and-braces: kill anything still on the test ports (test range only)
+    t2s_kill_port "$T2S_PORT_TP"
+    t2s_kill_port "$T2S_PORT_WDB"
     if [[ $rc -eq 0 ]]; then
-        rm -rf "$SANDBOX"
+        t2s_sandbox_remove
+    else
+        echo "  Sandbox preserved at: $T2S_SANDBOX (for inspection)"
     fi
     exit $rc
 }
 trap cleanup EXIT INT TERM
 
 # -------------------- pre-flight --------------------
-# Clean up stale test ports
-for proc in "${PROCESSES[@]}"; do
-    port=${LISTEN_PORT[$proc]}
-    pid=$(lsof -ti:$port 2>/dev/null || true)
-    if [[ -n "$pid" ]]; then
-        echo "WARN: Killing stale process on port $port (pid $pid)"
-        kill -9 "$pid" 2>/dev/null || true
+for port in "$T2S_PORT_TP" "$T2S_PORT_WDB"; do
+    if lsof -ti:"$port" >/dev/null 2>&1; then
+        echo "WARN: Killing stale process on test port $port"
+        t2s_kill_port "$port"
         sleep 0.1
     fi
 done
 
-# -------------------- sandbox setup --------------------
-rm -rf "$SANDBOX"
-mkdir -p "$SANDBOX/kdb/pubsub" "$SANDBOX/kdb/tick" "$SANDBOX/logs"
-
-# Shared infrastructure: schemas + pubsub module
-cp "$PROJECT_ROOT/kdb/schemas.q"       "$SANDBOX/kdb/schemas.q"
-cp "$PROJECT_ROOT/kdb/pubsub/init.q"   "$SANDBOX/kdb/pubsub/init.q"
-cp "$PROJECT_ROOT/kdb/pubsub/pubsub.q" "$SANDBOX/kdb/pubsub/pubsub.q"
+t2s_sandbox_reset
 
 # -------------------- per-process smoke --------------------
 TOTAL=0
@@ -86,55 +65,46 @@ FAILED_PROCS=()
 
 run_smoke() {
     local proc=$1
-    local listen_port=${LISTEN_PORT[$proc]}
-    local src="$PROJECT_ROOT/${SRC_PATH[$proc]}"
-    local dst="$SANDBOX/${SRC_PATH[$proc]}"
-    local logfile="$SANDBOX/${proc}.log"
+    local listen_port logfile
+    logfile="$T2S_SANDBOX/${proc}.log"
 
     TOTAL=$((TOTAL + 1))
     echo ""
     echo "--- smoke: $proc ---"
 
-    if [[ ! -f "$src" ]]; then
-        echo "  FAIL: source missing at $src"
-        FAILED_PROCS+=("$proc (source missing)")
-        return 1
-    fi
+    case "$proc" in
+        tp)
+            listen_port=$T2S_PORT_TP
+            CHILD_PID=$(t2s_spawn_tp "$listen_port" "$logfile")
+            ;;
+        wdb)
+            listen_port=$T2S_PORT_WDB
+            CHILD_PID=$(t2s_spawn_wdb "$listen_port" "$T2S_PORT_UNREACHABLE" "$logfile")
+            ;;
+        *)
+            echo "  FAIL: unknown process $proc"
+            FAILED_PROCS+=("$proc (unknown)")
+            return 1
+            ;;
+    esac
 
-    # Patch the listen port. Each process uses its own .X.cfg.port pattern.
-    # We sed all known listening-port lines and the most common upstream-port
-    # lines to point at unreachable test ports so they stay in degraded mode.
-    # Each line matches at most one process; the rest are no-ops.
-    sed -e "s|^\.tp\.cfg\.port:.*$|.tp.cfg.port:${listen_port};|" \
-        -e "s|^\.wdb\.cfg\.port:.*$|.wdb.cfg.port:${listen_port};|" \
-        -e "s|^\.wdb\.cfg\.tpPort:.*$|.wdb.cfg.tpPort:25010;|" \
-        -e "s|^\.tp\.cfg\.logDir:.*$|.tp.cfg.logDir:\"${SANDBOX}/logs\";|" \
-        "$src" > "$dst"
-
-    # Start the process. Run from its source directory so relative paths
-    # like ../schemas.q and ../pubsub/init.q resolve correctly.
-    local rundir
-    rundir=$(dirname "$dst")
-    ( cd "$rundir" && q "$(basename "$dst")" ) > "$logfile" 2>&1 &
-    CHILD_PID=$!
-
-    # Wait for listening port (up to 5 seconds)
-    local listening=0
-    for i in {1..50}; do
-        if lsof -ti:$listen_port >/dev/null 2>&1; then
-            listening=1
-            break
-        fi
-        sleep 0.1
-    done
-
-    if [[ $listening -eq 0 ]]; then
+    if ! t2s_wait_port "$listen_port" 5; then
         echo "  FAIL: $proc did not start listening on $listen_port"
         echo "  --- log ---"
         sed 's/^/    /' "$logfile"
         kill -9 "$CHILD_PID" 2>/dev/null || true
         CHILD_PID=""
         FAILED_PROCS+=("$proc (did not listen)")
+        return 1
+    fi
+
+    # Isolation guard: read back the resolved config from the live process
+    if ! t2s_guard "$proc" "$listen_port"; then
+        echo "  FAIL: $proc resolved a path or port outside the sandbox"
+        kill -TERM "$CHILD_PID" 2>/dev/null || true
+        wait "$CHILD_PID" 2>/dev/null || true
+        CHILD_PID=""
+        FAILED_PROCS+=("$proc (isolation guard)")
         return 1
     fi
 
