@@ -88,9 +88,13 @@ t2s_spawn_tp() {
 }
 
 # Spawn the real wdb.q from its own directory with every path/port it reads
-# set explicitly. Args: port tpport logfile. Prints the PID.
+# set explicitly. Args: port tpport logfile [EXTRA=value ...]. Extra
+# assignments (e.g. T2S_WDB_MAXROWS=20, T2S_WDB_FAKE_DATE=2026.01.01,
+# T2S_WDB_ROLL_GRACE_SEC=0) are passed through to the process environment.
+# Prints the PID.
 t2s_spawn_wdb() {
     local port=$1 tpport=$2 logfile=$3
+    shift 3
     t2s_port_in_test_range "$port"   || { echo "t_lib: wdb port $port outside test range" >&2; return 1; }
     t2s_port_in_test_range "$tpport" || { echo "t_lib: wdb tpPort $tpport outside test range" >&2; return 1; }
     (
@@ -100,6 +104,7 @@ t2s_spawn_wdb() {
             T2S_HDB_DIR="$T2S_SB_HDB" \
             T2S_TMP_DIR="$T2S_SB_TMP" \
             T2S_WDB_CHECKPOINT="$T2S_SB_CHECKPOINT" \
+            "$@" \
             q wdb.q
     ) > "$logfile" 2>&1 < /dev/null &
     echo $!

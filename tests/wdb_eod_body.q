@@ -36,9 +36,12 @@ if[hTP <= 0; .t.finish[]];
 / -------------------------------------------------------
 / Publish synthetic data via TP's upd handler
 / TP receives 12-element rows (no tpRecvTimeUtcNs - TP appends that itself)
+/ Rows are stamped with YESTERDAY's time: WDB partitions by the row's own
+/ `time` column, and only dates before its clock's today are rolled into
+/ the HDB when EOD fires.
 / -------------------------------------------------------
 
-now:.z.p;
+now:.z.p - 1D;
 nTrades:100;
 nQuotes:50;
 
@@ -103,18 +106,16 @@ wdbQuotes:hWDB ".wdb.stats.quotesReceived";
 -1 "Forcing EOD by setting TP currentDate to yesterday...";
 hTP ".tp.currentDate:.z.d-1";
 
-/ Wait for TP timer (1s interval) + EOD propagation. Generous.
-system "sleep 4";
+/ Wait for TP timer (1s interval) + EOD propagation + WDB roll (grace 0s,
+/ checked on WDB's 5s timer). Generous.
+system "sleep 8";
 
 / -------------------------------------------------------
 / Post-EOD assertions
 / -------------------------------------------------------
 
-/ Today's date (the day endOfDay was triggered as)
-/ WDB's endofday computes d:-1+.z.d which is the *previous* day.
-/ When we forced .tp.currentDate:.z.d-1, the next tick of TP saw
-/ .z.d > currentDate and fired EOD. WDB then computed d as today-1
-/ = yesterday. So the partition should be at <yesterday>.
+/ The rows were stamped with yesterday's time, so WDB routes them to
+/ tmp.<yesterday> and the roll moves that into the <yesterday> partition.
 yesterday:.z.d-1;
 yesterdayStr:string yesterday;
 

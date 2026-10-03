@@ -67,7 +67,7 @@ fi
 
 # -------------------- spawn WDB --------------------
 echo "Starting test WDB on port $T2S_PORT_WDB..."
-WDB_PID=$(t2s_spawn_wdb "$T2S_PORT_WDB" "$T2S_PORT_TP" "$T2S_SANDBOX/wdb.log")
+WDB_PID=$(t2s_spawn_wdb "$T2S_PORT_WDB" "$T2S_PORT_TP" "$T2S_SANDBOX/wdb.log" T2S_WDB_ROLL_GRACE_SEC=0)
 if ! t2s_wait_port "$T2S_PORT_WDB" 6; then
     echo "ERROR: WDB failed to start - log:"
     cat "$T2S_SANDBOX/wdb.log"

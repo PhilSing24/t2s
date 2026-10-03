@@ -48,7 +48,7 @@ absolutize:{[cwd;p] canon $[(count p) and "/" = first p; p; raze (cwd; "/"; p)]}
 / Which variables to check, per process.
 pathVars:$[proc = `tp;
   (".tp.cfg.logDir"; ".tp.logFile");
-  (".wdb.cfg.hdbDir"; ".wdb.cfg.checkpointFile"; ".wdb.tmpDir"; "TMPSAVE")];
+  (".wdb.cfg.hdbDir"; ".wdb.cfg.checkpointFile"; ".wdb.tmpDir"; ".wdb.tmpPath .wdb.today[]")];
 portVars:$[proc = `tp;
   enlist ".tp.cfg.port";
   (".wdb.cfg.port"; ".wdb.cfg.tpPort")];
