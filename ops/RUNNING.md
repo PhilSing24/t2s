@@ -89,10 +89,12 @@ to install; nothing happens while you are not looking.
 
 cron is running in this WSL. The entries added by the ops step run, in
 UTC: `check_eod.sh` shortly after midnight (confirms yesterday's partition
-against its log), `status.sh` for a morning summary, and the log retention
-dry run. Each writes to `ops/cron/*.log` under the repo. See the crontab
-itself (`crontab -l`) for the exact lines; they are appended after the
-existing entries of other projects.
+against its log), log retention with `-apply` ten minutes later (deletes
+logs older than 7 days whose rows are all in the HDB; switched from a dry
+run on 2026-10-03 after the first real run removed 10.6 GB), and
+`status.sh` for a morning summary. Each writes to `ops/cron/*.log` under
+the repo. See the crontab itself (`crontab -l`) for the exact lines; they
+are appended after the existing entries of other projects.
 
 ## Resources and the WSL memory cap
 
