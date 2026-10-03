@@ -52,3 +52,6 @@ kdb/tick/baseline
 kdb/tick/baseline_pr2
 load_*.log
 backtest_*.log
+
+# ops cron output
+ops/cron/*.log
