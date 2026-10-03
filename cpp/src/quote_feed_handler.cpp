@@ -32,6 +32,9 @@ QuoteFeedHandler::QuoteFeedHandler(const std::vector<std::string>& symbols,
     , tpPort_(tpPort)
     , startTime_(std::chrono::system_clock::now())
 {
+    sessionId_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        startTime_.time_since_epoch()).count();
+
     // Store lowercase (for WebSocket) and uppercase (for internal use)
     for (const auto& sym : symbols) {
         symbolsLower_.push_back(sym);
@@ -74,9 +77,13 @@ void QuoteFeedHandler::run() {
     snapshotWorker_->start();
     spdlog::info("Snapshot worker thread started");
 
-    // Connect to tickerplant
-    if (!connectToTP()) {
-        spdlog::warn("Shutdown before TP connection established");
+    // Connect to tickerplant and register this session
+    if (!connectToTP(fhSeqNo_ + 1)) {
+        if (!fatalError_.empty()) {
+            spdlog::critical("TP rejected this handler: {} - exiting", fatalError_);
+        } else {
+            spdlog::warn("Shutdown before TP connection established");
+        }
         snapshotWorker_->stop();
         return;
     }
@@ -131,7 +138,28 @@ std::string QuoteFeedHandler::buildDepthStreamPath() const {
     return path;
 }
 
-bool QuoteFeedHandler::connectToTP() {
+int QuoteFeedHandler::registerSession(int h, long long nextFhSeqNo) {
+    const long long width = 28LL;   // quote_binance feed-handler columns
+    K r = k(h, (S)".tp.registerSession",
+            ks((S)"quote_binance"), kj(sessionId_), kj(nextFhSeqNo), kj(width), (K)0);
+    if (r == nullptr) {
+        spdlog::error("TP connection lost during session registration");
+        return 0;
+    }
+    if (r->t == -128) {
+        fatalError_ = std::string("registration rejected for quote_binance: ") + r->s;
+        spdlog::critical("TP REJECTED session registration for quote_binance (sessionId={}, nextFhSeqNo={}, width={}): {}",
+                         sessionId_, nextFhSeqNo, width, r->s);
+        r0(r);
+        return -1;
+    }
+    r0(r);
+    spdlog::info("Session registered with TP: table=quote_binance sessionId={} nextFhSeqNo={} width={}",
+                 sessionId_, nextFhSeqNo, width);
+    return 1;
+}
+
+bool QuoteFeedHandler::connectToTP(long long nextFhSeqNo) {
     int attempt = 0;
     while (running_) {
         spdlog::info("Connecting to TP on {}:{}...", tpHost_, tpPort_);
@@ -139,12 +167,20 @@ bool QuoteFeedHandler::connectToTP() {
         int h = khpu((S)tpHost_.c_str(), tpPort_, (S)"");
         
         if (h > 0) {
-            tpHandle_ = h;
-            spdlog::info("Connected to TP (handle {})", h);
-            return true;
+            int reg = registerSession(h, nextFhSeqNo);
+            if (reg == 1) {
+                tpHandle_ = h;
+                spdlog::info("Connected to TP (handle {})", h);
+                return true;
+            }
+            kclose(h);
+            if (reg < 0) {
+                running_ = false;   // fatal: exit the handler
+                return false;
+            }
+        } else {
+            spdlog::error("Failed to connect to TP");
         }
-        
-        spdlog::error("Failed to connect to TP");
         if (!sleepWithBackoff(attempt++)) {
             return false;
         }
@@ -596,7 +632,8 @@ void QuoteFeedHandler::publishL5(const L5Quote& quote) {
         connState_ = "reconnecting";
         kclose(tpHandle_);
         tpHandle_ = -1;
-        if (connectToTP()) {
+        // Re-register announcing the row we are about to resend.
+        if (connectToTP(quote.fhSeqNo)) {
             // Build a fresh row for the resend - the original was consumed
             // by the failed k() above.
             t2s::KOwned row2(knk(28,

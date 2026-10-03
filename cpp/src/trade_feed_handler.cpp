@@ -32,6 +32,8 @@ TradeFeedHandler::TradeFeedHandler(const std::vector<std::string>& symbols,
     , tpPort_(tpPort)
     , startTime_(std::chrono::system_clock::now())
 {
+    sessionId_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        startTime_.time_since_epoch()).count();
 }
 
 TradeFeedHandler::~TradeFeedHandler() {
@@ -51,9 +53,14 @@ void TradeFeedHandler::run() {
                  cfg_.host, cfg_.port, cfg_.streamSuffix, cfg_.tpTable);
     spdlog::info("Symbols: {}", fmt::join(symbols_, " "));
 
-    // Connect to tickerplant (retries until success or shutdown)
-    if (!connectToTP()) {
-        spdlog::warn("Shutdown before TP connection established");
+    // Connect to tickerplant (retries until success or shutdown) and
+    // register this session. First row will carry fhSeqNo 1.
+    if (!connectToTP(fhSeqNo_ + 1)) {
+        if (!fatalError_.empty()) {
+            spdlog::critical("TP rejected this handler: {} - exiting", fatalError_);
+        } else {
+            spdlog::warn("Shutdown before TP connection established");
+        }
         return;
     }
 
@@ -110,7 +117,31 @@ bool shouldLogParseFailure(long long count) noexcept {
 
 } // namespace
 
-bool TradeFeedHandler::connectToTP() {
+int TradeFeedHandler::registerSession(int h, long long nextFhSeqNo) {
+    const long long width = (cfg_.schema == t2s::TradeSchema::SpotTrade) ? 12LL : 14LL;
+    // Sync call. The argument atoms are small; we deliberately do not r0
+    // them (the C API's ownership rules for sync k() differ between
+    // versions, and a leak of four atoms per connect is harmless).
+    K r = k(h, (S)".tp.registerSession",
+            ks((S)cfg_.tpTable.c_str()), kj(sessionId_), kj(nextFhSeqNo), kj(width), (K)0);
+    if (r == nullptr) {
+        spdlog::error("TP connection lost during session registration");
+        return 0;
+    }
+    if (r->t == -128) {
+        fatalError_ = std::string("registration rejected for ") + cfg_.tpTable + ": " + r->s;
+        spdlog::critical("TP REJECTED session registration for {} (sessionId={}, nextFhSeqNo={}, width={}): {}",
+                         cfg_.tpTable, sessionId_, nextFhSeqNo, width, r->s);
+        r0(r);
+        return -1;
+    }
+    r0(r);
+    spdlog::info("Session registered with TP: table={} sessionId={} nextFhSeqNo={} width={}",
+                 cfg_.tpTable, sessionId_, nextFhSeqNo, width);
+    return 1;
+}
+
+bool TradeFeedHandler::connectToTP(long long nextFhSeqNo) {
     int attempt = 0;
     while (running_) {
         spdlog::info("Connecting to TP on {}:{}...", tpHost_, tpPort_);
@@ -118,12 +149,21 @@ bool TradeFeedHandler::connectToTP() {
         int h = khpu((S)tpHost_.c_str(), tpPort_, (S)"");
 
         if (h > 0) {
-            tpHandle_ = h;
-            spdlog::info("Connected to TP (handle {})", h);
-            return true;
+            int reg = registerSession(h, nextFhSeqNo);
+            if (reg == 1) {
+                tpHandle_ = h;
+                spdlog::info("Connected to TP (handle {})", h);
+                return true;
+            }
+            kclose(h);
+            if (reg < 0) {
+                running_ = false;   // fatal: do not retry, exit the handler
+                return false;
+            }
+            // reg == 0: network failure during registration, retry below
+        } else {
+            spdlog::error("Failed to connect to TP");
         }
-
-        spdlog::error("Failed to connect to TP");
         if (!sleepWithBackoff(attempt++)) {
             return false;  // Shutdown requested
         }
@@ -319,7 +359,9 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
         connState_ = "reconnecting";
         kclose(tpHandle_);
         tpHandle_ = -1;
-        if (connectToTP()) {
+        // Re-register announcing the row we are about to resend (fhSeqNo_),
+        // so TP does not count it as out of order.
+        if (connectToTP(fhSeqNo_)) {
             // Build a fresh row for the resend - the original was consumed
             // by the failed k() above. (Pre-RAII this code reused the freed
             // row pointer, a use-after-free.) Schema branch the same way.

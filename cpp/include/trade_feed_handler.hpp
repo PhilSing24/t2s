@@ -142,6 +142,14 @@ public:
      */
     long long messageCount() const { return fhSeqNo_; }
 
+    /**
+     * @brief Non-empty if the handler stopped because TP rejected it
+     *
+     * Set when .tp.registerSession refuses this handler (schema width
+     * mismatch, unknown table). The process should exit non-zero.
+     */
+    const std::string& fatalError() const { return fatalError_; }
+
 private:
     // ========================================================================
     // CONFIGURATION
@@ -161,6 +169,16 @@ private:
 
     /// FH sequence number (monotonically increasing per instance)
     long long fhSeqNo_{0};
+
+    /// Session id announced to TP on every connect: process start time in
+    /// nanoseconds since the Unix epoch, unique per handler start. A new
+    /// id tells TP this is a restart (fhSeqNo starts again at 1); the same
+    /// id on a new connection tells TP this is a reconnect (fhSeqNo
+    /// continues). See .tp.registerSession in kdb/tick/tp.q.
+    long long sessionId_{0};
+
+    /// Reason TP refused us, if any (see fatalError()).
+    std::string fatalError_;
 
     /// Last tradeId per symbol (for gap detection)
     std::unordered_map<std::string, long long> lastTradeId_;
@@ -201,10 +219,22 @@ private:
     // ========================================================================
 
     /**
-     * @brief Connect to tickerplant with retry
-     * @return true if connected, false if shutdown requested
+     * @brief Connect to tickerplant with retry and register the session
+     * @param nextFhSeqNo fhSeqNo of the next row this handler will send
+     * @return true if connected and registered; false if shutdown was
+     *         requested or TP rejected the registration (see fatalError())
      */
-    bool connectToTP();
+    bool connectToTP(long long nextFhSeqNo);
+
+    /**
+     * @brief Announce this handler to TP on a freshly opened handle
+     *
+     * Synchronous call to .tp.registerSession[table; sessionId; nextFhSeqNo;
+     * rowWidth]. TP checks the row width against its schema and tracks
+     * restarts vs reconnects by session id.
+     * @return 1 registered, 0 network failure (retry), -1 rejected (fatal)
+     */
+    int registerSession(int h, long long nextFhSeqNo);
 
     /**
      * @brief Sleep with exponential backoff

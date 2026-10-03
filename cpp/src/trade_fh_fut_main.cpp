@@ -113,6 +113,11 @@ int main(int argc, char* argv[]) {
     handler.run();
 
     g_handler = nullptr;
+    if (!handler.fatalError().empty()) {
+        spdlog::critical("Exiting with error: {}", handler.fatalError());
+        shutdownLogger();
+        return 2;
+    }
     spdlog::info("Exiting");
     shutdownLogger();
     return 0;

@@ -141,6 +141,9 @@ public:
      */
     long long messageCount() const { return fhSeqNo_; }
 
+    /// Non-empty if TP rejected this handler's session registration.
+    const std::string& fatalError() const { return fatalError_; }
+
 private:
     // ========================================================================
     // CONFIGURATION
@@ -166,6 +169,12 @@ private:
     
     /// FH sequence number
     long long fhSeqNo_{0};
+
+    /// Session id announced to TP on every connect (process start time, ns).
+    long long sessionId_{0};
+
+    /// Reason TP refused us, if any.
+    std::string fatalError_;
     
     /// Binance reconnection attempt counter
     int binanceReconnectAttempt_{0};
@@ -218,8 +227,12 @@ private:
     /// Build WebSocket path for depth streams
     std::string buildDepthStreamPath() const;
     
-    /// Connect to tickerplant with retry
-    bool connectToTP();
+    /// Connect to tickerplant with retry and register the session
+    /// (nextFhSeqNo = fhSeqNo of the next row we will send)
+    bool connectToTP(long long nextFhSeqNo);
+
+    /// Sync .tp.registerSession on a fresh handle: 1 ok, 0 retry, -1 fatal
+    int registerSession(int h, long long nextFhSeqNo);
     
     /// Sleep with exponential backoff
     bool sleepWithBackoff(int attempt);
