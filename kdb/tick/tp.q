@@ -52,6 +52,15 @@
 / less than this many MB free. T2S_TP_MIN_FREE_MB overrides; default 5 GB.
 .tp.cfg.minFreeMB:$[count v:getenv `T2S_TP_MIN_FREE_MB; "J"$v; 5120];
 
+/ Clock skew: median over recent rows of (TP receive time - exchange event
+/ time) in ms. Normal values are tens to a few hundred ms (network + the
+/ exchange's own clock). A WSL clock that drifted after sleep shows up here
+/ as a large skew of either sign; .health[] degrades above this threshold.
+/ T2S_TP_MAX_SKEW_MS overrides; 0 disables the check (sandbox tests use
+/ synthetic rows on fake dates, whose exchange times are days off).
+.tp.cfg.maxSkewMs:$[count v:getenv `T2S_TP_MAX_SKEW_MS; "J"$v; 5000];
+.tp.cfg.skewSamples:200;
+
 / WDB's checkpoint, read-only, only to warn at migration time if the seeded
 / counter would be below what WDB has already persisted (WDB would halt).
 / Same resolution rule as wdb.q.
@@ -71,6 +80,13 @@ system "g 0";
 / inside the sandbox.
 .tp.clock.fixed:$[count v:getenv `T2S_TP_FAKE_DATE; "D"$v; 0Nd];
 .tp.today:{[] $[null .tp.clock.fixed; .z.d; .tp.clock.fixed]};
+/ Runtime form of the same hook (tests move TP across midnight): fixes the
+/ date and runs the EOD check at once.
+.tp.clock.set:{[d]
+  .tp.clock.fixed:d;
+  -1 "TP: WARNING - clock override -> ",string[d]," (TEST HOOK)";
+  .tp.checkEOD[];
+ };
 if[not null .tp.clock.fixed;
   -1 "=======================================================";
   -1 "TP: WARNING - T2S_TP_FAKE_DATE is set: today is FIXED to ",string[.tp.clock.fixed];
@@ -95,6 +111,7 @@ health_feed_handler:.schema.health;
 / tpSeqNo), so fhSeqNo's position is the same in the FH row and the logged
 / row, and the expected FH row width is the schema width minus 2.
 .tp.idx.fhSeqNo:.tp.tables ! {[t] (cols value t)?`fhSeqNo} each .tp.tables;
+.tp.idx.exchEvent:.tp.tables ! {[t] (cols value t)?`exchEventTimeMs} each .tp.tables;
 .tp.fhWidth:.tp.tables ! {[t] -2 + count cols value t} each .tp.tables;
 if[any .tp.idx.fhSeqNo >= .tp.fhWidth;
   '"tp.q: schemas.q has a table without fhSeqNo among the feed-handler columns"];
@@ -373,6 +390,21 @@ pubsub.init[]
 .tp.tsToNs:{[ts] .tp.epochOffset+"j"$ts};
 .tp.mismatchLogCount:0j;
 
+/ Clock-skew ring buffer
+.tp.skew.samples:.tp.cfg.skewSamples # 0Nj;
+.tp.skew.pos:0j;
+.tp.skew.record:{[tbl; data]
+  i:.tp.idx.exchEvent tbl;
+  if[i >= count data; :()];
+  ev:data i;
+  if[not -7h = type ev; :()];
+  nowMs:("j"$.z.p - 1970.01.01D0) div 1000000;
+  .tp.skew.samples[.tp.skew.pos]:nowMs - ev;
+  .tp.skew.pos:(.tp.skew.pos + 1) mod .tp.cfg.skewSamples;
+  };
+.tp.skew.median:{[] s:.tp.skew.samples where not null .tp.skew.samples; $[count s; `long$med s; 0Nj]};
+.tp.skew.high:{[] m:.tp.skew.median[]; (.tp.cfg.maxSkewMs > 0) and (not null m) and (abs m) > .tp.cfg.maxSkewMs};
+
 upd:{[tbl;data]
   / Health messages bypass sequence checks and the durability log entirely.
   if[tbl=`health_feed_handler;
@@ -403,6 +435,7 @@ upd:{[tbl;data]
       .tp.unregisteredSeen,:h;
       -1 raze ("TP: handle "; string h; " publishes "; string tbl; " without a session registration - accepting and counting")]];
   .tp.checkSeq[tbl; data .tp.idx.fhSeqNo tbl];
+  .tp.skew.record[tbl; data];
   / Append TP-side fields: tpRecvTimeUtcNs, tpSeqNo (the last two schema columns)
   data:data, (.tp.tsToNs[.z.p]; .tp.nextSeqNo[]);
   if[null .tp.seq.firstTp tbl; .tp.seq.firstTp[tbl]:last data];
@@ -525,8 +558,9 @@ upd:{[tbl;data]
   st:$[((sum .tp.ctr.schemaMismatch) + .tp.ctr.rejectedRegistrations) > 0; `degraded;
        (sum .tp.ctr.gaps) > 0; `degraded;
        .tp.disk.low[]; `degraded;
+       .tp.skew.high[]; `degraded;
        `ok];
-  `process`port`uptime`status`memMB`msgsIn`msgsOut`tpSeqNo`gaps`missed`restarts`reconnects`outOfOrder`unregisteredRows`schemaMismatch`rejectedRegistrations`diskFreeMB`diskLow!(
+  `process`port`uptime`status`memMB`msgsIn`msgsOut`tpSeqNo`gaps`missed`restarts`reconnects`outOfOrder`unregisteredRows`schemaMismatch`rejectedRegistrations`diskFreeMB`diskLow`clockSkewMs`clockSkewHigh!(
     `tp;
     .tp.cfg.port;
     `second$.z.p - .proc.startTime;
@@ -544,7 +578,9 @@ upd:{[tbl;data]
     sum .tp.ctr.schemaMismatch;
     .tp.ctr.rejectedRegistrations;
     .tp.disk.freeMB;
-    .tp.disk.low[])
+    .tp.disk.low[];
+    .tp.skew.median[];
+    .tp.skew.high[])
   }
 
 / Per-table detail table
