@@ -75,15 +75,18 @@ stop_pids() {
     return 0
 }
 
-pids_by_pattern() { pgrep -f "$1" 2>/dev/null || true; }
-pid_by_port()     { lsof -ti:"$1" 2>/dev/null || true; }
+# Match the process NAME exactly (pgrep -x). A pattern match on the command
+# line (pgrep -f) also hits any shell or editor whose arguments mention the
+# binary, and once killed the operator's own session mid-stop.
+pids_by_name() { pgrep -x "$1" 2>/dev/null || true; }
+pid_by_port()  { lsof -ti:"$1" 2>/dev/null || true; }
 
 echo "Stopping t2s pipeline..."
 
 # ---------------------------------------------------------------------------
 # 1. Feed handlers
 # ---------------------------------------------------------------------------
-FH_PIDS=$( { pids_by_pattern "build/trade_feed_handler"; pids_by_pattern "build/quote_feed_handler"; } | sort -u )
+FH_PIDS=$( { pids_by_name trade_feed_handler; pids_by_name trade_feed_handler_fut; pids_by_name quote_feed_handler; } | sort -u )
 # shellcheck disable=SC2086
 stop_pids "feed handlers" $FH_PIDS
 
@@ -137,8 +140,8 @@ if tmux has-session -t $SESSION 2>/dev/null; then
 fi
 
 for script in tp.q wdb.q; do
-    # shellcheck disable=SC2046
-    STRAY=$(pgrep -f "q $script" 2>/dev/null || true)
+    # q processes running our scripts: command line is exactly "q <script>"
+    STRAY=$(pgrep -fx "q $script" 2>/dev/null || true)
     if [[ -n "$STRAY" ]]; then
         warn "stray q $script (PIDs $STRAY) - SIGKILL"
         kill -9 $STRAY 2>/dev/null
