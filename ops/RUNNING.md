@@ -94,6 +94,38 @@ dry run. Each writes to `ops/cron/*.log` under the repo. See the crontab
 itself (`crontab -l`) for the exact lines; they are appended after the
 existing entries of other projects.
 
+## Resources and the WSL memory cap
+
+Measured on 2026-10-03 over a 10-minute live run with spot and futures
+(samples every 5 s), plus the maintenance tools on the real logs:
+
+| Process / task | RSS | CPU |
+|---|---|---|
+| TP | 8 MB | 1 % average, 3 % peak |
+| WDB (buffers flush at 50,000 rows per table) | 14 MB average, 22 MB peak | under 1 % |
+| each feed handler (3) | 10 to 11 MB | under 1 % |
+| retention scan of 10.6 GB of logs | 1.0 GB peak, 88 s | one core |
+| rebuild report of the heaviest day (2.4 GB log, 13 M rows) | 6.5 GB peak, 2 m 51 s | one core |
+| WDB replay after a long outage | roughly the gap's rows in memory; a whole 13 M-row day would be in the same range as the rebuild | one core |
+
+So the pipeline itself is tiny; only the one-off tools and a worst-case
+replay need gigabytes, one at a time. The host has 15.6 GB and
+`.wslconfig` currently gives WSL 12 GB, which leaves Windows under 4 GB.
+Proposed `.wslconfig` (text only, not applied by the repo):
+
+```
+[wsl2]
+vmIdleTimeout=-1
+memory=8GB
+swap=8GB
+```
+
+8 GB covers the pipeline with the heaviest rebuild or replay running alongside
+it, and gives Windows back 4 GB. Keep `swap=8GB` as the safety net for a
+rebuild bigger than any day seen so far. If you expect to rebuild several
+days at once, raise `memory` to 10GB for that session; the tools run one
+day at a time either way.
+
 ## Clock
 
 WSL2's clock can fall behind after the laptop sleeps. Partitions are dated
