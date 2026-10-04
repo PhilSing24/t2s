@@ -44,6 +44,8 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "market_config.hpp"   // t2s::DepthSync
+
 // ============================================================================
 // CONFIGURATION
 // ============================================================================
@@ -64,6 +66,7 @@ struct BookConfig {
     std::size_t snapshotLimit   = 1000;  ///< levels per side requested from REST
     std::size_t refreshLowWater = 100;   ///< known levels below which a refresh is wanted
     std::size_t maxLevels       = 4000;  ///< cap on stored levels per side
+    t2s::DepthSync sync = t2s::DepthSync::Spot;  ///< which exchange sequencing rule applies
 };
 
 /// What OrderBookManager::onSnapshot did with a snapshot.
@@ -122,6 +125,7 @@ struct L5Quote {
     
     bool isValid = false;
     long long exchEventTimeMs = 0;
+    long long exchTransactTimeMs = 0;   // futures only (0 on spot)
     long long fhRecvTimeUtcNs = 0;
     long long fhSeqNo = 0;
     
@@ -149,6 +153,8 @@ struct BufferedDelta {
     long long eventTimeMs;
     std::vector<PriceLevel> bids;   // Level updates (price, qty) - qty=0 means delete
     std::vector<PriceLevel> asks;
+    long long prevFinalUpdateId = -1;   // futures only: `pu`, the previous event's u
+    long long transactTimeMs = 0;       // futures only: `T`, transaction time
 };
 
 /**
@@ -193,6 +199,7 @@ public:
         seq_.resize(numSymbols_);
         states_.resize(numSymbols_, BookState::INIT);
         exchEventTimeMs_.resize(numSymbols_, 0);
+        exchTransactTimeMs_.resize(numSymbols_, 0);
         deltaBuffers_.resize(numSymbols_);
         snapshotRequested_.resize(numSymbols_, false);
         refreshPending_.resize(numSymbols_, false);
@@ -360,7 +367,7 @@ public:
         auto& buf = deltaBuffers_[idx];
         bool failed = false;
         for (const auto& d : buf) {
-            if (!applyDelta(idx, d.firstUpdateId, d.finalUpdateId, d.bids, d.asks, d.eventTimeMs)) {
+            if (!applyDelta(idx, d)) {
                 failed = true;
                 break;
             }
@@ -383,12 +390,24 @@ public:
                     const std::vector<PriceLevel>& bidUpdates,
                     const std::vector<PriceLevel>& askUpdates,
                     long long eventTimeMs) {
+        return applyDelta(idx, BufferedDelta{firstUpdateId, finalUpdateId, eventTimeMs,
+                                             bidUpdates, askUpdates});
+    }
+
+    /// Same, with the futures fields (pu, T) carried in the delta.
+    bool applyDelta(int idx, const BufferedDelta& d) {
+        const long long firstUpdateId = d.firstUpdateId;
+        const long long finalUpdateId = d.finalUpdateId;
+        const std::vector<PriceLevel>& bidUpdates = d.bids;
+        const std::vector<PriceLevel>& askUpdates = d.asks;
+        const long long eventTimeMs = d.eventTimeMs;
+
         BookState state = states_[idx];
         if (state != BookState::SYNCING && state != BookState::VALID) {
             return false;   // INIT or INVALID - shouldn't be applying deltas
         }
 
-        Verdict v = checkSequence(seq_[idx], firstUpdateId, finalUpdateId);
+        Verdict v = checkSequence(seq_[idx], d);
         if (v == Verdict::FAIL) {
             invalidate(idx, "Sequence gap");
             return false;
@@ -397,6 +416,7 @@ public:
             applyLevels(books_[idx], bidUpdates, askUpdates);
             seq_[idx].lastId = finalUpdateId;
             exchEventTimeMs_[idx] = eventTimeMs;
+            exchTransactTimeMs_[idx] = d.transactTimeMs;
             states_[idx] = BookState::VALID;
 
             bool exhausted = depthExhausted(idx);
@@ -406,8 +426,7 @@ public:
 
         // A refresh is in flight: keep a copy for the shadow book.
         if (refreshPending_[idx]) {
-            bufferDelta(idx, BufferedDelta{firstUpdateId, finalUpdateId, eventTimeMs,
-                                           bidUpdates, askUpdates});
+            bufferDelta(idx, d);
         }
         return true;
     }
@@ -418,6 +437,7 @@ public:
         states_[idx] = BookState::INIT;
         seq_[idx] = Seq{};
         exchEventTimeMs_[idx] = 0;
+        exchTransactTimeMs_[idx] = 0;
         deltaBuffers_[idx].clear();
         snapshotRequested_[idx] = false;
         refreshPending_[idx] = false;
@@ -451,6 +471,7 @@ public:
         q.sym = idxToSym_[idx];
         q.isValid = (states_[idx] == BookState::VALID) && !depthExhausted(idx);
         q.exchEventTimeMs = exchEventTimeMs_[idx];
+        q.exchTransactTimeMs = exchTransactTimeMs_[idx];
         q.fhRecvTimeUtcNs = fhRecvTimeUtcNs;
         q.fhSeqNo = fhSeqNo;
 
@@ -592,19 +613,47 @@ private:
     struct Seq {
         bool needBridge = false;      ///< snapshot loaded, first event not yet seen
         long long snapshotId = 0;     ///< lastUpdateId of that snapshot
-        long long lastId = 0;         ///< update id the book is at
+        long long lastId = 0;         ///< update id the book is at (u of the last applied event)
     };
 
     enum class Verdict { SKIP, APPLY, FAIL };
 
     /**
-     * Binance spot rule ("How to manage a local order book correctly"):
+     * Is this event the next one for a book in sequencing state s?
+     *
+     * Spot ("How to manage a local order book correctly",
+     * https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams):
+     *   update ids are consecutive per symbol.
      *   first event after a snapshot:  U <= lastUpdateId+1 <= u
      *   afterwards:  u < lastId -> stale, skip;  U > lastId+1 -> gap;
      *                otherwise apply (payload quantities are absolute, so
      *                an overlapping event is safe to re-apply).
+     *
+     * USD-M futures (https://developers.binance.com/docs/derivatives/usds-margined-futures/
+     * websocket-market-streams/How-to-manage-a-local-order-book-correctly, read 2026-10-04):
+     *   update ids are NOT consecutive per symbol; each event carries `pu`,
+     *   the `u` of the previous event of that stream.
+     *   step 4: drop any event where u < lastUpdateId of the snapshot
+     *   step 5: the first processed event has U <= lastUpdateId AND u >= lastUpdateId
+     *   step 6: afterwards each event's pu must equal the previous event's u,
+     *           otherwise re-initialise from a new snapshot
+     *   One addition to step 5: an event whose pu equals the snapshot's
+     *   lastUpdateId is also accepted as the first one. It is by definition
+     *   the event that follows the snapshot's state (this happens when the
+     *   snapshot was taken exactly on an event boundary).
      */
-    static Verdict checkSequence(Seq& s, long long U, long long u) {
+    Verdict checkSequence(Seq& s, const BufferedDelta& d) const {
+        const long long U = d.firstUpdateId, u = d.finalUpdateId;
+        if (cfg_.sync == t2s::DepthSync::Futures) {
+            if (s.needBridge) {
+                if (d.prevFinalUpdateId == s.snapshotId) { s.needBridge = false; return Verdict::APPLY; }
+                if (u < s.snapshotId) return Verdict::SKIP;          // step 4
+                if (U > s.snapshotId) return Verdict::FAIL;          // step 5 violated: snapshot too old
+                s.needBridge = false;
+                return Verdict::APPLY;
+            }
+            return d.prevFinalUpdateId == s.lastId ? Verdict::APPLY : Verdict::FAIL;   // step 6
+        }
         if (s.needBridge) {
             if (u < s.snapshotId + 1) return Verdict::SKIP;      // older than the snapshot
             if (U > s.snapshotId + 1) return Verdict::FAIL;      // snapshot too old
@@ -629,7 +678,7 @@ private:
         auto& buf = deltaBuffers_[idx];
         bool failed = false;
         for (const auto& d : buf) {
-            Verdict v = checkSequence(sseq, d.firstUpdateId, d.finalUpdateId);
+            Verdict v = checkSequence(sseq, d);
             if (v == Verdict::FAIL) { failed = true; break; }
             if (v == Verdict::APPLY) {
                 applyLevels(shadow, d.bids, d.asks);
@@ -665,6 +714,7 @@ private:
     std::vector<Seq> seq_;
     std::vector<BookState> states_;
     std::vector<long long> exchEventTimeMs_;
+    std::vector<long long> exchTransactTimeMs_;
     std::vector<std::deque<BufferedDelta>> deltaBuffers_;
     std::vector<bool> snapshotRequested_;
     std::vector<bool> refreshPending_;

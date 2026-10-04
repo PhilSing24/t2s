@@ -51,6 +51,7 @@ QuoteFeedHandler::QuoteFeedHandler(const std::vector<std::string>& symbols,
     // Create book manager with uppercase symbols
     BookConfig bookCfg;
     bookCfg.snapshotLimit = static_cast<std::size_t>(cfg_.snapshotLimit);
+    bookCfg.sync = cfg_.sync;
     bookMgr_ = std::make_unique<OrderBookManager>(symbolsUpper_, bookCfg);
 
     // Per-symbol "latest request id" tracking, used to discard stale
@@ -398,6 +399,15 @@ void QuoteFeedHandler::processMessage(const std::string& msg, long long fhRecvTi
     auto Ef       = d.int64("E");
     const auto* bArr = d.array("b");
     const auto* aArr = d.array("a");
+    // USD-M futures depth events also carry pu (the previous event's u,
+    // needed by the futures sync rule) and T (transaction time). Both are
+    // required there; a payload without them is a schema error.
+    const bool futures = (cfg_.sync == t2s::DepthSync::Futures);
+    std::optional<std::int64_t> puf, Tf;
+    if (futures) {
+        puf = d.int64("pu");
+        Tf  = d.int64("T");
+    }
 
     if (d.hasError()) {
         long long n = ++g_parseFailures;
@@ -417,6 +427,10 @@ void QuoteFeedHandler::processMessage(const std::string& msg, long long fhRecvTi
     delta.firstUpdateId = *Uf;
     delta.finalUpdateId = *uf;
     delta.eventTimeMs   = *Ef;
+    if (futures) {
+        delta.prevFinalUpdateId = *puf;
+        delta.transactTimeMs    = *Tf;
+    }
 
     // Per-level parsing. Malformed levels are silently skipped (per-level
     // resilience) rather than failing the whole message - one bad price
@@ -467,8 +481,7 @@ void QuoteFeedHandler::handleDelta(int symIdx, const BufferedDelta& delta, long 
 
         case BookState::SYNCING:
         case BookState::VALID:
-            if (!bookMgr_->applyDelta(symIdx, delta.firstUpdateId, delta.finalUpdateId,
-                                      delta.bids, delta.asks, delta.eventTimeMs)) {
+            if (!bookMgr_->applyDelta(symIdx, delta)) {
                 // Sequence gap (or a snapshot too old to bridge): the book
                 // can no longer be trusted. Publish one invalid row so the
                 // hole is visible downstream, then rebuild from a snapshot.

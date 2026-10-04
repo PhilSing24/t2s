@@ -726,7 +726,9 @@ TEST_CASE("onSnapshot performs the initial sync with the buffered deltas", "[ord
 // ----------------------------------------------------------------------------
 
 TEST_CASE("Randomised market: a valid L5 always equals the exchange's top five", "[ordrbook][property]") {
+    for (t2s::DepthSync sync : {t2s::DepthSync::Spot, t2s::DepthSync::Futures})
     for (unsigned seed : {1u, 2u, 3u, 4u, 5u}) {
+        const bool fut = (sync == t2s::DepthSync::Futures);
         std::mt19937 rng(seed);
         auto rnd = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
 
@@ -743,6 +745,7 @@ TEST_CASE("Randomised market: a valid L5 always equals the exchange's top five",
         };
 
         BookConfig cfg = smallCfg();
+        cfg.sync = sync;
         OrderBookManager mgr({"X"}, cfg);
         std::vector<PriceLevel> sb, sa;
         snapshot(cfg.snapshotLimit, sb, sa);
@@ -769,8 +772,13 @@ TEST_CASE("Randomised market: a valid L5 always equals the exchange's top five",
             for (auto it = tb.upper_bound(mid - 1); it != tb.end();) { eb.push_back(pl(it->first, 0.0)); it = tb.erase(it); ++deletes; }
             for (auto it = ta.begin(); it != ta.end() && it->first <= mid;) { ea.push_back(pl(it->first, 0.0)); it = ta.erase(it); ++deletes; }
 
-            long long U = id + 1; id += rnd(1, 3);
-            REQUIRE(mgr.applyDelta(0, U, id, eb, ea, step));
+            // Spot ids are consecutive; futures ids jump and each event names its predecessor
+            long long prevU = id;
+            long long U = fut ? id + rnd(1, 4) : id + 1;
+            id = fut ? U + rnd(0, 3) : id + rnd(1, 3);
+            BufferedDelta ev{U, id, step, eb, ea};
+            if (fut) ev.prevFinalUpdateId = prevU;
+            REQUIRE(mgr.applyDelta(0, ev));
 
             if (pending && --deliverIn <= 0) {
                 REQUIRE(mgr.onSnapshot(0, snapId, pb, pa) == SnapshotOutcome::REFRESHED);
@@ -801,10 +809,171 @@ TEST_CASE("Randomised market: a valid L5 always equals the exchange's top five",
                 }
             }
         }
-        INFO("seed " << seed << " valid " << validRows << " invalid " << invalidRows
+        INFO((fut ? "futures" : "spot") << " seed " << seed << " valid " << validRows << " invalid " << invalidRows
              << " deletes " << deletes << " refreshes " << refreshes);
         REQUIRE(deletes > 5000);
         REQUIRE(refreshes > 10);
         REQUIRE(validRows > 19000);
     }
+}
+
+// ============================================================================
+// USD-M futures sync rule (pu chain, first-event rule)
+// https://developers.binance.com/docs/derivatives/usds-margined-futures/
+//         websocket-market-streams/How-to-manage-a-local-order-book-correctly
+// ============================================================================
+
+namespace {
+
+BookConfig futCfg() { BookConfig c; c.sync = t2s::DepthSync::Futures; return c; }
+BookConfig futSmallCfg() { BookConfig c = smallCfg(); c.sync = t2s::DepthSync::Futures; return c; }
+
+/// Futures depth event: U, u, pu and level updates
+BufferedDelta fev(long long U, long long u, long long pu,
+                  std::vector<PriceLevel> bids = {}, std::vector<PriceLevel> asks = {}) {
+    BufferedDelta d{U, u, 1700000000000LL, std::move(bids), std::move(asks)};
+    d.prevFinalUpdateId = pu;
+    d.transactTimeMs = 1699999999990LL;
+    return d;
+}
+
+} // namespace
+
+TEST_CASE("Futures: events older than the snapshot are dropped (step 4)", "[ordrbook][futures]") {
+    OrderBookManager mgr({"BTCUSDT"}, futCfg());
+    mgr.applySnapshot(0, 1000, bidsN(100.0, 10), asksN(101.0, 10));
+    REQUIRE(mgr.applyDelta(0, fev(900, 950, 890, {pl(100.0, 0.0)})));     // u < lastUpdateId
+    REQUIRE(mgr.applyDelta(0, fev(960, 999, 950, {pl(99.0, 0.0)})));      // u = lastUpdateId - 1
+    REQUIRE(mgr.getState(0) == BookState::SYNCING);
+    REQUIRE(mgr.getL5(0, 0, 0).bidPrice1 == 100.0);                       // nothing applied
+}
+
+TEST_CASE("Futures: the first processed event has U <= lastUpdateId <= u (step 5)", "[ordrbook][futures]") {
+    SECTION("straddling event") {
+        OrderBookManager mgr({"BTCUSDT"}, futCfg());
+        mgr.applySnapshot(0, 1000, bidsN(100.0, 10), asksN(101.0, 10));
+        REQUIRE(mgr.applyDelta(0, fev(990, 1010, 985, {pl(100.0, 7.0)})));
+        REQUIRE(mgr.isValid(0));
+        REQUIRE(mgr.getL5(0, 0, 0).bidQty1 == 7.0);
+    }
+    SECTION("boundary u == lastUpdateId") {
+        OrderBookManager mgr({"BTCUSDT"}, futCfg());
+        mgr.applySnapshot(0, 1000, bidsN(100.0, 10), asksN(101.0, 10));
+        REQUIRE(mgr.applyDelta(0, fev(995, 1000, 990)));
+        REQUIRE(mgr.isValid(0));
+    }
+    SECTION("boundary U == lastUpdateId") {
+        OrderBookManager mgr({"BTCUSDT"}, futCfg());
+        mgr.applySnapshot(0, 1000, bidsN(100.0, 10), asksN(101.0, 10));
+        REQUIRE(mgr.applyDelta(0, fev(1000, 1004, 998)));
+        REQUIRE(mgr.isValid(0));
+    }
+    SECTION("first event entirely after the snapshot: snapshot too old") {
+        OrderBookManager mgr({"BTCUSDT"}, futCfg());
+        mgr.applySnapshot(0, 1000, bidsN(100.0, 10), asksN(101.0, 10));
+        REQUIRE_FALSE(mgr.applyDelta(0, fev(1005, 1010, 1003)));
+        REQUIRE(mgr.getState(0) == BookState::INVALID);
+    }
+    SECTION("event whose pu is the snapshot id follows it directly") {
+        OrderBookManager mgr({"BTCUSDT"}, futCfg());
+        mgr.applySnapshot(0, 1000, bidsN(100.0, 10), asksN(101.0, 10));
+        REQUIRE(mgr.applyDelta(0, fev(1003, 1007, 1000, {pl(100.0, 2.0)})));
+        REQUIRE(mgr.isValid(0));
+        REQUIRE(mgr.getL5(0, 0, 0).bidQty1 == 2.0);
+    }
+}
+
+TEST_CASE("Futures: pu must equal the previous u; ids need not be consecutive (step 6)", "[ordrbook][futures]") {
+    OrderBookManager mgr({"BTCUSDT"}, futCfg());
+    mgr.applySnapshot(0, 1000, bidsN(100.0, 10), asksN(101.0, 10));
+    REQUIRE(mgr.applyDelta(0, fev(990, 1010, 985)));
+    // ids jump by hundreds (other symbols share the counter): fine, pu chains
+    REQUIRE(mgr.applyDelta(0, fev(1500, 1520, 1010, {pl(100.0, 3.0)})));
+    REQUIRE(mgr.applyDelta(0, fev(2900, 2901, 1520, {}, {pl(101.0, 4.0)})));
+    REQUIRE(mgr.isValid(0));
+    L5Quote q = mgr.getL5(0, 0, 0);
+    REQUIRE(q.bidQty1 == 3.0);
+    REQUIRE(q.askQty1 == 4.0);
+    REQUIRE(q.exchTransactTimeMs == 1699999999990LL);
+
+    // The same stream under the SPOT rule would be a false gap
+    OrderBookManager spot({"BTCUSDT"});
+    spot.applySnapshot(0, 1000, bidsN(100.0, 10), asksN(101.0, 10));
+    REQUIRE(spot.applyDelta(0, 990, 1010, {}, {}, 0));
+    REQUIRE_FALSE(spot.applyDelta(0, 1500, 1520, {}, {}, 0));
+}
+
+TEST_CASE("Futures: a broken pu chain is a gap; the book resyncs from a new snapshot", "[ordrbook][futures]") {
+    OrderBookManager mgr({"BTCUSDT"}, futCfg());
+    mgr.applySnapshot(0, 1000, bidsN(100.0, 10), asksN(101.0, 10));
+    REQUIRE(mgr.applyDelta(0, fev(990, 1010, 985)));
+    REQUIRE(mgr.applyDelta(0, fev(1011, 1020, 1010)));
+
+    // One event lost: pu (1030) is not our last u (1020)
+    REQUIRE_FALSE(mgr.applyDelta(0, fev(1031, 1040, 1030, {pl(100.0, 0.0)})));
+    REQUIRE(mgr.getState(0) == BookState::INVALID);
+    REQUIRE_FALSE(mgr.getL5(0, 0, 0).isValid);
+
+    // Even consecutive-looking ids are a gap if pu does not match
+    OrderBookManager m2({"BTCUSDT"}, futCfg());
+    m2.applySnapshot(0, 1000, bidsN(100.0, 10), asksN(101.0, 10));
+    REQUIRE(m2.applyDelta(0, fev(990, 1010, 985)));
+    REQUIRE_FALSE(m2.applyDelta(0, fev(1011, 1015, 1009)));
+
+    // Resync: reset, buffer the stream, new snapshot, replay
+    mgr.reset(0);
+    REQUIRE(mgr.needsSnapshot(0));
+    mgr.bufferDelta(0, fev(1041, 1050, 1040));
+    mgr.bufferDelta(0, fev(1051, 1060, 1050, {pl(100.0, 6.0)}));
+    mgr.bufferDelta(0, fev(1061, 1070, 1060, {pl(99.0, 0.0)}));
+    REQUIRE(mgr.onSnapshot(0, 1055, bidsN(100.0, 10), asksN(101.0, 10)) == SnapshotOutcome::SYNCED);
+    REQUIRE(mgr.isValid(0));
+    L5Quote q = mgr.getL5(0, 0, 0);
+    REQUIRE(q.bidQty1 == 6.0);          // 1051-1060 straddles 1055: applied
+    REQUIRE(q.bidPrice2 == 98.0);       // 1061-1070 applied
+    REQUIRE(mgr.applyDelta(0, fev(1071, 1080, 1070)));
+}
+
+TEST_CASE("Futures: a gap inside the buffered deltas fails the initial sync", "[ordrbook][futures]") {
+    OrderBookManager mgr({"BTCUSDT"}, futCfg());
+    mgr.bufferDelta(0, fev(1041, 1050, 1040));
+    mgr.bufferDelta(0, fev(1051, 1060, 1050));
+    mgr.bufferDelta(0, fev(1071, 1080, 1070));     // 1061-1070 missing
+    REQUIRE(mgr.onSnapshot(0, 1055, bidsN(100.0, 10), asksN(101.0, 10)) == SnapshotOutcome::SYNC_FAILED);
+    REQUIRE(mgr.getState(0) == BookState::INVALID);
+}
+
+TEST_CASE("Futures: background refresh bridges with the futures rule", "[ordrbook][futures][refresh]") {
+    OrderBookManager mgr({"BTCUSDT"}, futSmallCfg());
+    mgr.applySnapshot(0, 1000, bidsN(100.0, 20), asksN(101.0, 20));
+    REQUIRE(mgr.applyDelta(0, fev(990, 1010, 985)));
+    std::vector<PriceLevel> del;
+    for (int i = 0; i < 13; ++i) del.push_back(pl(100.0 - i, 0.0));
+    REQUIRE(mgr.applyDelta(0, fev(1200, 1210, 1010, del)));
+    REQUIRE(mgr.wantsRefresh(0));
+    mgr.beginRefresh(0);
+    REQUIRE(mgr.applyDelta(0, fev(1400, 1410, 1210, {pl(87.0, 9.0)})));
+    REQUIRE(mgr.applyDelta(0, fev(1600, 1610, 1410, {pl(86.0, 0.0)})));
+
+    auto snapBids = bidsN(87.0, 20); snapBids[0].qty = 9.0;
+    REQUIRE(mgr.onSnapshot(0, 1405, snapBids, asksN(101.0, 20)) == SnapshotOutcome::REFRESHED);
+    L5Quote q = mgr.getL5(0, 0, 0);
+    REQUIRE(q.isValid);
+    REQUIRE(q.bidPrice1 == 87.0);
+    REQUIRE(q.bidPrice2 == 85.0);
+    REQUIRE(mgr.applyDelta(0, fev(1800, 1801, 1610)));            // chain continues from the live stream
+    REQUIRE_FALSE(mgr.applyDelta(0, fev(2000, 2001, 1900)));      // and still detects a gap
+
+    // Refresh snapshot ahead of the stream: the next live event must bridge it
+    OrderBookManager m2({"BTCUSDT"}, futSmallCfg());
+    m2.applySnapshot(0, 1000, bidsN(100.0, 20), asksN(101.0, 20));
+    REQUIRE(m2.applyDelta(0, fev(990, 1010, 985)));
+    m2.beginRefresh(0);
+    REQUIRE(m2.applyDelta(0, fev(1100, 1110, 1010)));
+    REQUIRE(m2.onSnapshot(0, 1300, bidsN(99.0, 20), asksN(101.0, 20)) == SnapshotOutcome::REFRESHED);
+    REQUIRE(m2.applyDelta(0, fev(1200, 1250, 1110, {pl(99.0, 0.0)})));   // before the snapshot: dropped
+    REQUIRE(m2.getL5(0, 0, 0).bidPrice1 == 99.0);
+    REQUIRE(m2.applyDelta(0, fev(1290, 1310, 1250, {pl(99.0, 5.0)})));   // straddles 1300
+    REQUIRE(m2.getL5(0, 0, 0).bidQty1 == 5.0);
+    REQUIRE(m2.applyDelta(0, fev(1400, 1401, 1310)));
 }
