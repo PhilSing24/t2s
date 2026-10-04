@@ -192,10 +192,10 @@ system "g 0";
 
 \l ../schemas.q
 
-/ Refuse to start if existing partitions / tmp dirs hold quote tables of a
-/ depth other than the configured one (see schemas.q): appending rows of
-/ another depth to them would silently write mismatched data.
-.schema.requireDepth["WDB"; 1 _ string .wdb.cfg.hdbDir; .wdb.tmpDir];
+/ Refuse to start if existing partitions / tmp dirs hold a live table whose
+/ layout differs from the schema (another quote depth, or columns added
+/ since; see schemas.q): appending to them would write mismatched data.
+.schema.requireLayout["WDB"; 1 _ string .wdb.cfg.hdbDir; .wdb.tmpDir];
 
 trade_binance:.schema.extend[.schema.trade; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeUtcNs];
 trade_binance_fut:.schema.extend[.schema.aggTrade; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeUtcNs];

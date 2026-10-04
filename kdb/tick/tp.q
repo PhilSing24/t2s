@@ -99,13 +99,14 @@ if[not null .tp.clock.fixed;
 
 \l ../schemas.q
 
-/ Refuse to start if existing partitions / tmp dirs hold quote tables of a
-/ depth other than the configured one (see schemas.q). TP writes neither
-/ place; it checks so that a wrong depth stops the pipeline at its first
-/ process instead of after rows were logged. Same defaults as wdb.q.
+/ Refuse to start if existing partitions / tmp dirs hold a live table whose
+/ layout differs from the schema: another quote depth, or columns the
+/ schema has gained since (see schemas.q). TP writes neither place; it
+/ checks so that a mismatch stops the pipeline at its first process
+/ instead of after rows were logged. Same defaults as wdb.q.
 .tp.cfg.hdbDir:$[count v:getenv `T2S_HDB_DIR; v; "../hdb"];
 .tp.cfg.tmpDir:$[count v:getenv `T2S_TMP_DIR; v; "../"];
-.schema.requireDepth["TP"; .tp.cfg.hdbDir; .tp.cfg.tmpDir];
+.schema.requireLayout["TP"; .tp.cfg.hdbDir; .tp.cfg.tmpDir];
 
 trade_binance:.schema.extend[.schema.trade; `tpRecvTimeUtcNs`tpSeqNo];
 trade_binance_fut:.schema.extend[.schema.aggTrade; `tpRecvTimeUtcNs`tpSeqNo];

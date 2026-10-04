@@ -162,41 +162,81 @@ if[0 = count .schema.symbols; .schema.cfg.die raze (.schema.cfg.file; ": symbols
   };
 
 / -------------------------------------------------------
-/ Depth guard: existing data must have the configured depth
+/ Stored layout of the live tables
 / -------------------------------------------------------
-/ A quote table written at one depth cannot be extended at another: the
-/ column sets differ, so a partitioned HDB would hold two layouts under one
-/ table name and a tmp.<date> dir would get mismatched appends. TP and WDB
-/ therefore refuse to start when any existing copy of a quote table (every
-/ HDB date partition, every tmp.<date> dir) has a depth other than
-/ .schema.depth. Nothing is modified; the operator decides (README).
+/ What WDB writes for each table: the feed-handler columns, TP's two
+/ stamps, then WDB's own.
+.schema.live:`trade_binance`trade_binance_fut`quote_binance`quote_binance_fut ! (.schema.trade; .schema.aggTrade; .schema.quote; .schema.quoteFut);
+.schema.stamps:`tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeUtcNs;
+.schema.stored:{[t] .schema.extend[.schema.live t; .schema.stamps]};
+.schema.storedCols:{[t] cols .schema.stored t};
 
-/ Depth of a splayed quote table = number of bidPrice* columns in its .d
-.schema.splayDepth:{[dir] d:@[get; ` sv dir, `.d; {[e] `symbol$()}]; sum (string d) like "bidPrice*"};
+/ -------------------------------------------------------
+/ Layout guard: existing data must match the schema
+/ -------------------------------------------------------
+/ A table written with one column list cannot be extended with another:
+/ a partitioned HDB would hold two layouts under one name, and WDB's
+/ appends to a tmp.<date> dir would not line up. TP and WDB therefore
+/ refuse to start when any existing copy of a live table (every HDB date
+/ partition, every tmp.<date> dir) differs from the schema:
+/   - another quote depth: nothing can fix that in place (README, "Symbols
+/     and quote depth")
+/   - columns added to the schema since the data was written:
+/     kdb/utils/hdb_migrate.q adds them as nulls
+/ Nothing is modified here; the operator decides.
 
-/ hdbDir, tmpDir: strings. One line per quote table copy with another depth.
-.schema.depthMismatches:{[hdbDir; tmpDir]
+/ Column list of a splayed table dir (its .d file), or empty
+.schema.splayCols:{[dir] @[get; ` sv dir, `.d; {[e] `symbol$()}]};
+/ Depth of a splayed quote table = number of bidPrice* columns
+.schema.splayDepth:{[dir] sum (string .schema.splayCols dir) like "bidPrice*"};
+
+/ Date partitions under hdbDir and tmp.<date> dirs under tmpDir, as hsyms
+.schema.dataRoots:{[hdbDir; tmpDir]
   ls:{[d] p:key hsym `$d; $[11h = type p; p; `symbol$()]};
   hp:ls hdbDir; hp:hp where {[n] not null "D"$ string n} each hp;
   tp:ls tmpDir; tp:tp where (string tp) like "tmp.[0-9]*";
-  roots:({[d;n] hsym `$ raze (d; "/"; string n)}[hdbDir] each hp), {[d;n] hsym `$ raze (d; "/"; string n)}[tmpDir] each tp;
+  noSlash:{[d] $[(1 < count d) and "/" = last d; -1 _ d; d]};
+  `hdb`tmp ! ({[d;n] hsym `$ raze (d; "/"; string n)}[noSlash hdbDir] each hp; {[d;n] hsym `$ raze (d; "/"; string n)}[noSlash tmpDir] each tp)};
+
+/ One dictionary per existing copy of a live table that differs from the
+/ schema: dir, table, kind (`depth or `columns), detail.
+.schema.layoutMismatches:{[hdbDir; tmpDir]
+  roots:raze value .schema.dataRoots[hdbDir; tmpDir];
   raze {[r]
     raze {[r;t]
       dir:` sv r, t;
       if[() ~ key dir; :()];
-      n:.schema.splayDepth dir;
-      $[n = .schema.depth; (); enlist raze (1 _ string dir; " has depth "; string n)]
-     }[r] each .schema.quoteTables
+      have:.schema.splayCols dir; want:.schema.storedCols t;
+      if[have ~ want; :()];
+      if[(t in .schema.quoteTables) and not .schema.depth = n:.schema.splayDepth dir;
+        :enlist `dir`table`kind`detail!(dir; t; `depth; raze (1 _ string dir; " has depth "; string n))];
+      miss:want except have; extra:have except want;
+      enlist `dir`table`kind`detail!(dir; t; `columns;
+        raze (1 _ string dir; ": ";
+              $[count miss; raze ("lacks "; " " sv string miss); ""];
+              $[(count miss) and count extra; "; "; ""];
+              $[count extra; raze ("has unknown "; " " sv string extra); ""];
+              $[(0 = count miss) and 0 = count extra; "same columns in another order"; ""]))
+     }[r] each key .schema.live
    } each roots};
 
-.schema.requireDepth:{[proc; hdbDir; tmpDir]
-  m:.schema.depthMismatches[hdbDir; tmpDir];
+.schema.requireLayout:{[proc; hdbDir; tmpDir]
+  m:.schema.layoutMismatches[hdbDir; tmpDir];
   if[0 = count m; :(::)];
-  -2 raze (proc; ": REFUSING TO START - quote_depth is "; string .schema.depth; " in "; .schema.cfg.file;
-           " but "; string count m; " existing quote table dir(s) have another depth:");
-  {[l] -2 raze ("  "; l)} each 10 sublist m;
-  if[10 < count m; -2 raze ("  ... and "; string (count m) - 10; " more")];
-  -2 "  A different depth is a different table layout. Set quote_depth back, or move";
-  -2 "  those partitions / tmp dirs out of the HDB first (README: Symbols and quote depth).";
+  show10:{[l] {[x] -2 raze ("  "; x)} each 10 sublist l; if[10 < count l; -2 raze ("  ... and "; string (count l) - 10; " more")]};
+  dm:m[;`detail] where m[;`kind] = `depth;
+  cm:m[;`detail] where m[;`kind] = `columns;
+  if[count dm;
+    -2 raze (proc; ": REFUSING TO START - quote_depth is "; string .schema.depth; " in "; .schema.cfg.file;
+             " but "; string count dm; " existing quote table dir(s) have another depth:");
+    show10 dm;
+    -2 "  A different depth is a different table layout. Set quote_depth back, or move";
+    -2 "  those partitions / tmp dirs out of the HDB first (README: Symbols and quote depth)."];
+  if[count cm;
+    -2 raze (proc; ": REFUSING TO START - "; string count cm; " existing table dir(s) do not have the schema's columns:");
+    show10 cm;
+    -2 "  Columns added to the schema must be added to the stored data first:";
+    -2 "    q kdb/utils/hdb_migrate.q          (dry run: shows what would be done)";
+    -2 "    q kdb/utils/hdb_migrate.q -apply   (adds the columns as nulls; existing column files are not touched)"];
   system "sleep 0.1";
   exit 1};
