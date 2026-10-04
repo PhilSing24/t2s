@@ -156,6 +156,10 @@ public:
      */
     const std::string& fatalError() const { return tp_->fatalError(); }
 
+    /// REST endpoint the gap backfill talks to (for tests and logs)
+    const std::string& backfillRestHost() const { return backfillHttp_.host(); }
+    const std::string& backfillRestPath() const { return backfillHttp_.path(); }
+
 private:
     // ========================================================================
     // CONFIGURATION

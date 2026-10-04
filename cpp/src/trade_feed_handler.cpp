@@ -33,7 +33,8 @@ TradeFeedHandler::TradeFeedHandler(const std::vector<std::string>& symbols,
     , cfg_(std::move(market))
     , tpHost_(tpHost)
     , tpPort_(tpPort)
-    , backfillHttp_(market.backfillRestHost, market.backfillRestPort, market.backfillRestPath)
+    // cfg_, not `market`: the parameter was moved into cfg_ two lines up
+    , backfillHttp_(cfg_.backfillRestHost, cfg_.backfillRestPort, cfg_.backfillRestPath)
     , startTime_(std::chrono::system_clock::now())
 {
     sessionId_ = std::chrono::duration_cast<std::chrono::nanoseconds>(

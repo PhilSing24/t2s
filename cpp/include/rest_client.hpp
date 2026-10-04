@@ -103,6 +103,7 @@ public:
      */
     HttpResult get(const std::string& target) {
         HttpResult out;
+        if (host_.empty()) { out.error = "REST client has no host configured"; return out; }
         try {
             const std::string& host = host_;
             const std::string& port = port_;
@@ -187,6 +188,9 @@ public:
                   << " asks=" << result.asks.size() << std::endl;
         return result;
     }
+
+    const std::string& host() const { return host_; }
+    const std::string& path() const { return path_; }
 
     /// Send/receive timeout on the REST socket, seconds.
     static constexpr int IO_TIMEOUT_SEC = 10;

@@ -202,6 +202,13 @@ if(EXISTS ${CATCH2_DIR}/catch_amalgamated.cpp)
         OpenSSL::Crypto
     )
 
+    add_executable(test_handler_wiring
+        tests/test_handler_wiring.cpp
+        ${CATCH2_DIR}/catch_amalgamated.cpp
+    )
+    target_include_directories(test_handler_wiring PRIVATE ${CATCH2_DIR})
+    target_link_libraries(test_handler_wiring PRIVATE t2s_fh)
+
     add_executable(test_json_reader
         tests/test_json_reader.cpp
         ${CATCH2_DIR}/catch_amalgamated.cpp

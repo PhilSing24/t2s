@@ -259,6 +259,14 @@ private:
     template <typename RecordEvent>
     void fail(BackfillPage& page, std::int64_t nowMs, RecordEvent& recordEvent, const char* giveUpReason) {
         ++pagesFailed_;
+        {
+            const Job& j = queue_.front();
+            spdlog::warn("Backfill request failed for {} from id {} (attempt {} of {}): {}",
+                         j.gap.sym, j.gap.nextNeededId(), j.failures + 1, cfg_.maxFailures,
+                         page.ok ? (page.trades.empty() ? std::string("empty reply (ids not available yet?)")
+                                                        : "reply starts at id " + std::to_string(page.trades.front().id))
+                                 : page.error);
+        }
         sched_.onFailure(0, nowMs, page.httpStatus, page.retryAfterSec, page.usedWeight1m);
         Job& job = queue_.front();
         if (++job.failures >= cfg_.maxFailures) finish(recordEvent, GapStatus::Unrecoverable, giveUpReason);
