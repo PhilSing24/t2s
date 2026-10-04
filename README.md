@@ -246,10 +246,10 @@ Paths and ports can also be set per process through environment variables, which
 - `symbols` is the one list all four handlers subscribe to. A handler config with its own `symbols` list is refused. Changing the list needs a restart of the handlers only.
 - `quote_depth` (1 to 50) is the number of book levels per side that the quote handlers publish. It drives the published row (`cpp/include/quote_row.hpp`), the width each quote handler announces to TP, and the generated schemas `.schema.quote` and `.schema.quoteFut` in `kdb/schemas.q`.
 
-**A different depth is a different table layout.** `quote_binance` has `8 + 4*depth` feed-handler columns (`bidPrice1..N`, `bidQty1..N`, `askPrice1..N`, `askQty1..N`), `quote_binance_fut` one more. Two layouts cannot share one table in a partitioned HDB, so the change is guarded rather than applied silently:
+**A different depth is a different table layout.** `quote_binance` has `10 + 4*depth` feed-handler columns (`bidPrice1..N`, `bidQty1..N`, `askPrice1..N`, `askQty1..N`), `quote_binance_fut` two more. Two layouts cannot share one table in a partitioned HDB, so the change is guarded rather than applied silently:
 
 - TP refuses a quote handler whose row width differs from its schema; the handler exits with code 2 before it connects to the exchange.
-- TP and WDB refuse to start if any HDB date partition or any `tmp.<date>` directory holds a quote table of another depth. They name the directories and modify nothing.
+- TP and WDB refuse to start if any HDB date partition or any `tmp.<date>` directory holds a quote table of another depth. They name the directories and modify nothing. The same guard covers columns: see **Schema changes** below.
 
 To change the depth: stop the pipeline, let the day roll or move `tmp.<date>` away, move the existing HDB partitions that contain `quote_binance` or `quote_binance_fut` to another directory (or accept starting a new HDB), edit `quote_depth`, and start again. Past quote data stays at its old depth where you moved it. `tests/test_depth_config.sh` exercises all of this at depth 3.
 
@@ -260,6 +260,22 @@ To change the depth: stop the pipeline, let the day roll or move `tmp.<date>` aw
 - *Bounded buffer.* While a book waits for its snapshot, deltas are buffered up to 1000 per symbol; on overflow the oldest is dropped and counted. A snapshot that then cannot bridge to the remaining deltas is rejected by the sync rule and retried under backoff.
 - *Full-depth book.* The book keeps every level it knows, so deleting a top level promotes the next real one instead of leaving an empty slot. A snapshot returns at most 1000 levels per side; its worst price is the side's *horizon*, and levels beyond it are unknown until they change. When fewer than 100 known levels remain on a side, the handler fetches a new snapshot in the background and swaps it in without publishing an invalid row. If a side ever has fewer known levels than the published depth, the quote is invalid rather than possibly wrong.
 - *Counters.* Each handler reports its counters to TP every 5 s (`.tp.fhStatus[]`, `fhStats` in `.health[]`, one `FH` line per table in `./status.sh`): `bookGaps`, `resyncs`, `snapshotRequests`, `snapshotFailures`, `rateLimitPauses`, `bufferOverflows`, `depthRefreshes`, `refreshFailures`, `depthExhausted`, `wsReconnects` for the quote handlers; `exchGaps`, `exchMissed`, `exchOutOfOrder`, `exchDuplicates`, `wsReconnects` for the trade handlers. They are cumulative since the handler started. `quote_binance_fut` also stores `exchTransactTimeMs`, the futures event's transaction time `T`.
+
+**Exchange update ids.** Every valid quote row stores the range of exchange depth events applied since the previous published row of its symbol: `exchFirstUpdateId` (`U` of the first event), `exchUpdateId` (`u` of the last, the update id the book is at) and, on futures, `exchPrevUpdateId` (`pu` of the first event). A heartbeat row repeats the previous ids; an invalid row has nulls. Two uses:
+
+- *Exact comparison with REST.* A depth snapshot whose `lastUpdateId` equals a row's `exchUpdateId` must show exactly that row's levels. One whose `lastUpdateId` falls inside a row's range is an intermediate state between that row and the one before.
+- *Continuity from stored data alone.* `q kdb/utils/check_quote_seq.q -date 2026.10.04` (or `-dir tmp/tmp.<today>`) checks per symbol that each row continues the previous one (spot: `exchFirstUpdateId <= previous exchUpdateId + 1`; futures: `exchPrevUpdateId = previous exchUpdateId`). Each break is listed with its time and classified: *marked* when the handler published an invalid row there (sequence gap, lost WebSocket connection, exhausted depth) or was restarted, *UNMARKED* when nothing in the data explains it. It exits 1 on any unmarked break; there should never be one.
+
+`trade_binance_fut.qtyExRpi` is the aggTrade event's `nq`, which Binance defines as the "normal quantity without the trades involving RPI orders" (Retail Price Improvement), next to `qty`, the "quantity with all the market trades". It has been in the stream since 2025-12-31 ([change log](https://developers.binance.com/docs/derivatives/change-log), [Aggregate Trade Streams](https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Aggregate-Trade-Streams)). An event without it is stored with a null and counted as `nqMissing`.
+
+**Schema changes.** `kdb/schemas.q` is the single source of the stored layout. When a column is added to a live table, data written earlier lacks it; a partitioned HDB takes the column list from its newest partition, so HDB-wide queries on the new column would fail on older dates, and WDB could not append to an older `tmp.<date>` dir. TP and WDB therefore refuse to start while any HDB partition or tmp dir differs from the schema, and name the fix:
+
+```bash
+q kdb/utils/hdb_migrate.q          # dry run: what would be done
+q kdb/utils/hdb_migrate.q -apply   # do it (pipeline stopped)
+```
+
+The tool adds each missing column as a file of typed nulls and rewrites the table's `.d` column list; a live table missing from an HDB partition gets an empty splay. It never rewrites, moves or deletes an existing column file, and it refuses (changing nothing) a table it cannot fix that way, such as another quote depth. Rows from before a column existed read as null in it. TP logs written with the old layout cannot be replayed or rebuilt into the new one; once the day is verified in the HDB (`check_eod.sh`) they are of no further use.
 
 **Replay seeks and never runs inside TP.** TP writes a seek index next to each daily log (`<date>.idx`, one entry per 10,000 rows: tpSeqNo, byte offset, chunk). On reconnect WDB asks TP only for `.tp.replayInfo[]`, the log directory, today's committed length and the cutoff, then reads the logs itself: it starts in the log that holds its checkpoint, seeks via the index, reads every later log in date order, and reads today's log only up to the committed length, so a disconnect spanning midnight is replayed across both days' logs. TP's live path is never involved. Replayed rows are staged and merged only after every segment has been read and validated; a corrupt or short segment fails the replay explicitly, counts it (`replayFailures`), shows `status=error` in `.health[]` while WDB is disconnected, leaves the checkpoint untouched, and WDB retries on its timer. The startup roll of past-date tmp dirs waits for the first successful replay, so yesterday's rows arriving by replay land in yesterday's partition rather than being counted late.
 
@@ -286,6 +302,8 @@ The runner discovers `tests/test_*.q`, `tests/test_*.sh`, and any compiled binar
 - **`test_afml.q`** — Q tests for AFML primitives in `kdb/ml/afml.q`.
 - **`test_labels.q`** — Q tests for labeling primitives in `kdb/ml/labels.q`.
 - **`test_depth_config.sh`** — the shared symbols/depth config: depth 3 end to end (schema, widths, registration, the real quote handler refused with exit code 2), TP and WDB refusing to start over partitions or tmp dirs of another depth, bad shared configs, each quote binary refusing the other market's config.
+- **`test_hdb_migrate.sh`** — the layout guard and `hdb_migrate.q` on an old-layout sandbox HDB: refusal to start, dry run, byte-identical old files after `-apply`, null columns, HDB-wide queries, and what the tool refuses.
+- **`test_quote_seq.sh`** — `check_quote_seq.q` on synthetic partitions: clean chains on both markets, marked and unmarked breaks with their times, rows without ids.
 - **`test_smoke.sh`** — starts each q process (tp, wdb) in isolation against test ports, asserts `.health[]` returns a sane response. Catches load-time errors and missing `.health[]` interface.
 - **`test_wdb_eod.sh`** — full TP→WDB integration test: publishes synthetic data, forces EOD, verifies a partition lands in the sandbox HDB with correct row counts. Validates the EOD persistence path end-to-end.
 - **`build/test_order_book`** — C++ unit tests (Catch2) for `OrderBookManager`: state machine (INIT→SYNCING→VALID→INVALID), full-depth storage, horizon and background refresh, spot and USD-M futures sync rules, configurable depth, delta semantics (insert/update/delete via qty=0), sequence-gap detection, multi-symbol independence, and Binance-spec compliance for overlapping deltas, boundary cases, and entirely-stale events.
@@ -435,9 +453,9 @@ WDB replay reads across daily logs, so a disconnect spanning midnight UTC is cau
 
 The quote book is exact inside the snapshot horizon only (1000 levels per side, the futures maximum). A fast move through all known levels on one side makes that side's quotes invalid until the background refresh lands; this is counted as `depthExhausted`, never published as a valid row.
 
-The futures aggTrade event carries two fields the `trade_binance_fut` table does not store: `nq` (the quantity excluding retail-price-improvement orders) and `st`. The futures depth event's `ps` and `st` are not stored either.
+The futures aggTrade and depth events carry a field `st` whose meaning I could not confirm in Binance's documentation; it is not stored. The depth event's `ps` (pair) is not stored either.
 
-HDB partitions written before `quote_binance_fut` existed do not contain that table, and HDB partitions written before ADR-013 step 6 do not contain a `trade_binance_fut/` splay. HDB-wide queries on the futures table will fail until those older partitions are backfilled with empty splays (pending follow-up); direct splay queries by date already work.
+Rows stored before 2026-10-04 have nulls in the update-id columns and in `qtyExRpi`, and tables that did not exist on a date (`quote_binance_fut` before 2026-10-04, `trade_binance_fut` in the oldest partitions) are empty for it. `hdb_migrate.q` added those columns and empty tables, so HDB-wide queries on all four live tables work for every date.
 
 ## License
 
