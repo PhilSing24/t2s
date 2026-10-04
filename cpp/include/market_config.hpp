@@ -43,6 +43,36 @@ struct MarketConfig {
     TradeSchema  schema       = TradeSchema::SpotTrade;
 };
 
+/// Which exchange rule keeps the local book in step with the diff stream.
+enum class DepthSync {
+    Spot,      ///< consecutive update ids: U <= lastUpdateId+1 <= u, then U <= last+1
+    Futures,   ///< USD-M futures: U <= lastUpdateId <= u, then pu == previous u
+};
+
+/**
+ * Per-market wiring for the quote (depth) feed handler. Defaults are
+ * Binance spot. Everything that differs between spot and USD-M futures is
+ * here, so both binaries run the same QuoteFeedHandler class.
+ */
+struct QuoteMarketConfig {
+    // WebSocket
+    std::string wsHost       = "stream.binance.com";
+    std::string wsPort       = "9443";
+    std::string wsPathPrefix = "";                 ///< "/public" for USD-M futures
+    std::string streamSuffix = "@depth@100ms";
+    // REST snapshot
+    std::string restHost     = "api.binance.com";
+    std::string restPort     = "443";
+    std::string restPath     = "/api/v3/depth";
+    int snapshotLimit        = 1000;               ///< levels per side requested
+    int snapshotWeight       = 50;                 ///< request weight of one snapshot at that limit
+    int weightLimitPerMin    = 6000;               ///< the exchange's IP weight limit per minute
+    // Destination and identity
+    std::string tpTable      = "quote_binance";
+    std::string healthName   = "quote_fh";
+    DepthSync   sync         = DepthSync::Spot;
+};
+
 /**
  * Build a Binance combined-stream path from a symbols list and a stream
  * suffix. Pure: no clocks, no I/O, no state.

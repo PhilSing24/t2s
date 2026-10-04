@@ -27,10 +27,13 @@
 // ============================================================================
 
 QuoteFeedHandler::QuoteFeedHandler(const std::vector<std::string>& symbols,
+                                   const t2s::QuoteMarketConfig& market,
                                    const std::string& tpHost,
                                    int tpPort)
-    : tpHost_(tpHost)
+    : cfg_(market)
+    , tpHost_(tpHost)
     , tpPort_(tpPort)
+    , restClient_(market.restHost, market.restPort, market.restPath)
     , startTime_(std::chrono::system_clock::now())
 {
     sessionId_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -46,7 +49,9 @@ QuoteFeedHandler::QuoteFeedHandler(const std::vector<std::string>& symbols,
     }
     
     // Create book manager with uppercase symbols
-    bookMgr_ = std::make_unique<OrderBookManager>(symbolsUpper_);
+    BookConfig bookCfg;
+    bookCfg.snapshotLimit = static_cast<std::size_t>(cfg_.snapshotLimit);
+    bookMgr_ = std::make_unique<OrderBookManager>(symbolsUpper_, bookCfg);
 
     // Per-symbol "latest request id" tracking, used to discard stale
     // snapshot results when the symbol gets reset and re-requested.
@@ -55,13 +60,13 @@ QuoteFeedHandler::QuoteFeedHandler(const std::vector<std::string>& symbols,
     // Async snapshot worker. Starts a background thread that pulls from
     // an internal queue and calls restClient_.fetchSnapshot. Constructed
     // here so it's available immediately; thread is started in run().
-    snapshotWorker_ = std::make_unique<t2s::SnapshotWorker<RestClient>>(restClient_);
+    snapshotWorker_ = std::make_unique<t2s::SnapshotWorker<RestClient>>(restClient_, cfg_.snapshotLimit);
 
-    // Spot: depth limit 1000 costs weight 50 of 6000/min. The scheduler
-    // keeps us at a tenth of that (see snapshot_scheduler.hpp).
+    // The scheduler keeps snapshot requests at a tenth of the exchange's
+    // weight limit (see snapshot_scheduler.hpp); the numbers are per market.
     t2s::SnapshotSchedulerConfig schedCfg;
-    schedCfg.weightPerRequest = 50;
-    schedCfg.weightLimitPerMin = 6000;
+    schedCfg.weightPerRequest = cfg_.snapshotWeight;
+    schedCfg.weightLimitPerMin = cfg_.weightLimitPerMin;
     snapshotScheduler_ = std::make_unique<t2s::SnapshotScheduler>(
         static_cast<int>(symbolsUpper_.size()), schedCfg);
     snapshotRequestedAtMs_.assign(symbolsUpper_.size(), 0);
@@ -141,33 +146,29 @@ void QuoteFeedHandler::stop() {
 // ============================================================================
 
 std::string QuoteFeedHandler::buildDepthStreamPath() const {
-    // Use @depth@100ms - updates pushed every 100ms (10/sec per symbol)
-    std::string path = "/stream?streams=";
-    for (size_t i = 0; i < symbolsLower_.size(); ++i) {
-        if (i > 0) path += "/";
-        path += symbolsLower_[i] + "@depth@100ms";
-    }
-    return path;
+    // e.g. /stream?streams=btcusdt@depth@100ms/ethusdt@depth@100ms (spot)
+    //      /public/stream?streams=btcusdt@depth@100ms/...          (USD-M futures)
+    return cfg_.wsPathPrefix + t2s::buildStreamPath(symbolsLower_, cfg_.streamSuffix);
 }
 
 int QuoteFeedHandler::registerSession(int h, long long nextFhSeqNo) {
-    const long long width = 28LL;   // quote_binance feed-handler columns
+    const long long width = 28LL;   // feed-handler columns of the quote schema
     K r = k(h, (S)".tp.registerSession",
-            ks((S)"quote_binance"), kj(sessionId_), kj(nextFhSeqNo), kj(width), (K)0);
+            ks((S)cfg_.tpTable.c_str()), kj(sessionId_), kj(nextFhSeqNo), kj(width), (K)0);
     if (r == nullptr) {
         spdlog::error("TP connection lost during session registration");
         return 0;
     }
     if (r->t == -128) {
-        fatalError_ = std::string("registration rejected for quote_binance: ") + r->s;
-        spdlog::critical("TP REJECTED session registration for quote_binance (sessionId={}, nextFhSeqNo={}, width={}): {}",
-                         sessionId_, nextFhSeqNo, width, r->s);
+        fatalError_ = "registration rejected for " + cfg_.tpTable + ": " + r->s;
+        spdlog::critical("TP REJECTED session registration for {} (sessionId={}, nextFhSeqNo={}, width={}): {}",
+                         cfg_.tpTable, sessionId_, nextFhSeqNo, width, r->s);
         r0(r);
         return -1;
     }
     r0(r);
-    spdlog::info("Session registered with TP: table=quote_binance sessionId={} nextFhSeqNo={} width={}",
-                 sessionId_, nextFhSeqNo, width);
+    spdlog::info("Session registered with TP: table={} sessionId={} nextFhSeqNo={} width={}",
+                 cfg_.tpTable, sessionId_, nextFhSeqNo, width);
     return 1;
 }
 
@@ -225,7 +226,7 @@ bool QuoteFeedHandler::sleepWithBackoff(int attempt) {
 
 void QuoteFeedHandler::runWebSocketLoop() {
     std::string target = buildDepthStreamPath();
-    spdlog::info("Connecting to Binance: {}{}", BINANCE_HOST, target);
+    spdlog::info("Connecting to Binance: {}:{}{}", cfg_.wsHost, cfg_.wsPort, target);
     
     connState_ = "connecting";
     
@@ -252,15 +253,15 @@ void QuoteFeedHandler::runWebSocketLoop() {
     
     // Set SNI hostname so Binance serves the right cert and so we can
     // verify the cert's CN/SAN matches what we asked to connect to.
-    if (!SSL_set_tlsext_host_name(ws.next_layer().native_handle(), BINANCE_HOST)) {
+    if (!SSL_set_tlsext_host_name(ws.next_layer().native_handle(), cfg_.wsHost.c_str())) {
         throw beast::system_error(
             beast::error_code(static_cast<int>(::ERR_get_error()),
                               net::error::get_ssl_category()),
             "Failed to set SNI hostname");
     }
-    ws.next_layer().set_verify_callback(ssl::host_name_verification(BINANCE_HOST));
+    ws.next_layer().set_verify_callback(ssl::host_name_verification(cfg_.wsHost));
     
-    auto const results = resolver.resolve(BINANCE_HOST, BINANCE_PORT);
+    auto const results = resolver.resolve(cfg_.wsHost, cfg_.wsPort);
     net::connect(ws.next_layer().next_layer(), results.begin(), results.end());
 
     // Configure aggressive TCP keepalive so dead connections (e.g. after
@@ -272,7 +273,7 @@ void QuoteFeedHandler::runWebSocketLoop() {
     ws.next_layer().handshake(ssl::stream_base::client);
     
     // WebSocket handshake
-    ws.handshake(BINANCE_HOST, target);
+    ws.handshake(cfg_.wsHost, target);
 
     // Configure idle timeout: if no message arrives for 30s, ws.read()
     // throws, which the outer try/catch treats as a disconnect and
@@ -708,7 +709,7 @@ void QuoteFeedHandler::publishL5(const L5Quote& quote) {
     t2s::KBorrowed sendField(kK(row.get())[26]);
     sendField.get()->j = fhSendUs;
     
-    K result = k(-tpHandle_, (S)".u.upd", ks((S)"quote_binance"), row.release(), (K)0);
+    K result = k(-tpHandle_, (S)".u.upd", ks((S)cfg_.tpTable.c_str()), row.release(), (K)0);
     
     // Update health: message published
     lastPubTime_ = std::chrono::system_clock::now();
@@ -742,7 +743,7 @@ void QuoteFeedHandler::publishL5(const L5Quote& quote) {
                 kj(fhSendUs),
                 kj(quote.fhSeqNo)
             ));
-            k(-tpHandle_, (S)".u.upd", ks((S)"quote_binance"), row2.release(), (K)0);
+            k(-tpHandle_, (S)".u.upd", ks((S)cfg_.tpTable.c_str()), row2.release(), (K)0);
         }
     }
 }
@@ -765,7 +766,7 @@ void QuoteFeedHandler::publishHealth() {
     // Build health row (10 fields)
     t2s::KOwned row(knk(10,
         ktj(-KP, toKdbTs(now)),                    // time
-        ks((S)"quote_fh"),                          // handler
+        ks((S)cfg_.healthName.c_str()),                        // handler
         ktj(-KP, toKdbTs(startTime_)),             // startTimeUtc
         kj(uptimeSec),                              // uptimeSec
         kj(msgsReceived_),                          // msgsReceived
@@ -780,7 +781,7 @@ void QuoteFeedHandler::publishHealth() {
     k(-tpHandle_, (S)".u.upd", ks((S)"health_feed_handler"), row.release(), (K)0);
 
     // Book-level counters, shown per table by TP's .health[] and status.sh
-    t2s::sendFhStats(tpHandle_, "quote_binance", {
+    t2s::sendFhStats(tpHandle_, cfg_.tpTable, {
         {"msgsReceived",     msgsReceived_},
         {"rowsPublished",    msgsPublished_},
         {"wsReconnects",     ctrWsReconnects_},

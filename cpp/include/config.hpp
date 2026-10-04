@@ -33,7 +33,17 @@ struct FeedHandlerConfig {
     std::string marketPort         = "9443";
     std::string marketStreamSuffix = "@trade";
     std::string marketTpTable      = "trade_binance";
-    std::string marketSchema       = "spot_trade";  // or "futures_agg_trade"
+    std::string marketSchema       = "spot_trade";  // or "futures_agg_trade"; quotes: "spot_depth" / "futures_depth"
+    bool        hasMarketBlock     = false;
+
+    // Quote handlers only (REST snapshot endpoint and its rate-limit numbers)
+    std::string marketPathPrefix   = "";
+    std::string restHost           = "";
+    std::string restPort           = "443";
+    std::string restPath           = "";
+    int         snapshotLimit      = 0;
+    int         snapshotWeight     = 0;
+    int         weightLimitPerMin  = 0;
 
     // Logging config
     std::string logLevel = "info";
@@ -99,6 +109,28 @@ struct FeedHandlerConfig {
         // Parse market config (optional; defaults preserve spot behaviour)
         if (doc.HasMember("market") && doc["market"].IsObject()) {
             const auto& m = doc["market"];
+            hasMarketBlock = true;
+            if (m.HasMember("path_prefix") && m["path_prefix"].IsString()) {
+                marketPathPrefix = m["path_prefix"].GetString();
+            }
+            if (m.HasMember("rest_host") && m["rest_host"].IsString()) {
+                restHost = m["rest_host"].GetString();
+            }
+            if (m.HasMember("rest_port") && m["rest_port"].IsString()) {
+                restPort = m["rest_port"].GetString();
+            }
+            if (m.HasMember("rest_path") && m["rest_path"].IsString()) {
+                restPath = m["rest_path"].GetString();
+            }
+            if (m.HasMember("snapshot_limit") && m["snapshot_limit"].IsInt()) {
+                snapshotLimit = m["snapshot_limit"].GetInt();
+            }
+            if (m.HasMember("snapshot_weight") && m["snapshot_weight"].IsInt()) {
+                snapshotWeight = m["snapshot_weight"].GetInt();
+            }
+            if (m.HasMember("weight_limit_per_min") && m["weight_limit_per_min"].IsInt()) {
+                weightLimitPerMin = m["weight_limit_per_min"].GetInt();
+            }
             if (m.HasMember("host") && m["host"].IsString()) {
                 marketHost = m["host"].GetString();
             }

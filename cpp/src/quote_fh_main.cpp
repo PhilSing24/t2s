@@ -10,6 +10,7 @@
 
 #include "quote_feed_handler.hpp"
 #include "config.hpp"
+#include "market_config.hpp"
 #include "logger.hpp"
 
 #include <spdlog/spdlog.h>
@@ -34,6 +35,34 @@ void signalHandler(int signum) {
     if (g_handler) {
         g_handler->stop();
     }
+}
+
+// Market wiring from the JSON "market" block. Every field is required: a
+// quote handler pointed at the wrong REST host or with the wrong weight
+// numbers would either not sync or overspend its rate-limit budget.
+bool buildMarketConfig(const FeedHandlerConfig& config, t2s::QuoteMarketConfig& m, std::string& err) {
+    if (!config.hasMarketBlock) { err = "config has no \"market\" block"; return false; }
+    if (config.marketSchema == "spot_depth")         m.sync = t2s::DepthSync::Spot;
+    else if (config.marketSchema == "futures_depth") m.sync = t2s::DepthSync::Futures;
+    else { err = "market.schema must be \"spot_depth\" or \"futures_depth\", got \"" + config.marketSchema + "\""; return false; }
+    if (config.restHost.empty() || config.restPath.empty()) { err = "market.rest_host and market.rest_path are required"; return false; }
+    if (config.snapshotLimit <= 0 || config.snapshotWeight <= 0 || config.weightLimitPerMin <= 0) {
+        err = "market.snapshot_limit, market.snapshot_weight and market.weight_limit_per_min are required";
+        return false;
+    }
+    m.wsHost            = config.marketHost;
+    m.wsPort            = config.marketPort;
+    m.wsPathPrefix      = config.marketPathPrefix;
+    m.streamSuffix      = config.marketStreamSuffix;
+    m.restHost          = config.restHost;
+    m.restPort          = config.restPort;
+    m.restPath          = config.restPath;
+    m.snapshotLimit     = config.snapshotLimit;
+    m.snapshotWeight    = config.snapshotWeight;
+    m.weightLimitPerMin = config.weightLimitPerMin;
+    m.tpTable           = config.marketTpTable;
+    m.healthName        = (m.sync == t2s::DepthSync::Futures) ? "quote_fh_fut" : "quote_fh";
+    return true;
 }
 
 } // namespace
@@ -67,8 +96,20 @@ int main(int argc, char* argv[]) {
     std::signal(SIGTERM, signalHandler);
     spdlog::info("Signal handlers installed (Ctrl+C to shutdown)");
 
+    t2s::QuoteMarketConfig market;
+    std::string marketErr;
+    if (!buildMarketConfig(config, market, marketErr)) {
+        spdlog::critical("Bad config {}: {}", configPath, marketErr);
+        shutdownLogger();
+        return 1;
+    }
+    spdlog::info("Market: ws={}:{}{} suffix={} rest={}{} limit={} weight={}/{} per min table={}",
+                 market.wsHost, market.wsPort, market.wsPathPrefix, market.streamSuffix,
+                 market.restHost, market.restPath, market.snapshotLimit,
+                 market.snapshotWeight, market.weightLimitPerMin, market.tpTable);
+
     // Create and run handler
-    QuoteFeedHandler handler(config.symbols, config.tpHost, config.tpPort);
+    QuoteFeedHandler handler(config.symbols, market, config.tpHost, config.tpPort);
     g_handler = &handler;
 
     handler.run();

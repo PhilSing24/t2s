@@ -42,6 +42,7 @@
 #include "rest_client.hpp"
 #include "snapshot_worker.hpp"
 #include "snapshot_scheduler.hpp"
+#include "market_config.hpp"
 
 extern "C" {
 #include "k.h"
@@ -71,11 +72,7 @@ public:
     // CONFIGURATION CONSTANTS
     // ========================================================================
     
-    /// Binance WebSocket host
-    static constexpr const char* BINANCE_HOST = "stream.binance.com";
     
-    /// Binance WebSocket port (TLS)
-    static constexpr const char* BINANCE_PORT = "9443";
     
     /// Nanoseconds between Unix epoch (1970) and kdb+ epoch (2000)
     static constexpr long long KDB_EPOCH_OFFSET_NS = 946684800000000000LL;
@@ -89,8 +86,6 @@ public:
     /// Backoff multiplier
     static constexpr int BACKOFF_MULTIPLIER = 2;
     
-    /// Snapshot depth to request (get more than L5 for safety)
-    static constexpr int SNAPSHOT_DEPTH = 50;
 
     // ========================================================================
     // CONSTRUCTION
@@ -103,6 +98,7 @@ public:
      * @param tpPort Tickerplant port
      */
     QuoteFeedHandler(const std::vector<std::string>& symbols,
+                     const t2s::QuoteMarketConfig& market = t2s::QuoteMarketConfig{},
                      const std::string& tpHost = "localhost",
                      int tpPort = 5010);
     
@@ -152,6 +148,7 @@ private:
     
     std::vector<std::string> symbolsLower_;    // Lowercase for WebSocket subscription
     std::vector<std::string> symbolsUpper_;    // Uppercase for internal use
+    t2s::QuoteMarketConfig cfg_;               // market wiring (hosts, table, sync rule)
     std::string tpHost_;
     int tpPort_;
     

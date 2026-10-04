@@ -142,10 +142,11 @@ template <typename FetcherT>
 class SnapshotWorker {
 public:
     static constexpr std::size_t QUEUE_CAPACITY = 10;
-    static constexpr int SNAPSHOT_DEPTH = 1000;
+    static constexpr int SNAPSHOT_DEPTH = 1000;   ///< default levels per side
 
-    explicit SnapshotWorker(FetcherT& fetcher)
+    explicit SnapshotWorker(FetcherT& fetcher, int snapshotDepth = SNAPSHOT_DEPTH)
         : fetcher_(fetcher),
+          snapshotDepth_(snapshotDepth),
           requests_(QUEUE_CAPACITY),
           results_(QUEUE_CAPACITY) {}
 
@@ -201,7 +202,7 @@ private:
             const auto& req = *reqOpt;
 
             spdlog::debug("SnapshotWorker: fetching {}", req.sym);
-            SnapshotData data = fetcher_.fetchSnapshot(req.sym, SNAPSHOT_DEPTH);
+            SnapshotData data = fetcher_.fetchSnapshot(req.sym, snapshotDepth_);
             if (!data.success) {
                 spdlog::warn("SnapshotWorker: fetch failed for {}: {}",
                              req.sym, data.error);
@@ -213,6 +214,7 @@ private:
     }
 
     FetcherT& fetcher_;
+    int snapshotDepth_;
     BoundedQueue<SnapshotRequest> requests_;
     BoundedQueue<SnapshotResult> results_;
     std::thread thread_;

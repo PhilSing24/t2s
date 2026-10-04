@@ -59,7 +59,16 @@ struct SnapshotData {
  */
 class RestClient {
 public:
-    RestClient() : ctx_(ssl::context::tlsv12_client) {
+    /**
+     * @param host REST host, e.g. api.binance.com (spot) or fapi.binance.com (USD-M futures)
+     * @param port TLS port
+     * @param path depth endpoint path, e.g. /api/v3/depth or /fapi/v1/depth
+     */
+    explicit RestClient(std::string host = "api.binance.com",
+                        std::string port = "443",
+                        std::string path = "/api/v3/depth")
+        : host_(std::move(host)), port_(std::move(port)), path_(std::move(path)),
+          ctx_(ssl::context::tlsv12_client) {
         // Enable certificate validation. Without set_verify_mode the
         // default (verify_none) accepts any cert, which means encryption
         // works but there's no proof we're talking to Binance.
@@ -70,7 +79,9 @@ public:
     /**
      * @brief Fetch order book snapshot from Binance REST API
      * 
-     * GET https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=N
+     * GET https://<host><path>?symbol=BTCUSDT&limit=N
+     *   spot:    https://api.binance.com/api/v3/depth
+     *   futures: https://fapi.binance.com/fapi/v1/depth (same shape plus E and T)
      * 
      * @param symbol Symbol in uppercase (e.g., "BTCUSDT")
      * @param limit Number of levels (default BOOK_DEPTH)
@@ -80,9 +91,9 @@ public:
         SnapshotData result;
         
         try {
-            const std::string host = "api.binance.com";
-            const std::string port = "443";
-            const std::string target = "/api/v3/depth?symbol=" + symbol + 
+            const std::string& host = host_;
+            const std::string& port = port_;
+            const std::string target = path_ + "?symbol=" + symbol + 
                                        "&limit=" + std::to_string(limit);
 
             std::cout << "[REST] Fetching snapshot: " << host << target << std::endl;
@@ -171,6 +182,9 @@ public:
     static constexpr int IO_TIMEOUT_SEC = 10;
 
 private:
+    std::string host_;
+    std::string port_;
+    std::string path_;
     ssl::context ctx_;
 
     /// Integer value of a response header, or dflt if absent / not a number.
