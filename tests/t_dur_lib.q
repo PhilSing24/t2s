@@ -32,9 +32,10 @@
   h};
 
 / Tables, their fhSeqNo counter side, and the feed-handler row width.
-.d.tables:`trade_binance`quote_binance`trade_binance_fut;
-.d.side:.d.tables ! `trade`quote`aggTrade;
-.d.width:.d.tables ! 12 28 14;
+.d.tables:`trade_binance`quote_binance`trade_binance_fut`quote_binance_fut;
+.d.side:.d.tables ! `trade`quote`aggTrade`quoteFut;
+.d.baseSchema:.d.tables ! (.schema.trade; .schema.quote; .schema.aggTrade; .schema.quoteFut);
+.d.width:.d.tables ! {[t] count cols .d.baseSchema t} each .d.tables;   / 12 28 14 29 at quote depth 5
 
 / ---------------------------------------------------------------------------
 / Synthetic rows. fhSeqNo must stay contiguous per side for the whole life of
@@ -70,6 +71,13 @@
    1.0; 0.9; 0.8; 0.7; 0.6;
    1b; `long$1700000000000+i; "j"$ts; 10j; 15j; seq)};
 
+/ Futures quote row: the quote row with exchTransactTimeMs inserted after
+/ exchEventTimeMs (29 feed-handler columns at depth 5).
+.d.mkQuoteFut:{[ts;i;seq]
+  r:.d.mkQuote[ts;i;seq];
+  k:1 + (cols .schema.quoteFut)?`exchEventTimeMs;
+  (k # r), (enlist `long$1699999999990+i), k _ r};
+
 / Futures aggTrade row: 14 feed-handler columns (aggTradeId, firstTradeId,
 / lastTradeId between sym and price). fhSeqNo sits at index 13.
 .d.mkAggTrade:{[ts;i;seq]
@@ -80,6 +88,7 @@
   $[t = `trade_binance; .d.mkTrade[ts;i;seq];
     t = `quote_binance; .d.mkQuote[ts;i;seq];
     t = `trade_binance_fut; .d.mkAggTrade[ts;i;seq];
+    t = `quote_binance_fut; .d.mkQuoteFut[ts;i;seq];
     .d.fail raze ("unknown table "; string t)]};
 
 / Publish n rows of table t dated d over handle h (synchronous upd calls),
@@ -120,7 +129,7 @@
 .d.tpLogRows:{[t]
   .d.accTp::`long$(); .d.accFh::`long$();
   .d.tgt::t;
-  .d.fhIdx::(cols .schema.extend[$[t = `trade_binance; .schema.trade; t = `quote_binance; .schema.quote; .schema.aggTrade]; `tpRecvTimeUtcNs`tpSeqNo])?`fhSeqNo;
+  .d.fhIdx::(cols .schema.extend[.d.baseSchema t; `tpRecvTimeUtcNs`tpSeqNo])?`fhSeqNo;
   upd::{[tb;d] if[tb = .d.tgt; .d.accTp,:last d; .d.accFh,:d .d.fhIdx]};
   {[f] -11! f} each .d.tpLogFiles[];
   (.d.accTp; .d.accFh)};

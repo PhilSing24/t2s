@@ -27,6 +27,12 @@
 .t.assertEq["quote at depth 5 keeps the layout it had before depth was configurable";
   `time`sym`bidPrice1`bidPrice2`bidPrice3`bidPrice4`bidPrice5`bidQty1`bidQty2`bidQty3`bidQty4`bidQty5`askPrice1`askPrice2`askPrice3`askPrice4`askPrice5`askQty1`askQty2`askQty3`askQty4`askQty5`isValid`exchEventTimeMs`fhRecvTimeUtcNs`fhParseUs`fhSendUs`fhSeqNo;
   cols .schema.mkQuote[5; `symbol$()]];
+.t.assertEq["futures quote = quote + exchTransactTimeMs after exchEventTimeMs";
+  (cols .schema.quote) ~ (cols .schema.quoteFut) except `exchTransactTimeMs; 1b];
+.t.assertEq["futures quote has 9 + 4*depth base columns"; 9 + 4 * .schema.depth; count cols .schema.quoteFut];
+.t.assertEq["exchTransactTimeMs follows exchEventTimeMs";
+  1 + (cols .schema.quoteFut)?`exchEventTimeMs; (cols .schema.quoteFut)?`exchTransactTimeMs];
+.t.assertEq["both quote tables are depth-guarded"; `quote_binance`quote_binance_fut; .schema.quoteTables];
 .t.assertEq["quote at depth 3 has 20 columns"; 20; count cols .schema.mkQuote[3; `symbol$()]];
 .t.assertEq["quote at depth 3 column order";
   `time`sym`bidPrice1`bidPrice2`bidPrice3`bidQty1`bidQty2`bidQty3`askPrice1`askPrice2`askPrice3`askQty1`askQty2`askQty3`isValid`exchEventTimeMs`fhRecvTimeUtcNs`fhParseUs`fhSendUs`fhSeqNo;

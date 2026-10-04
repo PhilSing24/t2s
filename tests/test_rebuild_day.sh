@@ -67,6 +67,7 @@ sleep 1
 tp -step publish -table trade_binance     -rows 150 -date "$D0" -session 8001
 tp -step publish -table quote_binance     -rows 80  -date "$D0" -session 8002
 tp -step publish -table trade_binance_fut -rows 40  -date "$D0" -session 8003
+tp -step publish -table quote_binance_fut -rows 30  -date "$D0" -session 8004
 sleep 1
 # Midnight: TP rotates, then one straggler dated D0 lands in D1's log
 qtp ".tp.clock.set[$D1]"; sleep 2
@@ -76,6 +77,7 @@ wdb -step set_clock -date "$D1"; sleep 7
 wdb -step assert_partition -table trade_binance     -date "$D0" -rows 151
 wdb -step assert_partition -table quote_binance     -date "$D0" -rows 80
 wdb -step assert_partition -table trade_binance_fut -date "$D0" -rows 40
+wdb -step assert_partition -table quote_binance_fut -date "$D0" -rows 30
 wdb -step shutdown; sleep 2; wait "$WDB_PID" 2>/dev/null; WDB_PID=""
 kill -TERM "$TP_PID" 2>/dev/null; wait "$TP_PID" 2>/dev/null; TP_PID=""
 t2s_kill_port "$T2S_PORT_TP"; t2s_kill_port "$T2S_PORT_WDB"
@@ -83,7 +85,7 @@ t2s_kill_port "$T2S_PORT_TP"; t2s_kill_port "$T2S_PORT_WDB"
 echo ""
 echo "=== 1. report on an intact partition ==="
 OUT=$(rebuild -date "$D0"); echo "$OUT" | sed 's/^/    /' | grep -E "rows dated|existing partition|trade_binance:|report only"
-echo "$OUT" | grep -q "rows dated $D0: trade_binance=151, trade_binance_fut=40, quote_binance=80" && echo "  PASS: logs hold 151/40/80 rows for $D0 (straggler from $D1's log included)" || fail "report row counts"
+echo "$OUT" | grep -q "rows dated $D0: trade_binance=151, trade_binance_fut=40, quote_binance=80, quote_binance_fut=30" && echo "  PASS: logs hold 151/40/80/30 rows for $D0 (straggler from $D1's log included)" || fail "report row counts"
 echo "$OUT" | grep -qE "trade_binance: rows 151 +distinct 151 +logs-only 0 +dir-only 0" && echo "  PASS: existing partition matches the logs" || fail "intact partition not reported as matching"
 
 echo ""
@@ -109,6 +111,7 @@ ls -d "$T2S_SB_HDB/.rebuild/$D0.bak."* > /dev/null 2>&1 && echo "  PASS: old par
 wdb -step assert_partition -table trade_binance     -date "$D0" -rows 151
 wdb -step assert_partition -table quote_binance     -date "$D0" -rows 80
 wdb -step assert_partition -table trade_binance_fut -date "$D0" -rows 40
+wdb -step assert_partition -table quote_binance_fut -date "$D0" -rows 30
 check_eod "$D0" | sed 's/^/    /'
 check_eod "$D0" > /dev/null && echo "  PASS: check_eod confirms the rebuilt day" || fail "check_eod does not confirm the rebuilt day"
 

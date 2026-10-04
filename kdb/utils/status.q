@@ -59,16 +59,17 @@ if[not null w;
   wh:w ".health[]"; rs:w ".wdb.replayStatus[]"; ws:w ".wdb.status[]"; hclose w;
   -1 "WDB  : ",string[wh `status]," up ",string[wh `uptime],"  ",string[wh `connState]," to TP",
      "  flushes today ",string[wh `flushes],"  rows written today ",string[wh `rowsWritten],
-     "  checkpoint ",string[rs `lastTpSeqNoTrade],"/",string[rs `lastTpSeqNoAggTrade],"/",string[rs `lastTpSeqNoQuote];
+     "  checkpoint ",string[rs `lastTpSeqNoTrade],"/",string[rs `lastTpSeqNoAggTrade],"/",string[rs `lastTpSeqNoQuote],"/",string[rs `lastTpSeqNoQuoteFut];
   / rows today per table: on disk in tmp.<today> plus buffered in memory
   today:ws `today;
   tmpPath:ws `tmpSave;
-  diskRows:{[p;t] c:` sv p,t,`tpSeqNo; $[() ~ key c; 0j; count get c]}[tmpPath] each `trade_binance`trade_binance_fut`quote_binance;
-  buf:wh `bufferTrades`bufferAggTrades`bufferQuotes;
+  diskRows:{[p;t] c:` sv p,t,`tpSeqNo; $[() ~ key c; 0j; count get c]}[tmpPath] each `trade_binance`trade_binance_fut`quote_binance`quote_binance_fut;
+  buf:wh `bufferTrades`bufferAggTrades`bufferQuotes`bufferQuotesFut;
   tot:diskRows + buf;
   -1 "       rows ",string[today],": trades ",string[tot 0]," (",string[buf 0]," buffered)",
-     "  futures ",string[tot 1]," (",string[buf 1]," buffered)",
-     "  quotes ",string[tot 2]," (",string[buf 2]," buffered)";
+     "  fut trades ",string[tot 1]," (",string[buf 1]," buffered)",
+     "  quotes ",string[tot 2]," (",string[buf 2]," buffered)",
+     "  fut quotes ",string[tot 3]," (",string[buf 3]," buffered)";
   -1 "       duplicates ",string[wh `duplicatesDropped],"  late ",string[wh `lateRows],"  unexpectedDate ",string[wh `unexpectedDateRows],
      "  replayFailures ",string[wh `replayFailures],"  halted ",string[wh `halted],
      "  last replay ",string[rs `lastReplayRows]," rows/",string[rs `lastReplayMs]," ms",

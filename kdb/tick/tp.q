@@ -110,9 +110,11 @@ if[not null .tp.clock.fixed;
 trade_binance:.schema.extend[.schema.trade; `tpRecvTimeUtcNs`tpSeqNo];
 trade_binance_fut:.schema.extend[.schema.aggTrade; `tpRecvTimeUtcNs`tpSeqNo];
 quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo];
+quote_binance_fut:.schema.extend[.schema.quoteFut; `tpRecvTimeUtcNs`tpSeqNo];
 health_feed_handler:.schema.health;
 
-.tp.tables:`trade_binance`trade_binance_fut`quote_binance;
+.tp.tables:`trade_binance`trade_binance_fut`quote_binance`quote_binance_fut;
+.tp.nTables:count .tp.tables;
 
 / Per-table indices derived from the schema. The incoming feed-handler row
 / has the schema's columns minus the two TP appends (tpRecvTimeUtcNs,
@@ -307,21 +309,21 @@ pubsub.init[]
 / -------------------------------------------------------
 
 / Per-table state
-.tp.seq.last:.tp.tables ! 0N 0N 0Nj;        / last accepted fhSeqNo
-.tp.seq.firstTp:.tp.tables ! 0N 0N 0Nj;     / first tpSeqNo logged today per table (replay start hint)
-.tp.session.id:.tp.tables ! 0N 0N 0Nj;      / current sessionId
-.tp.session.handle:.tp.tables ! 0N 0N 0Ni;  / handle of the current session (0N when away)
+.tp.seq.last:.tp.tables ! .tp.nTables#0Nj;        / last accepted fhSeqNo
+.tp.seq.firstTp:.tp.tables ! .tp.nTables#0Nj;     / first tpSeqNo logged today per table (replay start hint)
+.tp.session.id:.tp.tables ! .tp.nTables#0Nj;      / current sessionId
+.tp.session.handle:.tp.tables ! .tp.nTables#0Ni;  / handle of the current session (0N when away)
 .tp.handleTable:(`int$())!`symbol$();       / registered handle -> table
 .tp.unregisteredSeen:`int$();               / handles we already warned about
 
 / Per-table counters
-.tp.ctr.gaps:.tp.tables ! 0 0 0j;             / forward jumps in fhSeqNo
-.tp.ctr.missed:.tp.tables ! 0 0 0j;           / rows missed in those jumps (incl. during TP downtime)
-.tp.ctr.restarts:.tp.tables ! 0 0 0j;         / registrations with a new sessionId
-.tp.ctr.reconnects:.tp.tables ! 0 0 0j;       / registrations with the same sessionId on a new handle
-.tp.ctr.outOfOrder:.tp.tables ! 0 0 0j;       / fhSeqNo <= last inside one session (accepted)
-.tp.ctr.unregisteredRows:.tp.tables ! 0 0 0j; / rows from handles that never registered (accepted)
-.tp.ctr.schemaMismatch:.tp.tables ! 0 0 0j;   / rows rejected for wrong width
+.tp.ctr.gaps:.tp.tables ! .tp.nTables#0j;             / forward jumps in fhSeqNo
+.tp.ctr.missed:.tp.tables ! .tp.nTables#0j;           / rows missed in those jumps (incl. during TP downtime)
+.tp.ctr.restarts:.tp.tables ! .tp.nTables#0j;         / registrations with a new sessionId
+.tp.ctr.reconnects:.tp.tables ! .tp.nTables#0j;       / registrations with the same sessionId on a new handle
+.tp.ctr.outOfOrder:.tp.tables ! .tp.nTables#0j;       / fhSeqNo <= last inside one session (accepted)
+.tp.ctr.unregisteredRows:.tp.tables ! .tp.nTables#0j; / rows from handles that never registered (accepted)
+.tp.ctr.schemaMismatch:.tp.tables ! .tp.nTables#0j;   / rows rejected for wrong width
 .tp.ctr.rejectedRegistrations:0j;             / registrations refused (wrong width / unknown table)
 .tp.ctr.unknownTableRows:0j;                  / rows for tables we don't know (passed through)
 
@@ -504,8 +506,8 @@ upd:{[tbl;data]
 / restart (seen in the first live check of this code). Uses -11! with a
 / temporary upd; rows whose width does not match the schema are ignored.
 .tp.scan.tpMax:0j;
-.tp.scan.fhLast:.tp.tables ! 0N 0N 0Nj;
-.tp.scan.tpFirst:.tp.tables ! 0N 0N 0Nj;
+.tp.scan.fhLast:.tp.tables ! .tp.nTables#0Nj;
+.tp.scan.tpFirst:.tp.tables ! .tp.nTables#0Nj;
 .tp.scanUpd:{[t;d]
   if[not t in .tp.tables; :()];
   if[(count d) <> count cols value t; :()];
@@ -515,8 +517,8 @@ upd:{[tbl;data]
  };
 .tp.scanLog:{[f]
   .tp.scan.tpMax:0j;
-  .tp.scan.fhLast:.tp.tables ! 0N 0N 0Nj;
-  .tp.scan.tpFirst:.tp.tables ! 0N 0N 0Nj;
+  .tp.scan.fhLast:.tp.tables ! .tp.nTables#0Nj;
+  .tp.scan.tpFirst:.tp.tables ! .tp.nTables#0Nj;
   oldUpd:upd;
   upd::.tp.scanUpd;
   .[{-11!x}; enlist f; {[err] -1 "TP: log scan error: ",err}];
@@ -628,7 +630,7 @@ upd:{[tbl;data]
 / they still mean the same thing; the per-side "dups" keys are gone because
 / nothing is dropped on a guess any more.
 .tp.statusDict:{[]
-  `port`uptime`logFile`logChunks`tpSeqNo`seqReserved`seqFile`tradeGaps`tradeMissed`tradeRestarts`tradeReconnects`tradeOutOfOrder`lastTradeSeq`aggTradeGaps`aggTradeMissed`aggTradeRestarts`aggTradeReconnects`aggTradeOutOfOrder`lastAggTradeSeq`quoteGaps`quoteMissed`quoteRestarts`quoteReconnects`quoteOutOfOrder`lastQuoteSeq`unregisteredRows`schemaMismatch`rejectedRegistrations`unknownTableRows!
+  `port`uptime`logFile`logChunks`tpSeqNo`seqReserved`seqFile`tradeGaps`tradeMissed`tradeRestarts`tradeReconnects`tradeOutOfOrder`lastTradeSeq`aggTradeGaps`aggTradeMissed`aggTradeRestarts`aggTradeReconnects`aggTradeOutOfOrder`lastAggTradeSeq`quoteGaps`quoteMissed`quoteRestarts`quoteReconnects`quoteOutOfOrder`lastQuoteSeq`quoteFutGaps`quoteFutMissed`quoteFutRestarts`quoteFutReconnects`quoteFutOutOfOrder`lastQuoteFutSeq`unregisteredRows`schemaMismatch`rejectedRegistrations`unknownTableRows!
    (.tp.cfg.port;
     `second$.z.p-.proc.startTime;
     .tp.logFile;
@@ -639,6 +641,7 @@ upd:{[tbl;data]
     .tp.ctr.gaps`trade_binance; .tp.ctr.missed`trade_binance; .tp.ctr.restarts`trade_binance; .tp.ctr.reconnects`trade_binance; .tp.ctr.outOfOrder`trade_binance; .tp.seq.last`trade_binance;
     .tp.ctr.gaps`trade_binance_fut; .tp.ctr.missed`trade_binance_fut; .tp.ctr.restarts`trade_binance_fut; .tp.ctr.reconnects`trade_binance_fut; .tp.ctr.outOfOrder`trade_binance_fut; .tp.seq.last`trade_binance_fut;
     .tp.ctr.gaps`quote_binance; .tp.ctr.missed`quote_binance; .tp.ctr.restarts`quote_binance; .tp.ctr.reconnects`quote_binance; .tp.ctr.outOfOrder`quote_binance; .tp.seq.last`quote_binance;
+    .tp.ctr.gaps`quote_binance_fut; .tp.ctr.missed`quote_binance_fut; .tp.ctr.restarts`quote_binance_fut; .tp.ctr.reconnects`quote_binance_fut; .tp.ctr.outOfOrder`quote_binance_fut; .tp.seq.last`quote_binance_fut;
     sum .tp.ctr.unregisteredRows;
     sum .tp.ctr.schemaMismatch;
     .tp.ctr.rejectedRegistrations;
@@ -663,14 +666,14 @@ upd:{[tbl;data]
   / Daily operational counters reset; sessions, last fhSeqNo and tpSeqNo
   / carry across midnight (handlers do not restart at EOD, and tpSeqNo is
   / monotonic by construction).
-  .tp.ctr.gaps:.tp.tables ! 0 0 0j;
-  .tp.ctr.missed:.tp.tables ! 0 0 0j;
-  .tp.ctr.restarts:.tp.tables ! 0 0 0j;
-  .tp.ctr.reconnects:.tp.tables ! 0 0 0j;
-  .tp.ctr.outOfOrder:.tp.tables ! 0 0 0j;
-  .tp.ctr.unregisteredRows:.tp.tables ! 0 0 0j;
-  .tp.ctr.schemaMismatch:.tp.tables ! 0 0 0j;
-  .tp.seq.firstTp:.tp.tables ! 0N 0N 0Nj;
+  .tp.ctr.gaps:.tp.tables ! .tp.nTables#0j;
+  .tp.ctr.missed:.tp.tables ! .tp.nTables#0j;
+  .tp.ctr.restarts:.tp.tables ! .tp.nTables#0j;
+  .tp.ctr.reconnects:.tp.tables ! .tp.nTables#0j;
+  .tp.ctr.outOfOrder:.tp.tables ! .tp.nTables#0j;
+  .tp.ctr.unregisteredRows:.tp.tables ! .tp.nTables#0j;
+  .tp.ctr.schemaMismatch:.tp.tables ! .tp.nTables#0j;
+  .tp.seq.firstTp:.tp.tables ! .tp.nTables#0Nj;
  };
 
 .tp.currentDate:.tp.today[];

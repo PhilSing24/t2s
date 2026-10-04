@@ -145,6 +145,7 @@ all_tables_match_logs() {
     wdb -step assert_vs_tplog -table trade_binance
     wdb -step assert_vs_tplog -table quote_binance
     wdb -step assert_vs_tplog -table trade_binance_fut
+    wdb -step assert_vs_tplog -table quote_binance_fut
 }
 
 # ============================================================================
@@ -156,7 +157,9 @@ begin_scenario 1 "schemas.q loaded; wrong row width refused at registration and 
     tp -step register_bad -table trade_binance     -width 13
     tp -step register_bad -table quote_binance     -width 12
     tp -step register_bad -table trade_binance_fut -width 12
-    tp -step tp_status -key rejectedRegistrations -value 3
+    # a spot-layout quote row (28 columns) must not get into the futures quote table (29)
+    tp -step register_bad -table quote_binance_fut -width 28
+    tp -step tp_status -key rejectedRegistrations -value 4
     grep -q "REJECTED registration" "$TP_LOG" || fail "TP log lacks REJECTED registration line"
     tp -step publish_bad_width -table trade_binance -date "$TODAY"
     tp -step publish_bad_width -table quote_binance -date "$TODAY"
@@ -169,13 +172,15 @@ begin_scenario 1 "schemas.q loaded; wrong row width refused at registration and 
     tp -step publish -table trade_binance     -rows 20 -date "$TODAY" -session 1001
     tp -step publish -table quote_binance     -rows 10 -date "$TODAY" -session 1002
     tp -step publish -table trade_binance_fut -rows 5  -date "$TODAY" -session 1003
+    tp -step publish -table quote_binance_fut -rows 7  -date "$TODAY" -session 1004
     sleep 1
-    tp -step tp_status -key logChunks -value 35
+    tp -step tp_status -key logChunks -value 42
     tp -step tp_status -key unregisteredRows -value 0
     tp -step fh_stats
     wdb -step assert_status -key tradesRecv -value 20
     wdb -step assert_status -key quotesRecv -value 10
     wdb -step assert_status -key aggTradesRecv -value 5
+    wdb -step assert_status -key quotesFutRecv -value 7
     wdb_graceful_stop
     all_tables_match_logs
 }

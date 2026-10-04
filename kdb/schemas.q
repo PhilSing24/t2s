@@ -7,6 +7,7 @@
 /   trade_binance:.schema.trade;
 /   trade_binance_fut:.schema.aggTrade;
 /   quote_binance:.schema.quote;          / layout generated from config/shared.json
+/   quote_binance_fut:.schema.quoteFut;
 /   health_feed_handler:.schema.health;
 /   / Process that adds its own receive-time stamp(s):
 /   trade_binance:.schema.extend[.schema.trade; enlist `tpRecvTimeUtcNs];
@@ -103,9 +104,15 @@ if[0 = count .schema.symbols; .schema.cfg.die raze (.schema.cfg.file; ": symbols
   flip c ! t $\: ()};
 .schema.quote:.schema.mkQuote[.schema.depth; `symbol$()];
 
+/ USD-M futures quote handler output: the same layout plus
+/ exchTransactTimeMs, the `T` (transaction time) of the futures depth event,
+/ right after exchEventTimeMs (`E`). Spot depth events have no `T`.
+/ 9 + 4*depth columns: 29 at depth 5.
+.schema.quoteFut:.schema.mkQuote[.schema.depth; enlist `exchTransactTimeMs];
+
 / Tables holding quote rows; their depth is checked against existing data
 / at start-up (see .schema.requireDepth below).
-.schema.quoteTables:enlist `quote_binance;
+.schema.quoteTables:`quote_binance`quote_binance_fut;
 
 / Per-process health snapshot (10 columns)
 .schema.health:([]

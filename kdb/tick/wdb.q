@@ -84,6 +84,7 @@ system "g 0";
 .wdb.stats.tradesReceived:0j;
 .wdb.stats.aggTradesReceived:0j;
 .wdb.stats.quotesReceived:0j;
+.wdb.stats.quotesFutReceived:0j;
 
 / Durability counters (NOT reset at roll - they describe anomalies the
 / operator should look at)
@@ -142,7 +143,9 @@ system "g 0";
 
 / Highest tpSeqNo successfully flushed to disk PER TABLE. A global cursor
 / would advance past unflushed rows of the other tables, so it is per table.
-.wdb.lastTpSeqNo:`trade_binance`trade_binance_fut`quote_binance ! 0 0 0j;
+.wdb.tables:`trade_binance`trade_binance_fut`quote_binance`quote_binance_fut;
+.wdb.nTables:count .wdb.tables;
+.wdb.lastTpSeqNo:.wdb.tables ! .wdb.nTables#0j;
 / Date (WDB clock) at which the checkpoint was last written (diagnostics;
 / null for a legacy checkpoint without a date).
 .wdb.checkpointDate:0Nd;
@@ -151,7 +154,7 @@ system "g 0";
 / is the max of this and the checkpoint: after a TP restart WDB reconnects
 / and replays from the floor, and rows still sitting unflushed in memory
 / must not be delivered a second time.
-.wdb.bufMaxSeq:`trade_binance`trade_binance_fut`quote_binance ! 0 0 0j;
+.wdb.bufMaxSeq:.wdb.tables ! .wdb.nTables#0j;
 .wdb.floor:{[tbl] .wdb.lastTpSeqNo[tbl] | .wdb.bufMaxSeq[tbl]};
 
 / Replay stats (reset at roll)
@@ -163,6 +166,7 @@ system "g 0";
 .wdb.replayLiveBuffer.trade_binance:();
 .wdb.replayLiveBuffer.trade_binance_fut:();
 .wdb.replayLiveBuffer.quote_binance:();
+.wdb.replayLiveBuffer.quote_binance_fut:();
 .wdb.replayMode:0b;
 .wdb.replayCutoff:0j;
 
@@ -196,12 +200,12 @@ system "g 0";
 trade_binance:.schema.extend[.schema.trade; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeUtcNs];
 trade_binance_fut:.schema.extend[.schema.aggTrade; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeUtcNs];
 quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeUtcNs];
+quote_binance_fut:.schema.extend[.schema.quoteFut; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeUtcNs];
 
-.wdb.tables:`trade_binance`trade_binance_fut`quote_binance;
-
-/ Position of tpSeqNo in the incoming row, PER TABLE. The three schemas have
-/ different widths (12, 14 and 28 feed-handler columns), so the index differs:
-/ 13 for trade_binance, 15 for trade_binance_fut, 29 for quote_binance. A
+/ Position of tpSeqNo in the incoming row, PER TABLE. The schemas have
+/ different widths (12, 14, 28 and 29 feed-handler columns at quote depth 5),
+/ so the index differs: 13 for trade_binance, 15 for trade_binance_fut, 29
+/ for quote_binance, 30 for quote_binance_fut. A
 / single index taken from the trade schema read askPrice2 for quotes and
 / fhSeqNo for futures and dropped live rows as duplicates once the
 / checkpoint was non-zero (found in the first live run of this code).
@@ -225,9 +229,9 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
 / Returns (seqDict; date). Legacy shapes yield a null date, which the
 / counter-reset rule treats as "a previous day".
 .wdb.loadCheckpoint:{[]
-  defaults:(.wdb.tables ! 0 0 0j; 0Nd);
+  defaults:(.wdb.tables ! .wdb.nTables#0j; 0Nd);
   if[() ~ key .wdb.cfg.checkpointFile;
-    -1 "WDB: no checkpoint file, starting fresh (trade=0, aggTrade=0, quote=0)";
+    -1 "WDB: no checkpoint file, starting fresh (every table at 0)";
     :defaults
   ];
   v:@[get; .wdb.cfg.checkpointFile; {[err]
@@ -237,20 +241,23 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
   seq:defaults 0; d:0Nd;
   $[-7h = type v;
       [-1 raze ("WDB: migrating legacy scalar checkpoint "; string v; " -> per-table dict");
-       seq:.wdb.tables ! (v;0j;v)];
+       seq:.wdb.tables ! (v;0j;v;0j)];
     (99h = type v) and `seq in key v;
       [seq:v `seq; d:v `date];
     99h = type v;
       seq:v;
       -1 "WDB: unrecognised checkpoint shape - starting fresh"];
-  / Pre-ADR-013 dict had only trade_binance + quote_binance.
-  if[not `trade_binance_fut in key seq;
-    -1 "WDB: migrating legacy 2-table checkpoint -> 3-table dict (trade_binance_fut=0)";
-    seq:seq, (enlist `trade_binance_fut)!enlist 0j];
+  / A checkpoint written before a table existed (2 tables before ADR-013,
+  / 3 before quote_binance_fut) lacks its key: that table starts at 0.
+  missing:.wdb.tables except key seq;
+  if[count missing;
+    -1 raze ("WDB: checkpoint has no entry for "; ", " sv string missing; " - starting "; $[1 = count missing; "it"; "them"]; " at 0");
+    seq:seq, missing ! (count missing)#0j];
   seq:.wdb.tables # seq;
   -1 raze ("WDB: loaded checkpoint - trade="; string seq`trade_binance;
            " aggTrade="; string seq`trade_binance_fut;
            " quote="; string seq`quote_binance;
+           " quoteFut="; string seq`quote_binance_fut;
            " date="; string d);
   (seq; d)
  };
@@ -485,6 +492,7 @@ disksort:{[t;c;a]
   .wdb.stats.tradesReceived:0j;
   .wdb.stats.aggTradesReceived:0j;
   .wdb.stats.quotesReceived:0j;
+  .wdb.stats.quotesFutReceived:0j;
  };
 
 / Flush everything (so buffered rows for past dates land in their tmp dirs),
@@ -554,6 +562,7 @@ endofday:{[]
   $[tbl = `trade_binance;     .wdb.stats.tradesReceived+:1;
     tbl = `trade_binance_fut; .wdb.stats.aggTradesReceived+:1;
     tbl = `quote_binance;     .wdb.stats.quotesReceived+:1;
+    tbl = `quote_binance_fut; .wdb.stats.quotesFutReceived+:1;
     ()];
  };
 
@@ -602,8 +611,8 @@ endofday:{[]
 
 / Staging area: rows (pre-WDB-stamp lists) per table, kept until the whole
 / replay has succeeded.
-.wdb.stage:.wdb.tables ! ((); (); ());
-.wdb.stageFloor:.wdb.tables ! 0 0 0j;
+.wdb.stage:.wdb.tables ! .wdb.nTables#enlist ();
+.wdb.stageFloor:.wdb.tables ! .wdb.nTables#0j;
 .wdb.stageCutoff:0j;
 
 / Called by the log reader for every chunk: keep rows strictly between the
@@ -671,6 +680,7 @@ endofday:{[]
   -1 raze ("WDB: starting replay - checkpoint: trade="; string .wdb.lastTpSeqNo`trade_binance;
            " aggTrade="; string .wdb.lastTpSeqNo`trade_binance_fut;
            " quote="; string .wdb.lastTpSeqNo`quote_binance;
+           " quoteFut="; string .wdb.lastTpSeqNo`quote_binance_fut;
            " date="; string .wdb.checkpointDate);
   info:h ".tp.replayInfo[]";
   .wdb.replayCutoff:info `cutoff;
@@ -681,7 +691,7 @@ endofday:{[]
     {[tbl] n:count .wdb.replayLiveBuffer[tbl]; .wdb.stats.haltedRowsDropped+:n; .wdb.replayLiveBuffer[tbl]:()} each .wdb.tables;
     .wdb.replayMode:0b; .wdb.replayCutoff:0j;
     :1b];
-  .wdb.stage:.wdb.tables ! ((); (); ());
+  .wdb.stage:.wdb.tables ! .wdb.nTables#enlist ();
   .wdb.stageFloor:.wdb.tables ! .wdb.floor each .wdb.tables;
   .wdb.stageCutoff:.wdb.replayCutoff;
   .wdb.replayAcc.segs:0j; .wdb.replayAcc.bytes:0j; .wdb.replayAcc.seek:0Nj;
@@ -691,7 +701,7 @@ endofday:{[]
     .wdb.stats.replayFailures+:1;
     .wdb.lastReplayError:last r;
     -1 raze ("WDB: REPLAY FAILED - "; last r; " - nothing merged, checkpoint untouched, will retry");
-    .wdb.stage:.wdb.tables ! ((); (); ());
+    .wdb.stage:.wdb.tables ! .wdb.nTables#enlist ();
     {[tbl] .wdb.replayLiveBuffer[tbl]:()} each .wdb.tables;
     .wdb.replayMode:0b; .wdb.replayCutoff:0j;
     :0b];
@@ -699,7 +709,7 @@ endofday:{[]
   / dedupe + buffer path, then drain what arrived live meanwhile.
   {[tbl] .wdb.ingest[tbl;;`replay] each .wdb.stage[tbl]} each .wdb.tables;
   -1 raze ("WDB: replay merged "; string r `rows; " rows from "; string count r `logs; " log(s) in "; string r `ms; " ms");
-  .wdb.stage:.wdb.tables ! ((); (); ());
+  .wdb.stage:.wdb.tables ! .wdb.nTables#enlist ();
   .wdb.lastReplay:r;
   .wdb.lastReplayError:"";
   .wdb.drainLiveBuffer each .wdb.tables;
@@ -710,7 +720,7 @@ endofday:{[]
  };
 
 .wdb.replayStatus:{[]
-  `lastTpSeqNoTrade`lastTpSeqNoAggTrade`lastTpSeqNoQuote`checkpointDate`replayMode`replayCutoff`replayRowsApplied`replayDupsFiltered`duplicatesDropped`lateRows`unexpectedDateRows`checkpointBehindDisk`replayFailures`lastReplayError`lastReplayLogs`lastReplaySeekOffset`lastReplaySegments`lastReplayBytes`lastReplayRows`lastReplayMs`halted`haltReason`haltedRowsDropped`lastRollDate`bufferTrades`bufferAggTrades`bufferQuotes!(
+  `lastTpSeqNoTrade`lastTpSeqNoAggTrade`lastTpSeqNoQuote`checkpointDate`replayMode`replayCutoff`replayRowsApplied`replayDupsFiltered`duplicatesDropped`lateRows`unexpectedDateRows`checkpointBehindDisk`replayFailures`lastReplayError`lastReplayLogs`lastReplaySeekOffset`lastReplaySegments`lastReplayBytes`lastReplayRows`lastReplayMs`halted`haltReason`haltedRowsDropped`lastRollDate`bufferTrades`bufferAggTrades`bufferQuotes`lastTpSeqNoQuoteFut`bufferQuotesFut!(
     .wdb.lastTpSeqNo`trade_binance;
     .wdb.lastTpSeqNo`trade_binance_fut;
     .wdb.lastTpSeqNo`quote_binance;
@@ -737,7 +747,9 @@ endofday:{[]
     .wdb.lastRollDate;
     count .wdb.replayLiveBuffer.trade_binance;
     count .wdb.replayLiveBuffer.trade_binance_fut;
-    count .wdb.replayLiveBuffer.quote_binance)
+    count .wdb.replayLiveBuffer.quote_binance;
+    .wdb.lastTpSeqNo`quote_binance_fut;
+    count .wdb.replayLiveBuffer.quote_binance_fut)
  };
 
 / Main connection function - NEVER THROWS
@@ -764,6 +776,8 @@ endofday:{[]
     res:h(`pubsub.subscribe;`trade_binance_fut;`);
     -1 "WDB: Subscribed to ",string first first res;
     res:h(`pubsub.subscribe;`quote_binance;`);
+    -1 "WDB: Subscribed to ",string first first res;
+    res:h(`pubsub.subscribe;`quote_binance_fut;`);
     -1 "WDB: Subscribed to ",string first first res;
     .wdb.runReplay[h]
   }; h; {[err]
@@ -832,7 +846,7 @@ upd:{[tbl;data]
          $[(.wdb.stats.lateRows > 0) or .wdb.stats.unexpectedDateRows > 0; `degraded; `ok];
        .wdb.conn.state = `connecting; `degraded;
        `disconnected];
-  `process`port`uptime`status`connState`memMB`tradesRecv`aggTradesRecv`quotesRecv`flushes`rowsWritten`bufferTrades`bufferAggTrades`bufferQuotes`duplicatesDropped`lateRows`unexpectedDateRows`replayFailures`halted`haltedRowsDropped`lastRollDate!(
+  `process`port`uptime`status`connState`memMB`tradesRecv`aggTradesRecv`quotesRecv`flushes`rowsWritten`bufferTrades`bufferAggTrades`bufferQuotes`duplicatesDropped`lateRows`unexpectedDateRows`replayFailures`halted`haltedRowsDropped`lastRollDate`quotesFutRecv`bufferQuotesFut!(
     `wdb;
     .wdb.cfg.port;
     `second$.z.p - .proc.startTime;
@@ -853,7 +867,9 @@ upd:{[tbl;data]
     .wdb.stats.replayFailures;
     .wdb.halted;
     .wdb.stats.haltedRowsDropped;
-    .wdb.lastRollDate
+    .wdb.lastRollDate;
+    .wdb.stats.quotesFutReceived;
+    count quote_binance_fut
   )
   };
 
@@ -862,7 +878,7 @@ upd:{[tbl;data]
 / -------------------------------------------------------
 
 .wdb.status:{[]
-  `port`tpPort`connected`maxRows`today`tmpSave`hdbDir`checkpointFile`flushes`rowsWritten`bufferTrades`bufferAggTrades`bufferQuotes`memMB!(
+  `port`tpPort`connected`maxRows`today`tmpSave`hdbDir`checkpointFile`flushes`rowsWritten`bufferTrades`bufferAggTrades`bufferQuotes`bufferQuotesFut`memMB!(
     .wdb.cfg.port;
     .wdb.cfg.tpPort;
     .wdb.conn.state = `connected;
@@ -876,6 +892,7 @@ upd:{[tbl;data]
     count trade_binance;
     count trade_binance_fut;
     count quote_binance;
+    count quote_binance_fut;
     (`long$.Q.w[][`used]) % 1000000
   )
   };
@@ -981,7 +998,7 @@ system "t ",string .wdb.cfg.timerMs;
 -1"  .wdb.roll[\"manual\"]    / Flush + move past-date tmp dirs into HDB";
 -1"  .wdb.shutdownAndExit[] / Graceful stop (used by stop.sh)";
 -1"";
--1"Tables: trade_binance trade_binance_fut quote_binance";
+-1"Tables: ",(" " sv string .wdb.tables);
 -1"";
 
 $[connected; -1 "WDB: Ready and processing"; -1 "WDB: Started in DEGRADED mode - waiting for TP connection"];

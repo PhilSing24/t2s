@@ -38,13 +38,14 @@ system "l ",.lm.dir,"/../schemas.q";
 .log.cfg.retentionDays:$[count v:getenv `T2S_LOG_RETENTION_DAYS; "J"$v; 7];
 .log.cfg.protected:$[count v:getenv `T2S_LOG_PROTECTED; "D"$"," vs v; `date$()];
 .log.protectedStr:{[] $[count .log.cfg.protected; ", " sv string .log.cfg.protected; "none"]};
-.log.cfg.tables:`trade_binance`trade_binance_fut`quote_binance;
+.log.cfg.tables:`trade_binance`trade_binance_fut`quote_binance`quote_binance_fut;
 
 / Logged row widths (feed-handler columns + tpRecvTimeUtcNs + tpSeqNo)
 .log.schema:.log.cfg.tables ! (
   .schema.extend[.schema.trade; `tpRecvTimeUtcNs`tpSeqNo];
   .schema.extend[.schema.aggTrade; `tpRecvTimeUtcNs`tpSeqNo];
-  .schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo]);
+  .schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo];
+  .schema.extend[.schema.quoteFut; `tpRecvTimeUtcNs`tpSeqNo]);
 .log.width:.log.cfg.tables ! {[t] count cols .log.schema t} each .log.cfg.tables;
 
 / -------------------------------------------------------
@@ -70,7 +71,7 @@ system "l ",.lm.dir,"/../schemas.q";
 / Returns `rows`seqs`unknownShape ! (per-table row count dict; per-table
 / tpSeqNo list dict; rows whose table or width is unknown).
 .log.scan:{[f]
-  .log.acc.seqs::.log.cfg.tables ! (`long$(); `long$(); `long$());
+  .log.acc.seqs::.log.cfg.tables ! (count .log.cfg.tables)#enlist `long$();
   .log.acc.unknown::0j;
   upd::{[t;d]
     $[(t in .log.cfg.tables) and (count d) = .log.width t;

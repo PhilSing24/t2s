@@ -172,16 +172,20 @@ begin_scenario 1 "graceful stop flushes and checkpoints" && {
     step -step publish -table trade_binance     -rows 100 -date "$TODAY"
     step -step publish -table quote_binance     -rows 50  -date "$TODAY"
     step -step publish -table trade_binance_fut -rows 30  -date "$TODAY"
+    step -step publish -table quote_binance_fut -rows 45  -date "$TODAY"
     sleep 1
     step -step assert_status -key bufferTrades -value 100
     step -step assert_status -key bufferAggTrades -value 30
+    step -step assert_status -key bufferQuotesFut -value 45
     graceful_stop
     step -step assert_tmp -table trade_binance     -date "$TODAY" -rows 100
     step -step assert_tmp -table quote_binance     -date "$TODAY" -rows 50
     step -step assert_tmp -table trade_binance_fut -date "$TODAY" -rows 30
+    step -step assert_tmp -table quote_binance_fut -date "$TODAY" -rows 45
     step -step assert_checkpoint -table trade_binance     -date "$TODAY"
     step -step assert_checkpoint -table quote_binance     -date "$TODAY"
     step -step assert_checkpoint -table trade_binance_fut -date "$TODAY"
+    step -step assert_checkpoint -table quote_binance_fut -date "$TODAY"
 
     # ------------------------------------------------------------------
     # Scenario 2 (continues in the same sandbox): restart after clean stop
@@ -197,17 +201,21 @@ begin_scenario 1 "graceful stop flushes and checkpoints" && {
     step -step publish -table trade_binance     -rows 100 -date "$TODAY"
     step -step publish -table quote_binance     -rows 50  -date "$TODAY"
     step -step publish -table trade_binance_fut -rows 30  -date "$TODAY"
+    step -step publish -table quote_binance_fut -rows 45  -date "$TODAY"
     sleep 1
     step -step assert_status -key duplicatesDropped -value 0
     step -step assert_status -key quotesRecv -value 50
     step -step assert_status -key aggTradesRecv -value 30
+    step -step assert_status -key quotesFutRecv -value 45
     graceful_stop
     step -step assert_tmp -table trade_binance     -date "$TODAY" -rows 200
     step -step assert_tmp -table quote_binance     -date "$TODAY" -rows 100
     step -step assert_tmp -table trade_binance_fut -date "$TODAY" -rows 60
+    step -step assert_tmp -table quote_binance_fut -date "$TODAY" -rows 90
     step -step assert_vs_tplog -table trade_binance
     step -step assert_vs_tplog -table quote_binance
     step -step assert_vs_tplog -table trade_binance_fut
+    step -step assert_vs_tplog -table quote_binance_fut
 }
 end_scenario
 

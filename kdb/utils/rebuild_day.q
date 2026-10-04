@@ -36,14 +36,15 @@ system "l ",.rb.dir,"/../schemas.q";
 .rb.cfg.logDir:$[count v:getenv `T2S_TP_LOG_DIR; v; .rb.dir,"/../tick/logs"];
 .rb.cfg.hdbDir:$[count v:getenv `T2S_HDB_DIR; v; .rb.dir,"/../../hdb"];
 .rb.cfg.hdb:hsym `$ .rb.cfg.hdbDir;
-.rb.cfg.tables:`trade_binance`trade_binance_fut`quote_binance;
+.rb.cfg.tables:`trade_binance`trade_binance_fut`quote_binance`quote_binance_fut;
 .z.zd:(17;5;1);   / same compression as wdb.q
 
 / Logged schemas (feed-handler columns + tpRecvTimeUtcNs + tpSeqNo)
 .rb.schema:.rb.cfg.tables ! (
   .schema.extend[.schema.trade; `tpRecvTimeUtcNs`tpSeqNo];
   .schema.extend[.schema.aggTrade; `tpRecvTimeUtcNs`tpSeqNo];
-  .schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo]);
+  .schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo];
+  .schema.extend[.schema.quoteFut; `tpRecvTimeUtcNs`tpSeqNo]);
 .rb.width:.rb.cfg.tables ! {[t] count cols .rb.schema t} each .rb.cfg.tables;
 
 .rb.logPath:{[d] hsym `$ raze (.rb.cfg.logDir; "/"; string d; ".log")};
@@ -58,7 +59,7 @@ system "l ",.rb.dir,"/../schemas.q";
 / Collect: rows dated D from the logs of D-1, D, D+1
 / -------------------------------------------------------
 .rb.acc:.rb.schema;   / empty typed tables, one per table
-.rb.buf:.rb.cfg.tables ! ((); (); ());   / rows awaiting a batched append
+.rb.buf:.rb.cfg.tables ! (count .rb.cfg.tables)#enlist ();   / rows awaiting a batched append
 .rb.cfg.batch:50000;
 .rb.unknown:0j;
 .rb.scanned:0j;
@@ -83,7 +84,7 @@ system "l ",.rb.dir,"/../schemas.q";
 .rb.collect:{[d]
   .rb.day::d;
   .rb.acc::.rb.schema;
-  .rb.buf::.rb.cfg.tables ! ((); (); ());
+  .rb.buf::.rb.cfg.tables ! (count .rb.cfg.tables)#enlist ();
   .rb.unknown::0j; .rb.scanned::0j;
   logs:.rb.logPath each d + -1 0 1;
   logs:logs where not () ~/: key each logs;
