@@ -1,0 +1,14 @@
+# t2s-status.service - one status.sh summary into ops/cron/status.log.
+# status.sh exits 1 when something needs attention; that is a report, not a
+# failure of this unit.
+[Unit]
+Description=t2s status summary
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/t2s/t2s.env
+WorkingDirectory=@T2S_ROOT@
+ExecStart=@T2S_ROOT@/status.sh
+SuccessExitStatus=1
+StandardOutput=append:@T2S_ROOT@/ops/cron/status.log
+StandardError=append:@T2S_ROOT@/ops/cron/status.log

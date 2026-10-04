@@ -1,0 +1,11 @@
+# 07:00 UTC every day.
+[Unit]
+Description=t2s status summary, daily at 07:00 UTC
+
+[Timer]
+OnCalendar=*-*-* 07:00:00 UTC
+Persistent=true
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

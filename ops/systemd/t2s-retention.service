@@ -1,0 +1,14 @@
+# t2s-retention.service - delete TP logs older than 7 days whose rows are
+# all in the HDB (kdb/utils/logmgr.q -retention -apply).
+[Unit]
+Description=t2s TP log retention (apply)
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/t2s/t2s.env
+Environment=T2S_LOG_RETENTION_DAYS=7
+WorkingDirectory=@T2S_ROOT@
+ExecStart=/usr/bin/env q kdb/utils/logmgr.q -retention -apply
+StandardInput=null
+StandardOutput=append:@T2S_ROOT@/ops/cron/retention.log
+StandardError=append:@T2S_ROOT@/ops/cron/retention.log

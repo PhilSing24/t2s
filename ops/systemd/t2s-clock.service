@@ -1,0 +1,11 @@
+# t2s-clock.service - compare the WSL clock with the hardware clock (which
+# Windows keeps right) and, if it has drifted, set it back with
+# `sudo -n hwclock -s`. Fails if there is drift it is not allowed to fix.
+[Unit]
+Description=t2s clock drift check (WSL clock vs hardware clock)
+
+[Service]
+Type=oneshot
+ExecStart=@T2S_ROOT@/ops/clock_check.sh
+StandardOutput=append:@T2S_ROOT@/ops/cron/clock.log
+StandardError=append:@T2S_ROOT@/ops/cron/clock.log

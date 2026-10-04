@@ -1,0 +1,11 @@
+# 00:40 UTC every day, ten minutes after the end-of-day check.
+[Unit]
+Description=t2s TP log retention, daily at 00:40 UTC
+
+[Timer]
+OnCalendar=*-*-* 00:40:00 UTC
+Persistent=true
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

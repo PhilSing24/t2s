@@ -1,0 +1,12 @@
+# 00:30 UTC every day. Persistent: if the machine was off or asleep at that
+# time, the job runs as soon as the timer is active again.
+[Unit]
+Description=t2s end-of-day check, daily at 00:30 UTC
+
+[Timer]
+OnCalendar=*-*-* 00:30:00 UTC
+Persistent=true
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

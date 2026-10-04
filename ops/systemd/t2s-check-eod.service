@@ -1,0 +1,13 @@
+# t2s-check-eod.service - confirm yesterday's (UTC) partition against its TP
+# log. Fails (and shows in `systemctl --user --failed`) if the day is not
+# complete in the HDB.
+[Unit]
+Description=t2s end-of-day check (yesterday's partition vs its TP log)
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/t2s/t2s.env
+WorkingDirectory=@T2S_ROOT@
+ExecStart=@T2S_ROOT@/check_eod.sh
+StandardOutput=append:@T2S_ROOT@/ops/cron/check_eod.log
+StandardError=append:@T2S_ROOT@/ops/cron/check_eod.log

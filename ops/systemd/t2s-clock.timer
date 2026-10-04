@@ -1,0 +1,12 @@
+# One minute after the user manager starts, then every 5 minutes. After a
+# laptop sleep the first run on wake is at most 5 minutes away.
+[Unit]
+Description=t2s clock drift check, every 5 minutes
+
+[Timer]
+OnStartupSec=1min
+OnUnitActiveSec=5min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
