@@ -88,6 +88,30 @@ pid_by_port() { lsof -ti TCP:"$1" -sTCP:LISTEN 2>/dev/null || true; }
 echo "Stopping t2s pipeline..."
 
 # ---------------------------------------------------------------------------
+# 0. systemd mode: stop the units in order (handlers, WDB, TP). systemctl
+#    stop waits for each group; WDB's unit runs the same IPC shutdown as
+#    below (ops/systemd/wdb-stop.sh). Whatever is left afterwards - a tmux
+#    session, strays - is handled by the steps that follow.
+# ---------------------------------------------------------------------------
+T2S_HANDLER_UNITS=(t2s-trade-fh.service t2s-quote-fh.service t2s-trade-fh-fut.service t2s-quote-fh-fut.service)
+unit_running() { local s; s=$(systemctl --user is-active "$1" 2>/dev/null); [[ "$s" == "active" || "$s" == "activating" || "$s" == "deactivating" ]]; }
+SYSTEMD_ANY=0
+for u in "${T2S_HANDLER_UNITS[@]}" t2s-wdb.service t2s-tp.service; do unit_running "$u" && SYSTEMD_ANY=1; done
+if [[ $SYSTEMD_ANY -eq 1 ]]; then
+    if [[ "$FORCE" == true ]]; then
+        systemctl --user kill -s KILL "${T2S_HANDLER_UNITS[@]}" t2s-wdb.service t2s-tp.service 2>/dev/null
+        warn "systemd units: SIGKILL (force) - WDB buffer NOT flushed"
+    fi
+    systemctl --user stop "${T2S_HANDLER_UNITS[@]}" 2>/dev/null && log "systemd: feed handler units stopped"
+    if unit_running t2s-wdb.service; then
+        systemctl --user stop t2s-wdb.service 2>/dev/null
+        echo -e "  ${GREEN}systemd: WDB unit stopped (buffers flushed, checkpoint written)${NC}"
+    fi
+    systemctl --user stop t2s-tp.service 2>/dev/null && log "systemd: TP unit stopped"
+    systemctl --user stop t2s.target 2>/dev/null
+fi
+
+# ---------------------------------------------------------------------------
 # 1. Feed handlers
 # ---------------------------------------------------------------------------
 FH_PIDS=$(fh_pids | sort -u)

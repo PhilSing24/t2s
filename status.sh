@@ -33,6 +33,46 @@ QUOTE=$(fh_pid quote_feed_handler); QUOTE_FUT=$(fh_pid quote_feed_handler_fut)
 up() { if [[ -n "$2" ]]; then echo -n "$1 up(pid $2)  "; else echo -n "$1 DOWN  "; fi; }
 echo -n "PROC : "; up tp "$TP_PID"; up wdb "$WDB_PID"; up trade-fh "$SPOT"; up quote-fh "$QUOTE"; up trade-fh-fut "$FUT"; up quote-fh-fut "$QUOTE_FUT"
 if tmux has-session -t $SESSION 2>/dev/null; then echo "tmux:$SESSION"; else echo "tmux:none"; fi
+
+# ---------------- systemd units ----------------
+# How the pipeline is run and what systemd had to do: state and restart
+# count of each unit, when the timers fire next.
+if systemctl --user cat t2s-tp.service >/dev/null 2>&1; then
+    LINE=""; SD_ACTIVE=0
+    for u in tp wdb trade-fh quote-fh trade-fh-fut quote-fh-fut; do
+        st=$(systemctl --user show -p ActiveState --value "t2s-$u.service" 2>/dev/null)
+        nr=$(systemctl --user show -p NRestarts --value "t2s-$u.service" 2>/dev/null)
+        LINE+="$u $st"
+        [[ "${nr:-0}" -gt 0 ]] && LINE+="(restarted ${nr}x)"
+        LINE+="  "
+        [[ "$st" == "active" ]] && SD_ACTIVE=$((SD_ACTIVE + 1))
+        [[ "$st" == "failed" ]] && note "systemd unit t2s-$u is FAILED (systemctl --user status t2s-$u; journalctl --user -u t2s-$u)"
+    done
+    echo "UNITS: $LINE"
+    TL=""
+    for t in check-eod retention status clock; do
+        if [[ "$(systemctl --user is-active "t2s-$t.timer" 2>/dev/null)" == "active" ]]; then
+            nx=$(systemctl --user show -p NextElapseUSecRealtime --value "t2s-$t.timer" 2>/dev/null)
+            [[ -z "$nx" || "$nx" == "n/a" ]] && nx="periodic" || nx=$(date -u -d "$nx" +%m-%dT%H:%MZ 2>/dev/null || echo "$nx")
+            TL+="$t next $nx  "
+        else
+            TL+="$t OFF  "
+            note "timer t2s-$t.timer is not active (systemctl --user enable --now t2s-$t.timer)"
+        fi
+        res=$(systemctl --user show -p Result --value "t2s-$t.service" 2>/dev/null)
+        [[ -n "$res" && "$res" != "success" ]] && note "last run of t2s-$t.service failed ($res): see ops/cron/ and journalctl --user -u t2s-$t"
+    done
+    echo "TIMER: $TL"
+    en=$(systemctl --user is-enabled t2s.target 2>/dev/null)
+    lg=$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)
+    echo "BOOT : t2s.target ${en:-not installed}; lingering ${lg:-unknown} (both needed to come back by itself after a WSL restart)"
+    [[ "$en" == "enabled" && "$lg" != "yes" ]] && note "lingering is off: the pipeline will not start at WSL boot (sudo loginctl enable-linger $USER)"
+    if [[ $SD_ACTIVE -gt 0 ]] && tmux has-session -t $SESSION 2>/dev/null; then
+        note "systemd units AND a tmux session '$SESSION' exist at the same time - stop both with ./stop.sh"
+    fi
+else
+    echo "UNITS: systemd units not installed (tmux mode; ops/systemd/install.sh installs them)"
+fi
 [[ -z "$TP_PID" ]]  && note "TP is down"
 [[ -z "$WDB_PID" ]] && note "WDB is down"
 MARKETS=$(cat "$BASEDIR/run/markets.active" 2>/dev/null || echo "")

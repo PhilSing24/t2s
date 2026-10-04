@@ -8,6 +8,17 @@
 #   ./start.sh --markets spot,futures - all four handlers
 #   ./start.sh --headless ...      - start and return without attaching to tmux
 #                                    (for scheduled / unattended starts)
+#   ./start.sh --tmux ...          - run the processes in a tmux session even
+#                                    though the systemd units are installed
+#
+# Two ways of running, never both at once:
+#   systemd  (default once ops/systemd/install.sh has been run) - each
+#            process is a user unit, restarted by systemd if it dies;
+#            output in the journal (journalctl --user -u t2s-tp -f)
+#   tmux     (fallback, or --tmux) - each process in a window of the tmux
+#            session "t2s"; nothing restarts a process that dies
+# start.sh refuses tmux mode while any t2s unit is active, and the units
+# refuse to start while the tmux session exists.
 #
 # Start-up is health-based, not timed: TP must answer .health[] ok before
 # WDB starts; WDB must be connected with its replay complete before the feed
@@ -36,6 +47,7 @@ NC='\033[0m' # No Color
 # --------------------------------------------------------------------------
 MARKETS="spot"  # default: spot trade FH only
 HEADLESS=0
+FORCE_TMUX=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --markets)
@@ -50,13 +62,17 @@ while [[ $# -gt 0 ]]; do
             HEADLESS=1
             shift
             ;;
+        --tmux)
+            FORCE_TMUX=1
+            shift
+            ;;
         -h|--help)
-            sed -n '3,11p' "${BASH_SOURCE[0]}"
+            sed -n '3,22p' "${BASH_SOURCE[0]}"
             exit 0
             ;;
         *)
             echo -e "${RED}Unknown argument: $1${NC}"
-            echo "Usage: $0 [--markets spot|futures|spot,futures]"
+            echo "Usage: $0 [--markets spot|futures|spot,futures] [--headless] [--tmux]"
             exit 1
             ;;
     esac
@@ -86,12 +102,39 @@ for var in T2S_TP_FAKE_DATE T2S_WDB_FAKE_DATE; do
     fi
 done
 
+# --------------------------------------------------------------------------
+# systemd or tmux
+# --------------------------------------------------------------------------
+T2S_UNITS=(t2s-tp t2s-wdb t2s-trade-fh t2s-quote-fh t2s-trade-fh-fut t2s-quote-fh-fut)
+units_installed() { systemctl --user cat t2s-tp.service >/dev/null 2>&1; }
+units_active() {   # names of t2s units that are active or starting
+    local u s
+    for u in "${T2S_UNITS[@]}"; do
+        s=$(systemctl --user is-active "$u.service" 2>/dev/null)
+        [[ "$s" == "active" || "$s" == "activating" ]] && echo "$u"
+    done
+}
+MODE=tmux
+if [[ $FORCE_TMUX -eq 0 ]] && units_installed; then MODE=systemd; fi
+
 # Dependency checks
-command -v tmux >/dev/null 2>&1 || { echo -e "${RED}Error: tmux not installed${NC}"; exit 1; }
 command -v q >/dev/null 2>&1 || { echo -e "${RED}Error: q (kdb+) not installed${NC}"; exit 1; }
+ACTIVE_UNITS=$(units_active | tr '\n' ' ')
+if [[ "$MODE" == tmux ]]; then
+    command -v tmux >/dev/null 2>&1 || { echo -e "${RED}Error: tmux not installed${NC}"; exit 1; }
+    if [[ -n "$ACTIVE_UNITS" ]]; then
+        echo -e "${RED}Error: the pipeline is running under systemd (active: ${ACTIVE_UNITS% }). Refusing to start a second copy in tmux. Run ./stop.sh first.${NC}"
+        exit 1
+    fi
+else
+    if [[ -n "$ACTIVE_UNITS" ]]; then
+        echo -e "${RED}The pipeline is already running under systemd (active: ${ACTIVE_UNITS% }). Run ./stop.sh first.${NC}"
+        exit 1
+    fi
+fi
 # Check if session already exists
 if tmux has-session -t $SESSION 2>/dev/null; then
-    echo -e "${RED}Session '$SESSION' already running. Run ./stop.sh first.${NC}"
+    echo -e "${RED}tmux session '$SESSION' already running (tmux mode). Run ./stop.sh first.${NC}"
     exit 1
 fi
 # Check critical ports
@@ -123,7 +166,7 @@ fi
 mkdir -p "$BASEDIR/run"
 echo "$MARKETS" > "$BASEDIR/run/markets.active"
 
-echo "Starting t2s pipeline (markets=$MARKETS)..."
+echo "Starting t2s pipeline (markets=$MARKETS, mode=$MODE)..."
 
 # --------------------------------------------------------------------------
 # Health-based waits
@@ -145,11 +188,33 @@ QEOF
 
 fail_start() {  # window message
     echo -e "${RED}Start failed: $2${NC}"
-    echo "--- last lines of tmux window '$1' ---"
-    tmux capture-pane -t "$SESSION:$1" -p 2>/dev/null | grep -v '^$' | tail -15
-    echo "---"
-    echo "The session '$SESSION' is left running for inspection; ./stop.sh to tear it down."
+    if [[ "$MODE" == systemd ]]; then
+        echo "--- systemctl --user status t2s-$1 / last journal lines ---"
+        systemctl --user status "t2s-$1.service" --no-pager 2>/dev/null | sed -n '1,6p'
+        journalctl --user -u "t2s-$1.service" -n 15 --no-pager 2>/dev/null | tail -15
+        echo "---"
+        echo "The units are left as they are for inspection; ./stop.sh to stop them."
+    else
+        echo "--- last lines of tmux window '$1' ---"
+        tmux capture-pane -t "$SESSION:$1" -p 2>/dev/null | grep -v '^$' | tail -15
+        echo "---"
+        echo "The session '$SESSION' is left running for inspection; ./stop.sh to tear it down."
+    fi
     exit 1
+}
+
+# launch NAME DIR COMMAND - start one process. NAME is both the tmux window
+# and, with a t2s- prefix, the systemd unit.
+FIRST_WINDOW=1
+launch() {
+    local name=$1 dir=$2 cmd=$3
+    if [[ "$MODE" == systemd ]]; then
+        systemctl --user start "t2s-$name.service" || fail_start "$name" "systemctl --user start t2s-$name.service failed"
+    else
+        if [[ $FIRST_WINDOW -eq 1 ]]; then tmux new-session -d -s $SESSION -n "$name"; FIRST_WINDOW=0
+        else tmux new-window -t $SESSION -n "$name"; fi
+        tmux send-keys -t "$SESSION:$name" "cd $dir && $cmd" C-m
+    fi
 }
 
 # wait_for "label" window timeout_sec check_command [args]
@@ -170,15 +235,13 @@ wdb_healthy()   { local s; s=$(q_eval $PORT_WDB '.health[]`status'); [[ "$s" == 
 fh_registered() { [[ "$(q_eval $PORT_TP "not null .tp.session.id\`$1")" == "1b" ]]; }
 
 # Window 0: Tickerplant (primary) - port 5010
-tmux new-session -d -s $SESSION -n "tp"
-tmux send-keys -t $SESSION:tp "cd $BASEDIR/kdb/tick && q tp.q" C-m
+launch tp "$BASEDIR/kdb/tick" "q tp.q"
 wait_for "TP listening and healthy on $PORT_TP" tp 30 tp_ok
 
 # Window 1: WDB (write-only -> HDB) - port 5011. It connects to TP and
 # replays before accepting live rows; a long replay (after a long outage)
 # is normal, so the timeout is generous.
-tmux new-window -t $SESSION -n "wdb"
-tmux send-keys -t $SESSION:wdb "cd $BASEDIR/kdb/tick && q wdb.q" C-m
+launch wdb "$BASEDIR/kdb/tick" "q wdb.q"
 wait_for "WDB connected to TP with replay complete" wdb 600 wdb_ready
 wait_for "WDB healthy" wdb 10 wdb_healthy
 
@@ -186,16 +249,12 @@ wait_for "WDB healthy" wdb 10 wdb_healthy
 # a missing registration within the timeout usually means no route to
 # Binance or a schema mismatch (see the handler's window).
 if [[ $LAUNCH_SPOT -eq 1 ]]; then
-    tmux new-window -t $SESSION -n "trade-fh"
-    tmux send-keys -t $SESSION:trade-fh "cd $BASEDIR && ./build/trade_feed_handler" C-m
-    tmux new-window -t $SESSION -n "quote-fh"
-    tmux send-keys -t $SESSION:quote-fh "cd $BASEDIR && ./build/quote_feed_handler" C-m
+    launch trade-fh "$BASEDIR" "./build/trade_feed_handler"
+    launch quote-fh "$BASEDIR" "./build/quote_feed_handler"
 fi
 if [[ $LAUNCH_FUT -eq 1 ]]; then
-    tmux new-window -t $SESSION -n "trade-fh-fut"
-    tmux send-keys -t $SESSION:trade-fh-fut "cd $BASEDIR && ./build/trade_feed_handler_fut" C-m
-    tmux new-window -t $SESSION -n "quote-fh-fut"
-    tmux send-keys -t $SESSION:quote-fh-fut "cd $BASEDIR && ./build/quote_feed_handler_fut" C-m
+    launch trade-fh-fut "$BASEDIR" "./build/trade_feed_handler_fut"
+    launch quote-fh-fut "$BASEDIR" "./build/quote_feed_handler_fut"
 fi
 
 if [[ $LAUNCH_SPOT -eq 1 ]]; then
@@ -207,9 +266,18 @@ if [[ $LAUNCH_FUT -eq 1 ]]; then
     wait_for "futures quote handler registered with TP" quote-fh-fut 60 fh_registered quote_binance_fut
 fi
 
+echo -e "${GREEN}✓ Pipeline up (markets=$MARKETS, mode=$MODE)${NC}"
+if [[ "$MODE" == systemd ]]; then
+    echo ""
+    echo "Running under systemd (user units). A process that dies is restarted."
+    echo "  systemctl --user status 't2s-*'      state of every unit"
+    echo "  journalctl --user -u t2s-tp -f       follow one process"
+    echo "  ./status.sh                          the pipeline in a few lines"
+    echo "  ./stop.sh                            stop everything, in order"
+    exit 0
+fi
 # Select first window
 tmux select-window -t $SESSION:tp
-echo -e "${GREEN}✓ Pipeline up (markets=$MARKETS)${NC}"
 echo ""
 echo "Architecture:"
 echo "  Primary TP:5010 -> WDB:5011 -> HDB"
