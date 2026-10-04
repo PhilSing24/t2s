@@ -118,6 +118,12 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo];
 quote_binance_fut:.schema.extend[.schema.quoteFut; `tpRecvTimeUtcNs`tpSeqNo];
 health_feed_handler:.schema.health;
 
+/ Event tables: logged, stamped and published like data rows, but with
+/ several publishers and no fhSeqNo session (see .tp.event).
+trade_gap:.schema.extend[.schema.tradeGap; `tpRecvTimeUtcNs`tpSeqNo];
+.tp.eventTables:enlist `trade_gap;
+.tp.eventWidth:.tp.eventTables ! {[t] -2 + count cols value t} each .tp.eventTables;
+
 .tp.tables:`trade_binance`trade_binance_fut`quote_binance`quote_binance_fut;
 .tp.nTables:count .tp.tables;
 
@@ -469,11 +475,27 @@ pubsub.init[]
 .tp.skew.median:{[] s:.tp.skew.samples where not null .tp.skew.samples; $[count s; `long$med s; 0Nj]};
 .tp.skew.high:{[] m:.tp.skew.median[]; (.tp.cfg.maxSkewMs > 0) and (not null m) and (abs m) > .tp.cfg.maxSkewMs};
 
+/ Event rows (trade_gap). Called SYNCHRONOUSLY by the handlers: the reply is
+/ the row's tpSeqNo, i.e. the acknowledgement that it is in the log. A
+/ handler keeps an event queued until it has that reply, so an event cannot
+/ be lost on the way here. Throws on an unknown table or a wrong width.
+.tp.ctr.events:.tp.eventTables ! (count .tp.eventTables)#0j;
+.tp.event:{[tbl; data]
+  if[not tbl in .tp.eventTables; '"not an event table: ", string tbl];
+  if[(count data) <> .tp.eventWidth tbl;
+    '"event width mismatch for ", string[tbl], ": got ", string[count data], " columns, schema expects ", string .tp.eventWidth tbl];
+  data:data, (.tp.tsToNs[.z.p]; .tp.nextSeqNo[]);
+  .tp.log[tbl; data];
+  pubsub.publish[tbl; data];
+  .tp.ctr.events[tbl]+:1;
+  last data};
+
 upd:{[tbl;data]
   / Health messages bypass sequence checks and the durability log entirely.
   if[tbl=`health_feed_handler;
     pubsub.publish[tbl;data];
     :()];
+  if[tbl in .tp.eventTables; .tp.event[tbl; data]; :()];
   if[not tbl in .tp.tables;
     / Unknown tables pass through (logged + published) and are counted.
     .tp.ctr.unknownTableRows+:1;
@@ -755,7 +777,7 @@ system "t 1000";   / EOD check every second
 -1"=======================================================";
 -1"TP (KDB-X module) starting on port ",string[.tp.cfg.port];
 -1"=======================================================";
--1"Tables: ",(" " sv string .tp.tables)," health_feed_handler";
+-1"Tables: ",(" " sv string .tp.tables, .tp.eventTables)," health_feed_handler";
 -1"Schema: kdb/schemas.q; FH row widths ",.Q.s1[.tp.fhWidth];
 -1"Shared: ",.schema.cfg.file,"; quote depth ",string[.schema.depth],"; symbols ",(" " sv string .schema.symbols);
 -1"tpSeqNo: ",string[.tp.tpSeqNo]," reserved to ",string[.tp.seq.reserved]," in ",string .tp.cfg.seqFile;

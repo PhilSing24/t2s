@@ -169,6 +169,21 @@ if(EXISTS ${CATCH2_DIR}/catch_amalgamated.cpp)
         spdlog::spdlog
     )
 
+    add_executable(test_trade_gap
+        tests/test_trade_gap.cpp
+        ${CATCH2_DIR}/catch_amalgamated.cpp
+    )
+    target_include_directories(test_trade_gap PRIVATE
+        ${INCLUDE_DIR}
+        ${KDB_DIR}
+        ${CATCH2_DIR}
+    )
+    target_link_libraries(test_trade_gap PRIVATE
+        ${KDB_DIR}/c.o
+        Threads::Threads
+        spdlog::spdlog
+    )
+
     add_executable(test_json_reader
         tests/test_json_reader.cpp
         ${CATCH2_DIR}/catch_amalgamated.cpp

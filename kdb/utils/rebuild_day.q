@@ -36,7 +36,7 @@ system "l ",.rb.dir,"/../schemas.q";
 .rb.cfg.logDir:$[count v:getenv `T2S_TP_LOG_DIR; v; .rb.dir,"/../tick/logs"];
 .rb.cfg.hdbDir:$[count v:getenv `T2S_HDB_DIR; v; .rb.dir,"/../../hdb"];
 .rb.cfg.hdb:hsym `$ .rb.cfg.hdbDir;
-.rb.cfg.tables:`trade_binance`trade_binance_fut`quote_binance`quote_binance_fut;
+.rb.cfg.tables:`trade_binance`trade_binance_fut`quote_binance`quote_binance_fut`trade_gap;
 .z.zd:(17;5;1);   / same compression as wdb.q
 
 / Logged schemas (feed-handler columns + tpRecvTimeUtcNs + tpSeqNo)
@@ -44,7 +44,8 @@ system "l ",.rb.dir,"/../schemas.q";
   .schema.extend[.schema.trade; `tpRecvTimeUtcNs`tpSeqNo];
   .schema.extend[.schema.aggTrade; `tpRecvTimeUtcNs`tpSeqNo];
   .schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo];
-  .schema.extend[.schema.quoteFut; `tpRecvTimeUtcNs`tpSeqNo]);
+  .schema.extend[.schema.quoteFut; `tpRecvTimeUtcNs`tpSeqNo];
+  .schema.extend[.schema.tradeGap; `tpRecvTimeUtcNs`tpSeqNo]);
 .rb.width:.rb.cfg.tables ! {[t] count cols .rb.schema t} each .rb.cfg.tables;
 
 .rb.logPath:{[d] hsym `$ raze (.rb.cfg.logDir; "/"; string d; ".log")};

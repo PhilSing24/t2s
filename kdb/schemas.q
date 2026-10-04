@@ -135,6 +135,43 @@ if[0 = count .schema.symbols; .schema.cfg.die raze (.schema.cfg.file; ": symbols
 / at start-up (see .schema.requireDepth below).
 .schema.quoteTables:`quote_binance`quote_binance_fut;
 
+/ Trade gap events (10 base columns). One row per STATUS CHANGE of a gap in
+/ the exchange's own trade ids, published by the trade handlers:
+/   srcTable            trade_binance (gap in trade ids) or trade_binance_fut
+/                       (gap in aggTrade ids)
+/   firstMissingId,     the missing id range, inclusive; with srcTable and sym
+/   lastMissingId       it identifies the gap across its rows
+/   missing             lastMissingId - firstMissingId + 1
+/   status              `detected       the handler saw the jump
+/                       `partial        some ids backfilled so far (progress)
+/                       `recovered      every missing id fetched over REST and
+/                                       published to srcTable
+/                       `unrecoverable  given up; see reason
+/   recovered           ids backfilled so far (cumulative)
+/   recoveredThroughId  highest id backfilled so far (null before any)
+/   reason              empty, or why it is unrecoverable (`tooLarge, `tooOld,
+/                       `notServed, `restFailed) / how it was detected
+/                       (`handlerRestart on a `detected row)
+/ The table is append-only like every other; the current state of a gap is
+/ its latest row: .schema.gapLatest.
+/ Unlike the data tables it has several publishers and no fhSeqNo: the
+/ handlers send each event synchronously (.tp.event) and keep it queued
+/ until TP has acknowledged it.
+.schema.tradeGap:([]
+  time:`timestamp$();
+  sym:`symbol$();
+  srcTable:`symbol$();
+  firstMissingId:`long$();
+  lastMissingId:`long$();
+  missing:`long$();
+  status:`symbol$();
+  recovered:`long$();
+  recoveredThroughId:`long$();
+  reason:`symbol$()
+  );
+/ Latest row per gap of a trade_gap table t (any date range already selected)
+.schema.gapLatest:{[t] select by srcTable, sym, firstMissingId from t};
+
 / Per-process health snapshot (10 columns)
 .schema.health:([]
   time:`timestamp$();
@@ -166,7 +203,7 @@ if[0 = count .schema.symbols; .schema.cfg.die raze (.schema.cfg.file; ": symbols
 / -------------------------------------------------------
 / What WDB writes for each table: the feed-handler columns, TP's two
 / stamps, then WDB's own.
-.schema.live:`trade_binance`trade_binance_fut`quote_binance`quote_binance_fut ! (.schema.trade; .schema.aggTrade; .schema.quote; .schema.quoteFut);
+.schema.live:`trade_binance`trade_binance_fut`quote_binance`quote_binance_fut`trade_gap ! (.schema.trade; .schema.aggTrade; .schema.quote; .schema.quoteFut; .schema.tradeGap);
 .schema.stamps:`tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeUtcNs;
 .schema.stored:{[t] .schema.extend[.schema.live t; .schema.stamps]};
 .schema.storedCols:{[t] cols .schema.stored t};

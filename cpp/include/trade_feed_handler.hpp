@@ -39,6 +39,7 @@
 
 #include "market_config.hpp"
 #include "tp_publisher.hpp"
+#include "trade_gap.hpp"
 
 // kdb+ C API
 extern "C" {
@@ -180,8 +181,12 @@ private:
     long long sessionId_{0};
 
 
-    /// Last tradeId per symbol (for gap detection)
-    std::unordered_map<std::string, long long> lastTradeId_;
+    /// Last exchange trade id per symbol; classifies every incoming id
+    t2s::TradeIdTracker idTracker_;
+    /// trade_gap events waiting for TP's acknowledgement
+    t2s::GapEventQueue gapEvents_;
+    /// Queue a trade_gap event (one row per status change of a gap)
+    void recordGap(const t2s::TradeGap& gap, t2s::GapStatus status, const std::string& reason);
 
     /// Connection to the tickerplant: registration, publishing, resend ring.
     std::unique_ptr<t2s::TpPublisher> tp_;

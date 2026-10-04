@@ -85,6 +85,7 @@ system "g 0";
 .wdb.stats.aggTradesReceived:0j;
 .wdb.stats.quotesReceived:0j;
 .wdb.stats.quotesFutReceived:0j;
+.wdb.stats.gapEventsReceived:0j;
 
 / Durability counters (NOT reset at roll - they describe anomalies the
 / operator should look at)
@@ -143,7 +144,7 @@ system "g 0";
 
 / Highest tpSeqNo successfully flushed to disk PER TABLE. A global cursor
 / would advance past unflushed rows of the other tables, so it is per table.
-.wdb.tables:`trade_binance`trade_binance_fut`quote_binance`quote_binance_fut;
+.wdb.tables:`trade_binance`trade_binance_fut`quote_binance`quote_binance_fut`trade_gap;
 .wdb.nTables:count .wdb.tables;
 .wdb.lastTpSeqNo:.wdb.tables ! .wdb.nTables#0j;
 / Date (WDB clock) at which the checkpoint was last written (diagnostics;
@@ -167,6 +168,7 @@ system "g 0";
 .wdb.replayLiveBuffer.trade_binance_fut:();
 .wdb.replayLiveBuffer.quote_binance:();
 .wdb.replayLiveBuffer.quote_binance_fut:();
+.wdb.replayLiveBuffer.trade_gap:();
 .wdb.replayMode:0b;
 .wdb.replayCutoff:0j;
 
@@ -201,6 +203,7 @@ trade_binance:.schema.extend[.schema.trade; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
 trade_binance_fut:.schema.extend[.schema.aggTrade; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeUtcNs];
 quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeUtcNs];
 quote_binance_fut:.schema.extend[.schema.quoteFut; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeUtcNs];
+trade_gap:.schema.extend[.schema.tradeGap; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeUtcNs];
 
 / Position of tpSeqNo in the incoming row, PER TABLE. The schemas have
 / different widths, so the index differs (e.g. 13 for trade_binance, 31
@@ -240,7 +243,7 @@ quote_binance_fut:.schema.extend[.schema.quoteFut; `tpRecvTimeUtcNs`tpSeqNo`wdbR
   seq:defaults 0; d:0Nd;
   $[-7h = type v;
       [-1 raze ("WDB: migrating legacy scalar checkpoint "; string v; " -> per-table dict");
-       seq:.wdb.tables ! (v;0j;v;0j)];
+       seq:.wdb.tables ! (v; 0j; v), (.wdb.nTables - 3)#0j];
     (99h = type v) and `seq in key v;
       [seq:v `seq; d:v `date];
     99h = type v;
@@ -492,6 +495,7 @@ disksort:{[t;c;a]
   .wdb.stats.aggTradesReceived:0j;
   .wdb.stats.quotesReceived:0j;
   .wdb.stats.quotesFutReceived:0j;
+  .wdb.stats.gapEventsReceived:0j;
  };
 
 / Flush everything (so buffered rows for past dates land in their tmp dirs),
@@ -562,6 +566,7 @@ endofday:{[]
     tbl = `trade_binance_fut; .wdb.stats.aggTradesReceived+:1;
     tbl = `quote_binance;     .wdb.stats.quotesReceived+:1;
     tbl = `quote_binance_fut; .wdb.stats.quotesFutReceived+:1;
+    tbl = `trade_gap;         .wdb.stats.gapEventsReceived+:1;
     ()];
  };
 
@@ -778,6 +783,8 @@ endofday:{[]
     -1 "WDB: Subscribed to ",string first first res;
     res:h(`pubsub.subscribe;`quote_binance_fut;`);
     -1 "WDB: Subscribed to ",string first first res;
+    res:h(`pubsub.subscribe;`trade_gap;`);
+    -1 "WDB: Subscribed to ",string first first res;
     .wdb.runReplay[h]
   }; h; {[err]
     .wdb.replayMode:: 0b;
@@ -845,7 +852,7 @@ upd:{[tbl;data]
          $[(.wdb.stats.lateRows > 0) or .wdb.stats.unexpectedDateRows > 0; `degraded; `ok];
        .wdb.conn.state = `connecting; `degraded;
        `disconnected];
-  `process`port`uptime`status`connState`memMB`tradesRecv`aggTradesRecv`quotesRecv`flushes`rowsWritten`bufferTrades`bufferAggTrades`bufferQuotes`duplicatesDropped`lateRows`unexpectedDateRows`replayFailures`halted`haltedRowsDropped`lastRollDate`quotesFutRecv`bufferQuotesFut!(
+  `process`port`uptime`status`connState`memMB`tradesRecv`aggTradesRecv`quotesRecv`flushes`rowsWritten`bufferTrades`bufferAggTrades`bufferQuotes`duplicatesDropped`lateRows`unexpectedDateRows`replayFailures`halted`haltedRowsDropped`lastRollDate`quotesFutRecv`bufferQuotesFut`gapEventsRecv`bufferGapEvents!(
     `wdb;
     .wdb.cfg.port;
     `second$.z.p - .proc.startTime;
@@ -868,7 +875,9 @@ upd:{[tbl;data]
     .wdb.stats.haltedRowsDropped;
     .wdb.lastRollDate;
     .wdb.stats.quotesFutReceived;
-    count quote_binance_fut
+    count quote_binance_fut;
+    .wdb.stats.gapEventsReceived;
+    count trade_gap
   )
   };
 

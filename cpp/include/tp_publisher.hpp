@@ -166,6 +166,33 @@ public:
         return connect(fhSeqNo + 1);
     }
 
+    enum class EventResult { Acked, ConnectionLost, Rejected };
+
+    /**
+     * Send one event row synchronously: .tp.event[table; row] replies with
+     * the row's tpSeqNo once it is in TP's log. `row` stays owned by the
+     * caller, who keeps it until the result is Acked (or Rejected).
+     * A lost connection is left for the next publish()/connect() to repair.
+     */
+    EventResult sendEvent(const std::string& table, K row) {
+        if (handle_ <= 0) return EventResult::ConnectionLost;
+        K r = k(handle_, const_cast<S>(".tp.event"), ks(const_cast<S>(table.c_str())), r1(row), (K)0);
+        if (r == nullptr) {
+            spdlog::error("TP connection lost while sending a {} event", table);
+            kclose(handle_);
+            handle_ = -1;
+            ++reconnects_;
+            return EventResult::ConnectionLost;
+        }
+        if (r->t == -128) {
+            spdlog::error("TP rejected a {} event: {}", table, r->s);
+            r0(r);
+            return EventResult::Rejected;
+        }
+        r0(r);
+        return EventResult::Acked;
+    }
+
     void close() {
         if (handle_ > 0) {
             kclose(handle_);

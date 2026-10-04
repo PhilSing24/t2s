@@ -76,7 +76,7 @@ BEFORE=$(fingerprint); DBEFORE=$(cd "$T2S_SANDBOX" && find hdb tmp -name '.d' | 
 OUT=$(migrate); rc=$?
 echo "$OUT" | sed 's/^/    /' | cut -c1-170
 [[ $rc -eq 0 ]] && pass "dry run exit 0" || fail "dry run rc=$rc"
-echo "$OUT" | grep -q "7 table dir(s) get null columns (14 new column files, 37 rows covered); 1 empty table(s) created" && pass "summary: 7 dirs, 14 column files, 37 rows, 1 empty table" || fail "summary line"
+echo "$OUT" | grep -q "7 table dir(s) get null columns (14 new column files, 37 rows covered); 3 empty table(s) created" && pass "summary: 7 dirs, 14 column files, 37 rows, 3 empty tables" || fail "summary line"
 echo "$OUT" | grep -q "dry run - nothing written" && pass "says nothing was written" || fail "dry run wording"
 [[ "$BEFORE" == "$(fingerprint)" && "$DBEFORE" == "$(cd "$T2S_SANDBOX" && find hdb tmp -name '.d' | sort | xargs md5sum)" ]] && pass "no file changed" || fail "dry run changed files"
 [[ ! -d "$T2S_SB_HDB/2026.01.05/quote_binance_fut" ]] && pass "no table created" || fail "dry run created a table"
@@ -87,7 +87,7 @@ OUT=$(migrate -apply); rc=$?
 echo "$OUT" | grep -E "applied|re-scan|ERROR" | sed 's/^/    /'
 [[ $rc -eq 0 ]] && pass "apply exit 0" || fail "apply rc=$rc"
 echo "$OUT" | grep -q "re-scan: every stored table now matches the schema" && pass "re-scan clean" || fail "re-scan"
-AFTER_OLD=$(fingerprint | grep -v -E "/(exchFirstUpdateId|exchUpdateId|exchPrevUpdateId|qtyExRpi)$" | grep -v "2026.01.05/quote_binance_fut/")
+AFTER_OLD=$(fingerprint | grep -v -E "/(exchFirstUpdateId|exchUpdateId|exchPrevUpdateId|qtyExRpi)$" | grep -v "2026.01.05/quote_binance_fut/" | grep -v "/trade_gap/")
 [[ "$BEFORE" == "$AFTER_OLD" ]] && pass "every pre-existing column file is byte-identical" || fail "an existing file changed"
 body -step verify
 

@@ -145,26 +145,40 @@ bool TradeFeedHandler::sleepWithBackoff(int attempt) {
 }
 
 void TradeFeedHandler::validateTradeId(const std::string& sym, long long tradeId) {
-    auto it = lastTradeId_.find(sym);
-
-    if (it != lastTradeId_.end()) {
-        long long last = it->second;
-
-        if (tradeId < last) {
+    using Kind = t2s::TradeIdTracker::Kind;
+    t2s::TradeIdTracker::Result r = idTracker_.onId(sym, tradeId);
+    switch (r.kind) {
+        case Kind::First:
+        case Kind::InOrder:
+            break;
+        case Kind::OutOfOrder:
             ++ctrExchOutOfOrder_;
-            spdlog::warn("OUT OF ORDER: {} last={} got={}", sym, last, tradeId);
-        } else if (tradeId == last) {
+            spdlog::warn("OUT OF ORDER: {} last={} got={}", sym, r.previous, tradeId);
+            break;
+        case Kind::Duplicate:
             ++ctrExchDuplicates_;
             spdlog::warn("DUPLICATE: {} tradeId={}", sym, tradeId);
-        } else if (tradeId > last + 1) {
-            long long missed = tradeId - last - 1;
+            break;
+        case Kind::Gap: {
+            t2s::TradeGap gap;
+            gap.sym = sym;
+            gap.firstId = r.firstMissing;
+            gap.lastId = r.lastMissing;
             ++ctrExchGaps_;
-            ctrExchMissed_ += missed;
-            spdlog::warn("Gap: {} missed={} (last={} got={})", sym, missed, last, tradeId);
+            ctrExchMissed_ += gap.missing();
+            spdlog::warn("Gap: {} missed={} (last={} got={})", sym, gap.missing(), r.previous, tradeId);
+            recordGap(gap, t2s::GapStatus::Detected, "");
+            break;
         }
     }
+}
 
-    lastTradeId_[sym] = tradeId;
+void TradeFeedHandler::recordGap(const t2s::TradeGap& gap, t2s::GapStatus status, const std::string& reason) {
+    long long nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    // Queued until TP acknowledges it: a gap must never go unrecorded.
+    gapEvents_.push(t2s::buildGapRow(nowNs, gap, cfg_.tpTable, status, reason));
+    gapEvents_.flush(*tp_);
 }
 
 void TradeFeedHandler::processMessage(const std::string& msg) {
@@ -326,6 +340,9 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
     // Update health: message published
     lastPubTime_ = std::chrono::system_clock::now();
     ++msgsPublished_;
+
+    // Gap events that could not be acknowledged earlier (TP was away)
+    if (gapEvents_.size() > 0) gapEvents_.flush(*tp_);
 }
 
 void TradeFeedHandler::runWebSocketLoop() {
@@ -432,6 +449,7 @@ void TradeFeedHandler::runWebSocketLoop() {
 }
 
 void TradeFeedHandler::publishHealth() {
+    if (gapEvents_.size() > 0) gapEvents_.flush(*tp_);
     if (!tp_->connected()) return;
 
     auto now = std::chrono::system_clock::now();
@@ -482,6 +500,7 @@ void TradeFeedHandler::publishHealth() {
         {"exchOutOfOrder", ctrExchOutOfOrder_},
         {"exchDuplicates", ctrExchDuplicates_},
         {"nqMissing",      ctrNqMissing_},      // futures only: aggTrade events without `nq`
+        {"gapEventsPending", static_cast<long long>(gapEvents_.size())},
         {"tpReconnects",   tp_->reconnects()},
         {"rowsResent",     tp_->rowsResent()},
         {"rowsUnresendable", tp_->rowsUnresendable()},
