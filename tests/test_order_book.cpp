@@ -438,3 +438,50 @@ TEST_CASE("Buffered replay tolerates overlapping deltas after snapshot", "[ordrb
     REQUIRE(mgr.applyDelta(0, 116, 120, {}, {}, 1700000000300LL));
     REQUIRE(mgr.isValid(0));
 }
+
+// ============================================================================
+// Delta buffer cap
+// ============================================================================
+
+TEST_CASE("bufferDelta enforces the cap: drops the oldest and counts", "[ordrbook][buffer]") {
+    OrderBookManager mgr({"BTCUSDT"});
+    for (long long i = 1; i <= static_cast<long long>(MAX_DELTA_BUFFER_SIZE); ++i) {
+        REQUIRE(mgr.bufferDelta(0, BufferedDelta{i, i, 0, {}, {}}));
+    }
+    REQUIRE(mgr.getDeltaBuffer(0).size() == MAX_DELTA_BUFFER_SIZE);
+    REQUIRE(mgr.bufferOverflows() == 0);
+
+    // Three more: each drops the oldest
+    for (long long i = 1001; i <= 1003; ++i) {
+        REQUIRE_FALSE(mgr.bufferDelta(0, BufferedDelta{i, i, 0, {}, {}}));
+    }
+    REQUIRE(mgr.getDeltaBuffer(0).size() == MAX_DELTA_BUFFER_SIZE);
+    REQUIRE(mgr.bufferOverflows() == 3);
+    REQUIRE(mgr.getDeltaBuffer(0).front().firstUpdateId == 4);
+    REQUIRE(mgr.getDeltaBuffer(0).back().finalUpdateId == 1003);
+}
+
+TEST_CASE("After an overflow a fresh snapshot still syncs", "[ordrbook][buffer]") {
+    OrderBookManager mgr({"BTCUSDT"});
+    for (long long i = 1; i <= 1500; ++i) mgr.bufferDelta(0, BufferedDelta{i, i, 0, {}, {}});
+    REQUIRE(mgr.bufferOverflows() == 500);          // deltas 1..500 dropped
+
+    // Snapshot taken at update id 1200: newer than everything dropped
+    mgr.applySnapshot(0, 1200, bids5(50000.0), asks5(50001.0));
+    for (const auto& d : mgr.getDeltaBuffer(0)) {
+        REQUIRE(mgr.applyDelta(0, d.firstUpdateId, d.finalUpdateId, d.bids, d.asks, d.eventTimeMs));
+    }
+    REQUIRE(mgr.isValid(0));
+}
+
+TEST_CASE("After an overflow a snapshot older than the buffer is rejected", "[ordrbook][buffer]") {
+    OrderBookManager mgr({"BTCUSDT"});
+    for (long long i = 1; i <= 1500; ++i) mgr.bufferDelta(0, BufferedDelta{i, i, 0, {}, {}});
+
+    // Snapshot at 300, but deltas 301..500 were dropped: there is a hole
+    mgr.applySnapshot(0, 300, bids5(50000.0), asks5(50001.0));
+    const auto& first = mgr.getDeltaBuffer(0).front();
+    REQUIRE(first.firstUpdateId == 501);
+    REQUIRE_FALSE(mgr.applyDelta(0, first.firstUpdateId, first.finalUpdateId, {}, {}, 0));
+    REQUIRE(mgr.getState(0) == BookState::INVALID);  // caller resyncs
+}

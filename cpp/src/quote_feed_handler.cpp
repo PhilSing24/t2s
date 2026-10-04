@@ -439,7 +439,13 @@ void QuoteFeedHandler::handleDelta(int symIdx, const BufferedDelta& delta, long 
     switch (state) {
         case BookState::INIT:
             // Buffer delta and request snapshot
-            bookMgr_->getDeltaBuffer(symIdx).push_back(delta);
+            if (!bookMgr_->bufferDelta(symIdx, delta)) {
+                long long n = bookMgr_->bufferOverflows();
+                if (n == 1 || n % 1000 == 0) {
+                    spdlog::warn("{} delta buffer full ({} deltas): oldest dropped [total dropped={}]",
+                                 bookMgr_->getSymbol(symIdx), MAX_DELTA_BUFFER_SIZE, n);
+                }
+            }
 
             // Ask the scheduler first: after a failure it makes us wait
             // (exponential backoff), and it enforces the weight budget.

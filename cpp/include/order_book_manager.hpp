@@ -46,7 +46,9 @@ constexpr int BOOK_DEPTH = 5;
 /// Publish timeout in milliseconds (publish even if no change)
 constexpr int PUBLISH_TIMEOUT_MS = 50;
 
-/// Maximum delta buffer size before forced snapshot
+/// Maximum number of deltas buffered per symbol while waiting for a
+/// snapshot (100 s of a 100 ms stream). Enforced by bufferDelta(): on
+/// overflow the OLDEST delta is dropped and the overflow is counted.
 constexpr size_t MAX_DELTA_BUFFER_SIZE = 1000;
 
 // ============================================================================
@@ -228,7 +230,33 @@ public:
     void setSnapshotRequested(int idx, bool val) { snapshotRequested_[idx] = val; }
     
     /**
-     * @brief Get delta buffer for a symbol (for adding incoming deltas)
+     * @brief Buffer a delta while the book waits for its snapshot.
+     *
+     * The buffer is capped at MAX_DELTA_BUFFER_SIZE. On overflow the oldest
+     * delta is dropped and counted. That is safe: a snapshot fetched later
+     * is newer than the dropped deltas, which would have been skipped as
+     * stale anyway. If a snapshot older than the oldest remaining delta
+     * does arrive, the bridge rule in applyDelta() ("Snapshot too old")
+     * rejects it and the book resyncs - nothing is applied over a hole.
+     *
+     * @return false if the buffer overflowed (oldest delta dropped)
+     */
+    bool bufferDelta(int idx, BufferedDelta delta) {
+        auto& buf = deltaBuffers_[idx];
+        buf.push_back(std::move(delta));
+        if (buf.size() > MAX_DELTA_BUFFER_SIZE) {
+            buf.pop_front();
+            ++bufferOverflows_;
+            return false;
+        }
+        return true;
+    }
+
+    /// Deltas dropped because a buffer was full (all symbols, since start)
+    long long bufferOverflows() const { return bufferOverflows_; }
+
+    /**
+     * @brief Get delta buffer for a symbol (for replay after a snapshot)
      */
     std::deque<BufferedDelta>& getDeltaBuffer(int idx) {
         return deltaBuffers_[idx];
@@ -509,6 +537,7 @@ private:
     std::vector<long long> exchEventTimeMs_;
     std::vector<std::deque<BufferedDelta>> deltaBuffers_;
     std::vector<bool> snapshotRequested_;
+    long long bufferOverflows_ = 0;
     
     // ========================================================================
     // PUBLISHER STATE (per symbol)
