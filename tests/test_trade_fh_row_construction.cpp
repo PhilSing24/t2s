@@ -18,6 +18,7 @@
 #include "trade_row.hpp"
 #include "catch_amalgamated.hpp"
 
+#include <limits>
 #include <string>
 
 namespace {
@@ -65,6 +66,7 @@ struct CanonicalAggInputs {
     long long   lastTradeId     = 99999004LL;  // 4-fill aggregation
     double      price           = 50100.25;
     double      qty             = 0.5;
+    double      qtyExRpi        = 0.375;       // `nq`: 0.125 of the aggregate traded against RPI orders
     bool        buyerIsMaker    = false;
     long long   exchEventTimeMs = 1717459259850LL;
     long long   exchTradeTimeMs = 1717459259800LL;
@@ -77,7 +79,7 @@ t2s::KOwned buildCanonicalAgg(const CanonicalAggInputs& in = {}) {
     return t2s::buildAggTradeRow(
         in.fhRecvTimeUtcNs, in.sym, in.aggTradeId,
         in.firstTradeId, in.lastTradeId,
-        in.price, in.qty, in.buyerIsMaker,
+        in.price, in.qty, in.qtyExRpi, in.buyerIsMaker,
         in.exchEventTimeMs, in.exchTradeTimeMs,
         in.fhParseUs, in.fhSendUs, in.fhSeqNo,
         KDB_EPOCH_OFFSET_NS);
@@ -192,13 +194,13 @@ TEST_CASE("buildTradeRow handles zero-valued numeric fields", "[trade_fh][row][s
 // FUTURES: buildAggTradeRow
 // ============================================================================
 
-TEST_CASE("buildAggTradeRow produces 14-field mixed list",
+TEST_CASE("buildAggTradeRow produces 15-field mixed list",
           "[trade_fh][row][regression][futures]") {
     t2s::KOwned row = buildCanonicalAgg();
 
     REQUIRE(row.get() != nullptr);
     REQUIRE(row.get()->t == 0);     // mixed list
-    REQUIRE(row.get()->n == 14);    // exactly 14 fields (2 more than spot)
+    REQUIRE(row.get()->n == 15);    // exactly 15 fields (3 more than spot)
 }
 
 TEST_CASE("buildAggTradeRow field types match the trade_binance_fut schema",
@@ -213,13 +215,14 @@ TEST_CASE("buildAggTradeRow field types match the trade_binance_fut schema",
     REQUIRE(kK(r)[4]->t  == -KJ);   // lastTradeId
     REQUIRE(kK(r)[5]->t  == -KF);   // price
     REQUIRE(kK(r)[6]->t  == -KF);   // qty
-    REQUIRE(kK(r)[7]->t  == -KB);   // buyerIsMaker
-    REQUIRE(kK(r)[8]->t  == -KJ);   // exchEventTimeMs
-    REQUIRE(kK(r)[9]->t  == -KJ);   // exchTradeTimeMs
-    REQUIRE(kK(r)[10]->t == -KJ);   // fhRecvTimeUtcNs
-    REQUIRE(kK(r)[11]->t == -KJ);   // fhParseUs
-    REQUIRE(kK(r)[12]->t == -KJ);   // fhSendUs
-    REQUIRE(kK(r)[13]->t == -KJ);   // fhSeqNo
+    REQUIRE(kK(r)[7]->t  == -KF);   // qtyExRpi
+    REQUIRE(kK(r)[8]->t  == -KB);   // buyerIsMaker
+    REQUIRE(kK(r)[9]->t  == -KJ);   // exchEventTimeMs
+    REQUIRE(kK(r)[10]->t  == -KJ);   // exchTradeTimeMs
+    REQUIRE(kK(r)[11]->t == -KJ);   // fhRecvTimeUtcNs
+    REQUIRE(kK(r)[12]->t == -KJ);   // fhParseUs
+    REQUIRE(kK(r)[13]->t == -KJ);   // fhSendUs
+    REQUIRE(kK(r)[14]->t == -KJ);   // fhSeqNo
 }
 
 TEST_CASE("buildAggTradeRow field values match canonical inputs",
@@ -235,16 +238,17 @@ TEST_CASE("buildAggTradeRow field values match canonical inputs",
     REQUIRE(kK(r)[4]->j == in.lastTradeId);
     REQUIRE(approxEq(kK(r)[5]->f, in.price));
     REQUIRE(approxEq(kK(r)[6]->f, in.qty));
-    REQUIRE(kK(r)[7]->g == 0);      // buyerIsMaker=false in canonical
-    REQUIRE(kK(r)[8]->j == in.exchEventTimeMs);
-    REQUIRE(kK(r)[9]->j == in.exchTradeTimeMs);
-    REQUIRE(kK(r)[10]->j == in.fhRecvTimeUtcNs);
-    REQUIRE(kK(r)[11]->j == in.fhParseUs);
-    REQUIRE(kK(r)[12]->j == in.fhSendUs);
-    REQUIRE(kK(r)[13]->j == in.fhSeqNo);
+    REQUIRE(approxEq(kK(r)[7]->f, in.qtyExRpi));
+    REQUIRE(kK(r)[8]->g == 0);      // buyerIsMaker=false in canonical
+    REQUIRE(kK(r)[9]->j == in.exchEventTimeMs);
+    REQUIRE(kK(r)[10]->j == in.exchTradeTimeMs);
+    REQUIRE(kK(r)[11]->j == in.fhRecvTimeUtcNs);
+    REQUIRE(kK(r)[12]->j == in.fhParseUs);
+    REQUIRE(kK(r)[13]->j == in.fhSendUs);
+    REQUIRE(kK(r)[14]->j == in.fhSeqNo);
 }
 
-TEST_CASE("buildAggTradeRow fhSendUs slot is at index 12 (not 10 as in spot)",
+TEST_CASE("buildAggTradeRow fhSendUs slot is at index 13 (not 10 as in spot)",
           "[trade_fh][row][regression][futures]") {
     // This is the most likely source of a silent bug if anyone refactors
     // processMessage to use a shared slot index - they'll patch the wrong
@@ -253,22 +257,22 @@ TEST_CASE("buildAggTradeRow fhSendUs slot is at index 12 (not 10 as in spot)",
     in.fhSendUs = 0LL;
     t2s::KOwned row = buildCanonicalAgg(in);
 
-    REQUIRE(kK(row.get())[12]->j == 0);
-    t2s::KBorrowed slot(kK(row.get())[12]);
+    REQUIRE(kK(row.get())[13]->j == 0);
+    t2s::KBorrowed slot(kK(row.get())[13]);
     slot.get()->j = 54321LL;
-    REQUIRE(kK(row.get())[12]->j == 54321LL);
+    REQUIRE(kK(row.get())[13]->j == 54321LL);
 
-    // And slot 10 in the futures layout is fhRecvTimeUtcNs, NOT fhSendUs.
+    // And slot 11 in the futures layout is fhRecvTimeUtcNs, NOT fhSendUs.
     // Confirm that, so a regression that swaps the slot index would fail
     // both this assertion and the assertion above.
-    REQUIRE(kK(row.get())[10]->j == in.fhRecvTimeUtcNs);
+    REQUIRE(kK(row.get())[11]->j == in.fhRecvTimeUtcNs);
 }
 
 TEST_CASE("buildAggTradeRow encodes buyerIsMaker=true as 1", "[trade_fh][row][futures]") {
     CanonicalAggInputs in;
     in.buyerIsMaker = true;
     t2s::KOwned row = buildCanonicalAgg(in);
-    REQUIRE(kK(row.get())[7]->g == 1);
+    REQUIRE(kK(row.get())[8]->g == 1);
 }
 
 TEST_CASE("buildAggTradeRow firstTradeId == lastTradeId for single-fill aggregations",
@@ -299,18 +303,18 @@ TEST_CASE("buildAggTradeRow preserves arbitrary symbols", "[trade_fh][row][futur
 TEST_CASE("buildAggTradeRow handles zero-valued numeric fields",
           "[trade_fh][row][futures]") {
     t2s::KOwned row = t2s::buildAggTradeRow(
-        0LL, "BTCUSDT", 0LL, 0LL, 0LL, 0.0, 0.0, false,
+        0LL, "BTCUSDT", 0LL, 0LL, 0LL, 0.0, 0.0, 0.0, false,
         0LL, 0LL, 0LL, 0LL, 0LL, KDB_EPOCH_OFFSET_NS);
 
     K r = row.get();
-    REQUIRE(r->n == 14);
+    REQUIRE(r->n == 15);
     REQUIRE(kK(r)[0]->j == -KDB_EPOCH_OFFSET_NS);
     REQUIRE(kK(r)[2]->j == 0);    // aggTradeId
     REQUIRE(kK(r)[3]->j == 0);    // firstTradeId
     REQUIRE(kK(r)[4]->j == 0);    // lastTradeId
     REQUIRE(approxEq(kK(r)[5]->f, 0.0));
-    REQUIRE(kK(r)[7]->g == 0);
-    REQUIRE(kK(r)[13]->j == 0);
+    REQUIRE(kK(r)[8]->g == 0);
+    REQUIRE(kK(r)[14]->j == 0);
 }
 
 // ============================================================================
@@ -325,6 +329,18 @@ TEST_CASE("Spot and futures rows are different sizes", "[trade_fh][row][regressi
     auto agg  = buildCanonicalAgg();
 
     REQUIRE(spot.get()->n == 12);
-    REQUIRE(agg.get()->n  == 14);
-    REQUIRE(agg.get()->n - spot.get()->n == 2);  // futures has f+l extra
+    REQUIRE(agg.get()->n  == 15);
+    REQUIRE(agg.get()->n - spot.get()->n == 3);  // futures has f, l and nq extra
+    REQUIRE(t2s::TRADE_ROW_WIDTH == 12);
+    REQUIRE(t2s::AGG_TRADE_ROW_WIDTH == 15);
+    REQUIRE(t2s::TRADE_ROW_SEND_US_IDX == 10);
+    REQUIRE(t2s::AGG_TRADE_ROW_SEND_US_IDX == 13);
+}
+
+TEST_CASE("buildAggTradeRow stores a missing nq as a kdb+ null float", "[trade_fh][row][futures]") {
+    t2s::KOwned row = t2s::buildAggTradeRow(
+        0LL, "BTCUSDT", 1LL, 1LL, 1LL, 100.0, 2.0, std::numeric_limits<double>::quiet_NaN(), false,
+        0LL, 0LL, 0LL, 0LL, 1LL, KDB_EPOCH_OFFSET_NS);
+    REQUIRE(kK(row.get())[7]->f != kK(row.get())[7]->f);     // NaN, which q reads as 0n
+    REQUIRE(approxEq(kK(row.get())[6]->f, 2.0));
 }

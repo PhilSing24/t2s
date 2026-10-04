@@ -156,7 +156,8 @@ begin_scenario 1 "schemas.q loaded; wrong row width refused at registration and 
     start_wdb
     tp -step register_bad -table trade_binance     -width 13
     tp -step register_bad -table quote_binance     -width 12
-    tp -step register_bad -table trade_binance_fut -width 12
+    # the futures trade layout before qtyExRpi (14 columns) is refused now that it has 15
+    tp -step register_bad -table trade_binance_fut -width 14
     # a spot-layout quote row (30 columns) must not get into the futures quote table (32)
     tp -step register_bad -table quote_binance_fut -width 30
     tp -step tp_status -key rejectedRegistrations -value 4

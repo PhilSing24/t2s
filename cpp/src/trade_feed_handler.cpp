@@ -4,6 +4,8 @@
  */
 
 #include "trade_feed_handler.hpp"
+#include <limits>
+#include <cstdlib>
 #include "fh_stats.hpp"
 #include "socket_utils.hpp"
 #include "k_object.hpp"
@@ -120,7 +122,8 @@ bool shouldLogParseFailure(long long count) noexcept {
 } // namespace
 
 int TradeFeedHandler::registerSession(int h, long long nextFhSeqNo) {
-    const long long width = (cfg_.schema == t2s::TradeSchema::SpotTrade) ? 12LL : 14LL;
+    const long long width = (cfg_.schema == t2s::TradeSchema::SpotTrade)
+                            ? t2s::TRADE_ROW_WIDTH : t2s::AGG_TRADE_ROW_WIDTH;
     // Sync call. The argument atoms are small; we deliberately do not r0
     // them (the C API's ownership rules for sync k() differ between
     // versions, and a leak of four atoms per connect is harmless).
@@ -265,6 +268,7 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
     // primary id (tradeId or aggTradeId) must be monotonically increasing
     // per symbol; the validator log message is generic.
     long long primaryId  = 0;  // tradeId (spot) or aggTradeId (futures)
+    double qtyExRpi = std::numeric_limits<double>::quiet_NaN();   // futures `nq`; NaN = kdb+ null float
     long long firstAggId = 0;  // futures only; 0 for spot
     long long lastAggId  = 0;  // futures only; 0 for spot
 
@@ -294,6 +298,20 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
         primaryId  = *a;
         firstAggId = *f;
         lastAggId  = *l;
+
+        // `nq`: quantity without the trades involving RPI orders (see
+        // trade_row.hpp). Read it without failing the row if it is absent:
+        // losing a trade over an optional field would be worse. A missing
+        // or malformed nq is stored as null and counted (nqMissing).
+        const auto& dv = doc["data"];
+        bool nqOk = false;
+        if (dv.HasMember("nq") && dv["nq"].IsString()) {
+            const char* sNq = dv["nq"].GetString();
+            char* end = nullptr;
+            double v = std::strtod(sNq, &end);
+            if (end != sNq && *end == '\0') { qtyExRpi = v; nqOk = true; }
+        }
+        if (!nqOk) ++ctrNqMissing_;
     }
 
     // All fields validated. string_view points into doc (alive for this
@@ -327,14 +345,14 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
             fhRecvTimeUtcNs, symStr, primaryId, priceV, qtyV, buyerIsMaker,
             exchEventTimeMs, exchTradeTimeMs, fhParseUs, /*fhSendUs=*/0LL, fhSeqNo_,
             KDB_EPOCH_OFFSET_NS);
-        fhSendSlotIdx = 10;
+        fhSendSlotIdx = t2s::TRADE_ROW_SEND_US_IDX;
     } else {  // FuturesAggTrade
         row = t2s::buildAggTradeRow(
             fhRecvTimeUtcNs, symStr, primaryId, firstAggId, lastAggId,
-            priceV, qtyV, buyerIsMaker,
+            priceV, qtyV, qtyExRpi, buyerIsMaker,
             exchEventTimeMs, exchTradeTimeMs, fhParseUs, /*fhSendUs=*/0LL, fhSeqNo_,
             KDB_EPOCH_OFFSET_NS);
-        fhSendSlotIdx = 12;
+        fhSendSlotIdx = t2s::AGG_TRADE_ROW_SEND_US_IDX;
     }
 
     // Capture send time and patch the placeholder. kK(...)[i] returns a
@@ -380,7 +398,7 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
             } else {  // FuturesAggTrade
                 row2 = t2s::buildAggTradeRow(
                     fhRecvTimeUtcNs, symStr, primaryId, firstAggId, lastAggId,
-                    priceV, qtyV, buyerIsMaker,
+                    priceV, qtyV, qtyExRpi, buyerIsMaker,
                     exchEventTimeMs, exchTradeTimeMs, fhParseUs, fhSendUs, fhSeqNo_,
                     KDB_EPOCH_OFFSET_NS);
             }
@@ -542,6 +560,7 @@ void TradeFeedHandler::publishHealth() {
         {"exchMissed",     ctrExchMissed_},
         {"exchOutOfOrder", ctrExchOutOfOrder_},
         {"exchDuplicates", ctrExchDuplicates_},
+        {"nqMissing",      ctrNqMissing_},      // futures only: aggTrade events without `nq`
     });
 
     spdlog::debug("Health published: uptime={}s msgs={}/{} state={}",

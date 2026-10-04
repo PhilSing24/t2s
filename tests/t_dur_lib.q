@@ -35,7 +35,7 @@
 .d.tables:`trade_binance`quote_binance`trade_binance_fut`quote_binance_fut;
 .d.side:.d.tables ! `trade`quote`aggTrade`quoteFut;
 .d.baseSchema:.d.tables ! (.schema.trade; .schema.quote; .schema.aggTrade; .schema.quoteFut);
-.d.width:.d.tables ! {[t] count cols .d.baseSchema t} each .d.tables;   / 12 30 14 32 at quote depth 5
+.d.width:.d.tables ! {[t] count cols .d.baseSchema t} each .d.tables;   / 12 30 15 32 at quote depth 5
 
 / ---------------------------------------------------------------------------
 / Synthetic rows. fhSeqNo must stay contiguous per side for the whole life of
@@ -81,10 +81,10 @@
   k:1 + (cols .schema.quoteFut)?`exchUpdateId;
   (k # r), (enlist 4999+10*i), k _ r};
 
-/ Futures aggTrade row: 14 feed-handler columns (aggTradeId, firstTradeId,
+/ Futures aggTrade row: 15 feed-handler columns (aggTradeId, firstTradeId,
 / lastTradeId between sym and price). fhSeqNo sits at index 13.
 .d.mkAggTrade:{[ts;i;seq]
-  (ts; `BTCUSDT; 500000+i; 900000+2*i; 900001+2*i; 78000.0+i*0.5; 0.002+i*0.0001; 1b;
+  (ts; `BTCUSDT; 500000+i; 900000+2*i; 900001+2*i; 78000.0+i*0.5; 0.002+i*0.0001; 0.0015+i*0.0001; 1b;
    `long$1700000000000+i; `long$1700000000000+i; "j"$ts; 10j; 15j; seq)};
 
 .d.mkRow:{[t;ts;i;seq]

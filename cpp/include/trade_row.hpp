@@ -7,7 +7,7 @@
  *   buildTradeRow      - 12-field row for the spot @trade stream payload.
  *                        Carries `tradeId` as the per-symbol sequence id.
  *
- *   buildAggTradeRow   - 14-field row for the futures @aggTrade stream payload.
+ *   buildAggTradeRow   - 15-field row for the futures @aggTrade stream payload.
  *                        Carries `aggTradeId` as the sequence id, plus
  *                        `firstTradeId` and `lastTradeId` describing the
  *                        constituent fills aggregated into this event.
@@ -37,21 +37,27 @@
  *   [10] fhSendUs         long  (patchable in-place)
  *   [11] fhSeqNo          long
  *
- * Futures aggTrade row layout (14 fields) - matches specs/trades-fut-schema.md:
+ * Futures aggTrade row layout (15 fields) - matches .schema.aggTrade:
  *   [0]  time             KP timestamp
  *   [1]  sym              symbol
  *   [2]  aggTradeId       long
  *   [3]  firstTradeId     long  (new vs spot)
  *   [4]  lastTradeId      long  (new vs spot)
  *   [5]  price            float
- *   [6]  qty              float
- *   [7]  buyerIsMaker     bool
- *   [8]  exchEventTimeMs  long
- *   [9]  exchTradeTimeMs  long
- *   [10] fhRecvTimeUtcNs  long
- *   [11] fhParseUs        long
- *   [12] fhSendUs         long  (patchable in-place)
- *   [13] fhSeqNo          long
+ *   [6]  qty              float  `q`: quantity with all the market trades
+ *   [7]  qtyExRpi         float  `nq`: "normal quantity without the trades
+ *                                involving RPI orders" (Retail Price
+ *                                Improvement). In the stream since 2025-12-31:
+ *                                https://developers.binance.com/docs/derivatives/change-log
+ *                                https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Aggregate-Trade-Streams
+ *                                Null if an event arrives without it.
+ *   [8]  buyerIsMaker     bool
+ *   [9]  exchEventTimeMs  long
+ *   [10] exchTradeTimeMs  long
+ *   [11] fhRecvTimeUtcNs  long
+ *   [12] fhParseUs        long
+ *   [13] fhSendUs         long  (patchable in-place)
+ *   [14] fhSeqNo          long
  */
 
 #ifndef T2S_TRADE_ROW_HPP
@@ -105,6 +111,7 @@ inline KOwned buildAggTradeRow(
     long long          lastTradeId,
     double             price,
     double             qty,
+    double             qtyExRpi,
     bool               buyerIsMaker,
     long long          exchEventTimeMs,
     long long          exchTradeTimeMs,
@@ -113,7 +120,7 @@ inline KOwned buildAggTradeRow(
     long long          fhSeqNo,
     long long          kdbEpochOffsetNs) noexcept
 {
-    return KOwned(knk(14,
+    return KOwned(knk(15,
         ktj(-KP, fhRecvTimeUtcNs - kdbEpochOffsetNs),
         ks((S)sym.c_str()),
         kj(aggTradeId),
@@ -121,6 +128,7 @@ inline KOwned buildAggTradeRow(
         kj(lastTradeId),
         kf(price),
         kf(qty),
+        kf(qtyExRpi),
         kb(buyerIsMaker),
         kj(exchEventTimeMs),
         kj(exchTradeTimeMs),
@@ -130,6 +138,12 @@ inline KOwned buildAggTradeRow(
         kj(fhSeqNo)
     ));
 }
+
+/// Width and fhSendUs position of the two trade layouts
+constexpr int TRADE_ROW_WIDTH = 12;
+constexpr int TRADE_ROW_SEND_US_IDX = 10;
+constexpr int AGG_TRADE_ROW_WIDTH = 15;
+constexpr int AGG_TRADE_ROW_SEND_US_IDX = 13;
 
 } // namespace t2s
 

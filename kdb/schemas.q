@@ -69,11 +69,19 @@ if[0 = count .schema.symbols; .schema.cfg.die raze (.schema.cfg.file; ": symbols
   fhSeqNo:`long$()
   );
 
-/ Futures aggTrade feed handler output (14 base columns) — Binance USDT-M
+/ Futures aggTrade feed handler output (15 base columns) — Binance USDT-M
 / @aggTrade stream. Carries aggTradeId (the per-symbol monotonic id for
 / gap detection) plus firstTradeId / lastTradeId describing the range of
 / underlying fills aggregated into this event. Identical to .schema.trade
-/ except for the three id columns at positions 2-4. See ADR-013.
+/ except for the three id columns at positions 2-4 and qtyExRpi. See ADR-013.
+/ qty is the event's `q` ("quantity with all the market trades"); qtyExRpi
+/ is its `nq` ("normal quantity without the trades involving RPI orders",
+/ RPI = Retail Price Improvement), in the stream since 2025-12-31:
+/   https://developers.binance.com/docs/derivatives/change-log
+/   https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Aggregate-Trade-Streams
+/ qty - qtyExRpi is the part of the aggregate that traded against RPI orders.
+/ Null if an event arrived without the field, and in rows stored before it
+/ was added.
 .schema.aggTrade:([]
   time:`timestamp$();
   sym:`symbol$();
@@ -82,6 +90,7 @@ if[0 = count .schema.symbols; .schema.cfg.die raze (.schema.cfg.file; ": symbols
   lastTradeId:`long$();
   price:`float$();
   qty:`float$();
+  qtyExRpi:`float$();
   buyerIsMaker:`boolean$();
   exchEventTimeMs:`long$();
   exchTradeTimeMs:`long$();

@@ -208,6 +208,7 @@ private:
     long long ctrExchMissed_{0};       ///< trade ids skipped in those jumps
     long long ctrExchOutOfOrder_{0};   ///< trade id lower than the last one seen
     long long ctrExchDuplicates_{0};   ///< trade id equal to the last one seen
+    long long ctrNqMissing_{0};        ///< futures aggTrade events without a usable `nq`
 
     /// Time of last message received
     std::chrono::system_clock::time_point lastMsgTime_;

@@ -235,3 +235,43 @@ TEST_CASE("aggTrade payload: 'data' object missing yields poisoned inner reader"
     REQUIRE(d.hasError());
     REQUIRE_FALSE(d.int64("a").has_value());
 }
+
+// ============================================================================
+// nq: quantity without the trades involving RPI orders (stream field since
+// 2025-12-31, https://developers.binance.com/docs/derivatives/change-log)
+// ============================================================================
+
+TEST_CASE("aggTrade payload (2026 shape): nq parses as a decimal string, st is ignored",
+          "[aggtrade][parse][nq]") {
+    // Captured from wss://fstream.binance.com/market/ws/btcusdt@aggTrade on 2026-10-04
+    // (nq changed here to differ from q).
+    const char* json = R"({"stream":"btcusdt@aggTrade","data":{"e":"aggTrade","E":1791080047945,)"
+                       R"("a":3474423223,"s":"BTCUSDT","p":"84797.00","q":"0.029","nq":"0.021",)"
+                       R"("f":8144025969,"l":8144025969,"T":1791080047922,"m":true,"st":1}})";
+    rapidjson::Document doc;
+    doc.Parse(json);
+    REQUIRE_FALSE(doc.HasParseError());
+    t2s::JsonReader root(doc);
+    t2s::JsonReader d = root.obj("data");
+    auto q  = d.priceString("q");
+    auto nq = d.priceString("nq");
+    auto a  = d.int64("a");
+    REQUIRE_FALSE(d.hasError());
+    REQUIRE(*q == Catch::Approx(0.029));
+    REQUIRE(*nq == Catch::Approx(0.021));
+    REQUIRE(*a == 3474423223LL);
+}
+
+TEST_CASE("aggTrade payload without nq: the other fields still extract", "[aggtrade][parse][nq]") {
+    // The handler reads nq outside the JsonReader chain so that its absence
+    // does not poison the row (it stores null and counts nqMissing).
+    const char* json = R"({"data":{"e":"aggTrade","E":1,"a":2,"s":"BTCUSDT","p":"1.0","q":"3.0","f":4,"l":5,"T":6,"m":false}})";
+    rapidjson::Document doc;
+    doc.Parse(json);
+    REQUIRE_FALSE(doc["data"].HasMember("nq"));
+    t2s::JsonReader root(doc);
+    t2s::JsonReader d = root.obj("data");
+    REQUIRE(*d.priceString("q") == Catch::Approx(3.0));
+    REQUIRE(*d.int64("a") == 2);
+    REQUIRE_FALSE(d.hasError());
+}
