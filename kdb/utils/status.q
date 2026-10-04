@@ -48,7 +48,13 @@ if[not null h;
   if[hd[`rejectedRegistrations] > 0; .st.note string[hd `rejectedRegistrations]," handler registration(s) rejected"];
   if[hd `diskLow; .st.note "disk free below threshold: ",string[hd `diskFreeMB]," MB"];
   if[hd `clockSkewHigh; .st.note "clock skew vs exchange ",string[hd `clockSkewMs]," ms - check the WSL clock (sudo hwclock -s)"];
-  if[any null st `sessionId; .st.note "no handler session for: ",", " sv string exec table from st where null sessionId]];
+  / Only the tables of the markets start.sh launched are expected to have a
+  / handler (T2S_STATUS_MARKETS = run/markets.active; empty = all four).
+  mk:getenv `T2S_STATUS_MARKETS;
+  expected:$[0 = count mk; st `table;
+    raze ($[mk like "*spot*"; `trade_binance`quote_binance; `symbol$()]; $[mk like "*futures*"; `trade_binance_fut`quote_binance_fut; `symbol$()])];
+  noSession:exec table from st where null sessionId, table in expected;
+  if[count noSession; .st.note "no handler session for: ",", " sv string noSession]];
 
 / ---------------- WDB ----------------
 w:.st.open .st.wdbPort;

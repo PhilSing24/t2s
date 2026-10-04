@@ -28,21 +28,23 @@ echo "t2s status  $(date -u +%Y-%m-%dT%H:%M:%SZ)  ($BASEDIR)"
 listener() { lsof -ti TCP:"$1" -sTCP:LISTEN 2>/dev/null | head -1; }
 fh_pid()   { pgrep -f "^(\./)?build/$1( |$)" 2>/dev/null | head -1; }
 TP_PID=$(listener "$PORT_TP"); WDB_PID=$(listener "$PORT_WDB")
-SPOT=$(fh_pid trade_feed_handler); FUT=$(fh_pid trade_feed_handler_fut); QUOTE=$(fh_pid quote_feed_handler)
+SPOT=$(fh_pid trade_feed_handler); FUT=$(fh_pid trade_feed_handler_fut)
+QUOTE=$(fh_pid quote_feed_handler); QUOTE_FUT=$(fh_pid quote_feed_handler_fut)
 up() { if [[ -n "$2" ]]; then echo -n "$1 up(pid $2)  "; else echo -n "$1 DOWN  "; fi; }
-echo -n "PROC : "; up tp "$TP_PID"; up wdb "$WDB_PID"; up spot-fh "$SPOT"; up fut-fh "$FUT"; up quote-fh "$QUOTE"
+echo -n "PROC : "; up tp "$TP_PID"; up wdb "$WDB_PID"; up trade-fh "$SPOT"; up quote-fh "$QUOTE"; up trade-fh-fut "$FUT"; up quote-fh-fut "$QUOTE_FUT"
 if tmux has-session -t $SESSION 2>/dev/null; then echo "tmux:$SESSION"; else echo "tmux:none"; fi
 [[ -z "$TP_PID" ]]  && note "TP is down"
 [[ -z "$WDB_PID" ]] && note "WDB is down"
 MARKETS=$(cat "$BASEDIR/run/markets.active" 2>/dev/null || echo "")
 if [[ -n "$TP_PID" ]]; then
     [[ "$MARKETS" == *spot* && -z "$SPOT" ]] && note "spot trade handler is down (markets.active=$MARKETS)"
+    [[ "$MARKETS" == *spot* && -z "$QUOTE" ]] && note "spot quote handler is down (markets.active=$MARKETS)"
     [[ "$MARKETS" == *futures* && -z "$FUT" ]] && note "futures trade handler is down (markets.active=$MARKETS)"
-    [[ -z "$QUOTE" ]] && note "quote handler is down"
+    [[ "$MARKETS" == *futures* && -z "$QUOTE_FUT" ]] && note "futures quote handler is down (markets.active=$MARKETS)"
 fi
 
 # ---------------- TP / WDB internals ----------------
-T2S_TP_PORT=$PORT_TP T2S_WDB_PORT=$PORT_WDB T2S_TMP_DIR="$TMP_DIR" q "$BASEDIR/kdb/utils/status.q" < /dev/null 2>/dev/null
+T2S_STATUS_MARKETS="$MARKETS" T2S_TP_PORT=$PORT_TP T2S_WDB_PORT=$PORT_WDB T2S_TMP_DIR="$TMP_DIR" q "$BASEDIR/kdb/utils/status.q" < /dev/null 2>/dev/null
 QRC=$?
 # status.q prints its own ATTN lines; fold its verdict into ours
 [[ $QRC -ne 0 ]] && note "see the items reported by TP/WDB above"

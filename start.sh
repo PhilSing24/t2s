@@ -2,10 +2,10 @@
 # t2s - Start market data pipeline
 #
 # Usage:
-#   ./start.sh                     - default: spot trade FH + quote FH
-#   ./start.sh --markets spot      - spot trade FH + quote FH (same as default)
-#   ./start.sh --markets futures   - futures trade FH + quote FH (no spot)
-#   ./start.sh --markets spot,futures - both spot and futures trade FH + quote FH
+#   ./start.sh                     - default: the two spot handlers (trades, quotes)
+#   ./start.sh --markets spot      - same as the default
+#   ./start.sh --markets futures   - the two USD-M futures handlers only (no spot)
+#   ./start.sh --markets spot,futures - all four handlers
 #   ./start.sh --headless ...      - start and return without attaching to tmux
 #                                    (for scheduled / unattended starts)
 #
@@ -15,9 +15,10 @@
 # Any step that does not happen within its timeout fails the start with
 # the process's log tail.
 #
-# The --markets flag controls which trade feed handlers are launched. The
-# rest of the pipeline (TP, WDB, quote FH) is unconditional and
-# market-agnostic. See ADR-013.
+# The --markets flag controls which feed handlers are launched: each market
+# has a trade handler and a quote handler. TP and WDB are unconditional and
+# carry all four tables whichever markets run. Symbols and the quote depth
+# for every handler come from config/shared.json.
 set -e  # Exit on error
 SESSION="t2s"
 # Resolve the project root from the script's own location so this works
@@ -103,14 +104,18 @@ for port in "${PORTS[@]}"; do
 done
 
 # Check binaries exist for the markets we plan to launch
-if [[ $LAUNCH_SPOT -eq 1 && ! -x "$BASEDIR/build/trade_feed_handler" ]]; then
-    echo -e "${RED}Error: spot binary build/trade_feed_handler is missing or not executable${NC}"
-    echo "  Build with: cmake --build build"
-    exit 1
-fi
-if [[ $LAUNCH_FUT -eq 1 && ! -x "$BASEDIR/build/trade_feed_handler_fut" ]]; then
-    echo -e "${RED}Error: futures binary build/trade_feed_handler_fut is missing or not executable${NC}"
-    echo "  Build with: cmake --build build"
+NEEDED=()
+[[ $LAUNCH_SPOT -eq 1 ]] && NEEDED+=(trade_feed_handler quote_feed_handler)
+[[ $LAUNCH_FUT -eq 1 ]]  && NEEDED+=(trade_feed_handler_fut quote_feed_handler_fut)
+for bin in "${NEEDED[@]}"; do
+    if [[ ! -x "$BASEDIR/build/$bin" ]]; then
+        echo -e "${RED}Error: binary build/$bin is missing or not executable${NC}"
+        echo "  Build with: cmake --build build"
+        exit 1
+    fi
+done
+if [[ ! -f "$BASEDIR/config/shared.json" ]]; then
+    echo -e "${RED}Error: config/shared.json (symbols and quote depth) is missing${NC}"
     exit 1
 fi
 
@@ -183,22 +188,24 @@ wait_for "WDB healthy" wdb 10 wdb_healthy
 if [[ $LAUNCH_SPOT -eq 1 ]]; then
     tmux new-window -t $SESSION -n "trade-fh"
     tmux send-keys -t $SESSION:trade-fh "cd $BASEDIR && ./build/trade_feed_handler" C-m
+    tmux new-window -t $SESSION -n "quote-fh"
+    tmux send-keys -t $SESSION:quote-fh "cd $BASEDIR && ./build/quote_feed_handler" C-m
 fi
 if [[ $LAUNCH_FUT -eq 1 ]]; then
     tmux new-window -t $SESSION -n "trade-fh-fut"
     tmux send-keys -t $SESSION:trade-fh-fut "cd $BASEDIR && ./build/trade_feed_handler_fut" C-m
+    tmux new-window -t $SESSION -n "quote-fh-fut"
+    tmux send-keys -t $SESSION:quote-fh-fut "cd $BASEDIR && ./build/quote_feed_handler_fut" C-m
 fi
-# Quote feed handler (unconditional; spot only for now - futures L5 is a follow-up ADR)
-tmux new-window -t $SESSION -n "quote-fh"
-tmux send-keys -t $SESSION:quote-fh "cd $BASEDIR && ./build/quote_feed_handler" C-m
 
 if [[ $LAUNCH_SPOT -eq 1 ]]; then
     wait_for "spot trade handler registered with TP" trade-fh 60 fh_registered trade_binance
+    wait_for "spot quote handler registered with TP" quote-fh 60 fh_registered quote_binance
 fi
 if [[ $LAUNCH_FUT -eq 1 ]]; then
     wait_for "futures trade handler registered with TP" trade-fh-fut 60 fh_registered trade_binance_fut
+    wait_for "futures quote handler registered with TP" quote-fh-fut 60 fh_registered quote_binance_fut
 fi
-wait_for "quote handler registered with TP" quote-fh 60 fh_registered quote_binance
 
 # Select first window
 tmux select-window -t $SESSION:tp
@@ -208,11 +215,12 @@ echo "Architecture:"
 echo "  Primary TP:5010 -> WDB:5011 -> HDB"
 if [[ $LAUNCH_SPOT -eq 1 ]]; then
     echo "  trade_feed_handler     -> TP:5010 (trade_binance)"
+    echo "  quote_feed_handler     -> TP:5010 (quote_binance)"
 fi
 if [[ $LAUNCH_FUT -eq 1 ]]; then
     echo "  trade_feed_handler_fut -> TP:5010 (trade_binance_fut)"
+    echo "  quote_feed_handler_fut -> TP:5010 (quote_binance_fut)"
 fi
-echo "  quote_feed_handler     -> TP:5010 (quote_binance)"
 echo ""
 echo "Navigation:"
 echo "  Ctrl+B N       next window"
