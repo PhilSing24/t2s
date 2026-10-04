@@ -13,6 +13,7 @@
 #   5. matching depth: both start
 #   6. a shared config with a bad depth or no symbols stops q processes and
 #      the handler binaries at start-up
+#   7. each quote binary refuses the other market's config
 #
 # Exit code 0 on success.
 
@@ -169,6 +170,34 @@ if [[ -x build/quote_feed_handler && -x build/trade_feed_handler ]]; then
     [[ $rc -eq 1 ]] && grep -q "Symbols are now shared" "$T2S_SANDBOX/h.log" && pass "a handler config with its own symbols list is refused" || fail "old-style config rc=$rc"
 else
     echo "  SKIP: handler binaries not built"
+fi
+
+echo ""
+echo "=== 7. each quote binary accepts only its own market ==="
+if [[ -x build/quote_feed_handler && -x build/quote_feed_handler_fut ]]; then
+    # Sandbox copies that log to the console, so the refusals below do not
+    # land in the real handlers' log files under logs/.
+    mkdir -p "$T2S_SANDBOX/cfg"
+    python3 - "$T2S_SANDBOX/cfg" <<'CFGEOF'
+import json, sys
+for name in ('quote_feed_handler.json', 'quote_feed_handler_fut.json'):
+    c = json.load(open('config/' + name)); c['logging']['file'] = ''
+    json.dump(c, open(sys.argv[1] + '/' + name, 'w'))
+CFGEOF
+    export T2S_SHARED_CONFIG="$T2S_TEST_ROOT/config/shared.json"
+    ./build/quote_feed_handler "$T2S_SANDBOX/cfg/quote_feed_handler_fut.json" > "$T2S_SANDBOX/h.log" 2>&1 < /dev/null; rc=$?
+    [[ $rc -eq 1 ]] && grep -q 'handles market.schema "spot_depth"' "$T2S_SANDBOX/h.log" && pass "spot binary refuses the futures config" || fail "spot binary with futures config rc=$rc"
+    ./build/quote_feed_handler_fut "$T2S_SANDBOX/cfg/quote_feed_handler.json" > "$T2S_SANDBOX/h.log" 2>&1 < /dev/null; rc=$?
+    unset T2S_SHARED_CONFIG
+    [[ $rc -eq 1 ]] && grep -q 'handles market.schema "futures_depth"' "$T2S_SANDBOX/h.log" && pass "futures binary refuses the spot config" || fail "futures binary with spot config rc=$rc"
+    # The futures binary announces the futures row width (29 at depth 5) to a depth-5 TP
+    t2s_sandbox_reset; shared "$D5" 5
+    TP_PID=$(t2s_spawn_tp "$T2S_PORT_TP" "$TP_LOG" "T2S_SHARED_CONFIG=$D5")
+    t2s_wait_port "$T2S_PORT_TP" 6 || { fail "TP did not start"; exit 1; }
+    [[ "$(qtp '.tp.fhWidth`quote_binance`quote_binance_fut')" == "28 29" ]] && pass "TP expects 28 and 29 columns for the two quote tables" || fail "widths $(qtp '.tp.fhWidth`quote_binance`quote_binance_fut')"
+    stop_all
+else
+    echo "  SKIP: quote handler binaries not built"
 fi
 
 echo ""; echo "==========================================="

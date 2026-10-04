@@ -1,0 +1,27 @@
+{
+    "market": {
+        "host": "fstream.binance.com",
+        "port": "443",
+        "path_prefix": "/public",
+        "stream_suffix": "@depth@100ms",
+        "rest_host": "fapi.binance.com",
+        "rest_path": "/fapi/v1/depth",
+        "snapshot_limit": 1000,
+        "snapshot_weight": 20,
+        "weight_limit_per_min": 2400,
+        "tp_table": "quote_binance_fut",
+        "schema": "futures_depth"
+    },
+    "tickerplant": {
+        "host": "localhost",
+        "port": 5010
+    },
+    "reconnect": {
+        "initial_backoff_ms": 1000,
+        "max_backoff_ms": 8000
+    },
+    "logging": {
+        "level": "info",
+        "file": "logs/quote_fh_fut.log"
+    }
+}

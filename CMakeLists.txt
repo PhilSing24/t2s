@@ -70,6 +70,16 @@ add_executable(quote_feed_handler
 
 target_link_libraries(quote_feed_handler PRIVATE t2s_fh)
 
+# ============================================================
+# Executable: USD-M futures L5 quote feed handler
+# Same QuoteFeedHandler class as the spot binary; the market
+# wiring comes from config/quote_feed_handler_fut.json.
+# ============================================================
+add_executable(quote_feed_handler_fut
+    cpp/src/quote_fh_fut_main.cpp
+)
+target_link_libraries(quote_feed_handler_fut PRIVATE t2s_fh)
+
 # ---------------------------------------------------------------------------
 # Test binaries
 #
