@@ -366,7 +366,18 @@ pubsub.init[]
 .tp.tradeIdCol:`trade_binance`trade_binance_fut ! `tradeId`aggTradeId;
 .tp.idx.tradeId:(key .tp.tradeIdCol) ! {[t] (cols value t)?.tp.tradeIdCol t} each key .tp.tradeIdCol;
 .tp.lastId:(key .tp.tradeIdCol) ! (count .tp.tradeIdCol)#enlist (`symbol$()) ! `long$();
-.tp.noteTradeId:{[tbl; data] s:data 1; .tp.lastId[tbl; s]:(data .tp.idx.tradeId tbl) | .tp.lastId[tbl; s];};
+.tp.noteTradeId:{[tbl; data]
+  s:data 1; id:data .tp.idx.tradeId tbl;
+  .tp.lastId[tbl; s]:id | .tp.lastId[tbl; s];
+  / A backfilled row (null exchEventTimeMs) advances its gap's progress. TP
+  / is the authority on what has been backfilled: it is what the log holds,
+  / so a handler that resumes a gap after a crash starts exactly there.
+  if[null data .tp.idx.exchEvent tbl; .tp.noteBackfill[tbl; s; id]];
+  };
+.tp.noteBackfill:{[tbl; s; id]
+  update recoveredThroughId:id | recoveredThroughId, recovered:1 + (id | recoveredThroughId) - firstMissingId
+    from `.tp.gaps where srcTable = tbl, sym = s, firstMissingId <= id, lastMissingId >= id;
+  };
 
 .tp.gaps:([srcTable:`symbol$(); sym:`symbol$(); firstMissingId:`long$()]
   lastMissingId:`long$(); status:`symbol$(); recovered:`long$(); recoveredThroughId:`long$(); reason:`symbol$(); time:`timestamp$());

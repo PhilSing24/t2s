@@ -38,6 +38,14 @@ struct FeedHandlerConfig {
     std::string marketSchema       = "spot_trade";  // or "futures_agg_trade"; quotes: "spot_depth" / "futures_depth"
     bool        hasMarketBlock     = false;
 
+    // Trade handlers only: backfill of trade-id gaps over REST ("backfill" block)
+    bool        backfillEnabled     = false;
+    std::string backfillRestHost    = "";
+    std::string backfillRestPath    = "";
+    int         backfillWeight      = 0;
+    int         backfillWeightLimit = 0;
+    long long   backfillMaxGapIds   = 500000;
+
     // Quote handlers only (REST snapshot endpoint and its rate-limit numbers)
     std::string marketPathPrefix   = "";
     std::string restHost           = "";
@@ -209,6 +217,23 @@ struct FeedHandlerConfig {
             }
             if (m.HasMember("schema") && m["schema"].IsString()) {
                 marketSchema = m["schema"].GetString();
+            }
+        }
+
+        // Parse backfill config (trade handlers; optional)
+        if (doc.HasMember("backfill") && doc["backfill"].IsObject()) {
+            const auto& b = doc["backfill"];
+            backfillEnabled = !(b.HasMember("enabled") && b["enabled"].IsBool() && !b["enabled"].GetBool());
+            if (b.HasMember("rest_host") && b["rest_host"].IsString()) backfillRestHost = b["rest_host"].GetString();
+            if (b.HasMember("rest_path") && b["rest_path"].IsString()) backfillRestPath = b["rest_path"].GetString();
+            if (b.HasMember("request_weight") && b["request_weight"].IsInt()) backfillWeight = b["request_weight"].GetInt();
+            if (b.HasMember("weight_limit_per_min") && b["weight_limit_per_min"].IsInt()) backfillWeightLimit = b["weight_limit_per_min"].GetInt();
+            if (b.HasMember("max_gap_ids") && b["max_gap_ids"].IsInt64()) backfillMaxGapIds = b["max_gap_ids"].GetInt64();
+            if (backfillEnabled && (backfillRestHost.empty() || backfillRestPath.empty() ||
+                                    backfillWeight <= 0 || backfillWeightLimit <= 0 || backfillMaxGapIds <= 0)) {
+                std::cerr << "[Config] " << filepath << ": backfill needs rest_host, rest_path, request_weight,"
+                          << " weight_limit_per_min (and a positive max_gap_ids)" << std::endl;
+                return false;
             }
         }
 

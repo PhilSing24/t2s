@@ -87,21 +87,27 @@ public:
      * @param limit Number of levels per side to request
      * @return SnapshotData with bids, asks, and lastUpdateId
      */
-    SnapshotData fetchSnapshot(const std::string& symbol, int limit = 1000) {
-        SnapshotData result;
-        
+    /// Result of one HTTPS GET.
+    struct HttpResult {
+        int status = 0;            ///< HTTP status, 0 if no response was received
+        std::string body;
+        int retryAfterSec = 0;     ///< Retry-After header (sent with 429 and 418)
+        int usedWeight1m = -1;     ///< X-MBX-USED-WEIGHT-1M header
+        std::string error;         ///< transport error text, empty if a response arrived
+    };
+
+    /**
+     * @brief One synchronous HTTPS GET to this client's host.
+     * @param target path and query, e.g. "/api/v3/depth?symbol=BTCUSDT&limit=1000"
+     * A new connection per request; send/receive timeouts of IO_TIMEOUT_SEC.
+     */
+    HttpResult get(const std::string& target) {
+        HttpResult out;
         try {
             const std::string& host = host_;
             const std::string& port = port_;
-            const std::string target = path_ + "?symbol=" + symbol + 
-                                       "&limit=" + std::to_string(limit);
 
-            std::cout << "[REST] Fetching snapshot: " << host << target << std::endl;
-
-            // IO context for this request
             net::io_context ioc;
-
-            // Resolver and SSL stream
             tcp::resolver resolver(ioc);
             beast::ssl_stream<beast::tcp_stream> stream(ioc, ctx_);
 
@@ -118,12 +124,11 @@ public:
             // makes a MITM with any valid TLS cert fail the handshake.
             stream.set_verify_callback(ssl::host_name_verification(host));
 
-            // Resolve and connect
             auto const results = resolver.resolve(host, port);
             beast::get_lowest_layer(stream).connect(results);
 
             // Synchronous I/O has no deadline of its own: without these a
-            // stalled server would block the snapshot worker forever.
+            // stalled server would block the calling worker forever.
             {
                 struct timeval tv{IO_TIMEOUT_SEC, 0};
                 int fd = beast::get_lowest_layer(stream).socket().native_handle();
@@ -131,50 +136,55 @@ public:
                 ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
             }
 
-            // TLS handshake
             stream.handshake(ssl::stream_base::client);
 
-            // Build HTTP request
             http::request<http::string_body> req{http::verb::get, target, 11};
             req.set(http::field::host, host);
             req.set(http::field::user_agent, "binance-feed-handler/1.0");
-
-            // Send request
             http::write(stream, req);
 
-            // Receive response
             beast::flat_buffer buffer;
-            http::response<http::string_body> res;
-            http::read(stream, buffer, res);
+            http::response_parser<http::string_body> parser;
+            parser.body_limit(64 * 1024 * 1024);      // depth 1000 and 1000-trade pages are well under this
+            http::read(stream, buffer, parser);
+            auto res = parser.release();
 
-            // Check status
-            result.httpStatus = static_cast<int>(res.result_int());
-            result.retryAfterSec = headerInt(res, "Retry-After", 0);
-            result.usedWeight1m = headerInt(res, "X-MBX-USED-WEIGHT-1M", -1);
+            out.status = static_cast<int>(res.result_int());
+            out.retryAfterSec = headerInt(res, "Retry-After", 0);
+            out.usedWeight1m = headerInt(res, "X-MBX-USED-WEIGHT-1M", -1);
+            out.body = std::move(res.body());
 
-            if (res.result() != http::status::ok) {
-                result.error = "HTTP " + std::to_string(static_cast<int>(res.result()));
-                std::cerr << "[REST] Error: " << result.error << std::endl;
-                return result;
-            }
-
-            // Parse JSON response
-            parseSnapshotResponse(res.body(), result);
-
-            // Graceful shutdown
             beast::error_code ec;
-            stream.shutdown(ec);
-            // Ignore shutdown errors (common with SSL)
-
-            std::cout << "[REST] Snapshot received: lastUpdateId=" << result.lastUpdateId
-                      << " bids=" << result.bids.size()
-                      << " asks=" << result.asks.size() << std::endl;
-
+            stream.shutdown(ec);       // ignore shutdown errors (common with SSL)
         } catch (const std::exception& e) {
-            result.error = e.what();
-            std::cerr << "[REST] Exception: " << result.error << std::endl;
+            out.error = e.what();
         }
+        return out;
+    }
 
+    SnapshotData fetchSnapshot(const std::string& symbol, int limit = 1000) {
+        SnapshotData result;
+        const std::string target = path_ + "?symbol=" + symbol + "&limit=" + std::to_string(limit);
+        std::cout << "[REST] Fetching snapshot: " << host_ << target << std::endl;
+
+        HttpResult r = get(target);
+        result.httpStatus = r.status;
+        result.retryAfterSec = r.retryAfterSec;
+        result.usedWeight1m = r.usedWeight1m;
+        if (!r.error.empty()) {
+            result.error = r.error;
+            std::cerr << "[REST] Exception: " << result.error << std::endl;
+            return result;
+        }
+        if (r.status != 200) {
+            result.error = "HTTP " + std::to_string(r.status);
+            std::cerr << "[REST] Error: " << result.error << std::endl;
+            return result;
+        }
+        parseSnapshotResponse(r.body, result);
+        std::cout << "[REST] Snapshot received: lastUpdateId=" << result.lastUpdateId
+                  << " bids=" << result.bids.size()
+                  << " asks=" << result.asks.size() << std::endl;
         return result;
     }
 

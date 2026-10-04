@@ -54,6 +54,14 @@ t2s::MarketConfig buildMarketConfig(const FeedHandlerConfig& config) {
     m.schema       = (config.marketSchema == "futures_agg_trade")
                      ? t2s::TradeSchema::FuturesAggTrade
                      : t2s::TradeSchema::SpotTrade;
+    m.backfillEnabled = config.backfillEnabled;
+    if (config.backfillEnabled) {
+        m.backfillRestHost    = config.backfillRestHost;
+        m.backfillRestPath    = config.backfillRestPath;
+        m.backfillWeight      = config.backfillWeight;
+        m.backfillWeightLimit = config.backfillWeightLimit;
+        m.backfillMaxGapIds   = config.backfillMaxGapIds;
+    }
     return m;
 }
 

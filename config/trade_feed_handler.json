@@ -1,4 +1,12 @@
 {
+    "backfill": {
+        "enabled": true,
+        "rest_host": "api.binance.com",
+        "rest_path": "/api/v3/historicalTrades",
+        "request_weight": 25,
+        "weight_limit_per_min": 6000,
+        "max_gap_ids": 500000
+    },
     "tickerplant": {
         "host": "localhost",
         "port": 5010

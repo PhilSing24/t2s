@@ -6,6 +6,14 @@
         "tp_table": "trade_binance_fut",
         "schema": "futures_agg_trade"
     },
+    "backfill": {
+        "enabled": true,
+        "rest_host": "fapi.binance.com",
+        "rest_path": "/fapi/v1/aggTrades",
+        "request_weight": 20,
+        "weight_limit_per_min": 2400,
+        "max_gap_ids": 500000
+    },
     "tickerplant": {
         "host": "localhost",
         "port": 5010

@@ -14,6 +14,13 @@
 #      TP rebuilds the ids and the open gaps from its log
 #   6. the same on a new day before any row is logged: the session file
 #      carries the state
+#   7. backfill: the missing trades are fetched (from a fake exchange) and
+#      published; every missing id is on disk exactly once, marked by a null
+#      exchEventTimeMs; the gap goes detected -> partial -> recovered
+#   8. REST failures are retried without loss or duplication
+#   9. unrecoverable gaps carry their reason: tooLarge, notServed, restFailed
+#  10. a handler killed mid-backfill: the next run resumes from what TP has
+#      logged, without fetching or publishing any id twice
 #
 # Exit code 0 on success.
 
@@ -166,6 +173,82 @@ start_tp "T2S_TP_FAKE_DATE=$D2"
 [[ "$(qtp '.tp.lastId[`trade_binance;`BTCUSDT]')" == "1299" ]] && pass "last trade id carried over by the session file" || fail "TP lastId on the new day $(qtp '.tp.lastId')"
 sim_bg --rows 100 --rate 3000 --session 9402 --first-id 1350 --seed-from-tp 1; sim_wait
 restart_gap_checks
+stop_tp
+
+TODAY=$(date -u +%Y.%m.%d)
+
+echo ""; SCENARIO=7
+echo "=== scenario 7: a gap is backfilled - every missing id lands on disk once ==="
+t2s_sandbox_reset; rm -f "$T2S_SANDBOX/fhseq"
+start_tp; start_wdb
+# ids 1000..1199 live, 1200..1449 missing (250 ids = 3 pages of 100), then 1450.. live
+sim_bg --rows 600 --rate 2000 --session 9501 --first-id 1000 --gap-at 200 --gap-size 250 --backfill 1 --backfill-page 100; sim_wait
+[[ $SIM_RC -eq 0 ]] && pass "publisher finished" || fail "publisher rc=$SIM_RC"
+[[ "$(sim_field backfilled)" == "250" && "$(sim_field gapsRecovered)" == "1" && "$(sim_field gapsStillOpen)" == "0" ]] && pass "250 trades backfilled, gap recovered" || fail "sim: $SIM_LINE"
+gap -step assert_events -count 4 -statuses detected,partial,partial,recovered
+gap -step assert_gap -status recovered -first 1200 -last 1449 -recovered 250 -src trade_binance
+[[ "$(qtp 'exec count i from .tp.gapStatus[] where status in `detected`partial')" == "0" ]] && pass "TP has no open gap left" || fail "TP still lists an open gap"
+[[ "$(qtp '.tp.ctr.missed`trade_binance')" == "0" && "$(qtp '.tp.ctr.outOfOrder`trade_binance')" == "0" ]] && pass "TP missed = 0, outOfOrder = 0: backfilled rows are ordinary rows of the session" || fail "TP counters"
+wdb_graceful_stop
+gap -step assert_ids -table trade_binance -first 1200 -last 1449 -backfilled 1
+gap -step assert_ids -table trade_binance -first 1000 -last 1849
+wdb -step assert_vs_tplog -table trade_binance
+gap -step assert_disk -count 4
+stop_tp
+
+echo ""; SCENARIO=8
+echo "=== scenario 8: REST fails twice, then works - nothing lost, nothing twice ==="
+t2s_sandbox_reset; rm -f "$T2S_SANDBOX/fhseq"
+start_tp; start_wdb
+sim_bg --rows 400 --rate 2000 --session 9601 --first-id 1000 --gap-at 100 --gap-size 60 --backfill 1 --backfill-fail 2; sim_wait
+[[ "$(sim_field backfilled)" == "60" && "$(sim_field gapsRecovered)" == "1" ]] && pass "recovered after two failed requests" || fail "sim: $SIM_LINE"
+gap -step assert_events -count 2 -statuses detected,recovered
+wdb_graceful_stop
+gap -step assert_ids -table trade_binance -first 1100 -last 1159 -backfilled 1
+stop_tp
+
+echo ""; SCENARIO=9
+echo "=== scenario 9: unrecoverable gaps are recorded with their reason ==="
+t2s_sandbox_reset; rm -f "$T2S_SANDBOX/fhseq"
+start_tp; start_wdb
+# tooLarge: 5000 missing ids with a cap of 1000
+sim_bg --rows 300 --rate 3000 --session 9701 --first-id 1000 --gap-at 100 --gap-size 5000 --backfill 1 --backfill-max-gap 1000; sim_wait
+gap -step assert_gap -status unrecoverable -first 1100 -last 6099 -recovered 0 -reason tooLarge
+# notServed: the exchange only serves ids from 20000 on, the gap is 9100..9159
+sim_bg --rows 300 --rate 3000 --session 9702 --first-id 9000 --gap-at 100 --gap-size 60 --backfill 1 --backfill-served-from 20000 --sym ETHUSDT; sim_wait
+gap -step assert_gap -status unrecoverable -first 9100 -last 9159 -recovered 0 -reason notServed -sym ETHUSDT
+# restFailed: the exchange never answers
+sim_bg --rows 300 --rate 3000 --session 9703 --first-id 500 --gap-at 100 --gap-size 10 --backfill 1 --backfill-fail 100000 --sym SOLUSDT; sim_wait
+gap -step assert_gap -status unrecoverable -first 600 -last 609 -recovered 0 -reason restFailed -sym SOLUSDT
+[[ "$(qtp 'exec count i from .tp.gapStatus[] where status = `unrecoverable')" == "3" ]] && pass "TP lists the three unrecoverable gaps" || fail "TP: $(qtp '.tp.gapStatus[]')"
+wdb_graceful_stop
+gap -step assert_ids -table trade_binance -first 1000 -last 1099
+stop_tp
+
+echo ""; SCENARIO=10
+echo "=== scenario 10: the handler dies mid-backfill; the next run resumes without duplicates ==="
+t2s_sandbox_reset; rm -f "$T2S_SANDBOX/fhseq"
+start_tp; start_wdb
+# gap 1200..1699 (500 ids, pages of 100); the process is killed right after its 250th backfilled row
+sim_bg --rows 600 --rate 2000 --session 9801 --first-id 1000 --gap-at 200 --gap-size 500 --backfill 1 --backfill-page 100 --die-after-backfilled 250
+wait "$SIM_PID"; SIM_RC=$?; SIM_PID=""
+[[ $SIM_RC -eq 9 ]] && pass "publisher died mid-backfill (exit 9)" || fail "publisher rc=$SIM_RC (expected 9)"
+sleep 0.5
+[[ "$(qtp 'exec first recoveredThroughId from .tp.gapStatus[] where firstMissingId = 1200')" == "1449" ]] && pass "TP knows from the rows it logged that ids through 1449 are in" || fail "TP progress: $(qtp '.tp.gapStatus[]')"
+[[ "$(qtp '(.tp.tradeState `trade_binance) 3 4 6')" == "(,1200;,1699;,1449)" ]] && pass "the open gap and its exact progress are handed to the next run" || fail "tradeState: $(qtp '.tp.tradeState `trade_binance')"
+# the restarted handler: live ids continue later; it resumes the open gap AND records the new downtime gap
+LAST=$(qtp '.tp.lastId[`trade_binance;`BTCUSDT]')
+sim_bg --rows 200 --rate 2000 --session 9802 --first-id $((LAST + 31)) --seed-from-tp 1 --backfill 1 --backfill-page 100; sim_wait
+[[ $SIM_RC -eq 0 ]] && pass "restarted publisher finished" || fail "restarted publisher rc=$SIM_RC"
+[[ "$(sim_field openGaps)" == "1" ]] && pass "it picked up the open gap" || fail "sim: $SIM_LINE"
+[[ "$(sim_field backfilled)" == "280" ]] && pass "it fetched only what was missing: 250 of the old gap + 30 of its own downtime" || fail "backfilled=$(sim_field backfilled) (expected 280)"
+gap -step assert_gap -status recovered -first 1200 -last 1699 -recovered 500
+gap -step assert_gap -status recovered -first $((LAST + 1)) -last $((LAST + 30)) -recovered 30
+[[ "$(qtp 'exec count i from .tp.gapStatus[] where status in `detected`partial')" == "0" ]] && pass "no open gap left" || fail "open gaps remain"
+wdb_graceful_stop
+gap -step assert_ids -table trade_binance -first 1200 -last 1699
+gap -step assert_ids -table trade_binance -first $((LAST + 1)) -last $((LAST + 30))
+wdb -step assert_vs_tplog -table trade_binance
 stop_tp
 
 echo ""; echo "==========================================="

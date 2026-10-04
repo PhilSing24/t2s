@@ -184,6 +184,24 @@ if(EXISTS ${CATCH2_DIR}/catch_amalgamated.cpp)
         spdlog::spdlog
     )
 
+    add_executable(test_trade_backfill
+        tests/test_trade_backfill.cpp
+        ${CATCH2_DIR}/catch_amalgamated.cpp
+    )
+    target_include_directories(test_trade_backfill PRIVATE
+        ${INCLUDE_DIR}
+        ${KDB_DIR}
+        ${CATCH2_DIR}
+    )
+    target_link_libraries(test_trade_backfill PRIVATE
+        ${KDB_DIR}/c.o
+        Threads::Threads
+        spdlog::spdlog
+        Boost::system
+        OpenSSL::SSL
+        OpenSSL::Crypto
+    )
+
     add_executable(test_json_reader
         tests/test_json_reader.cpp
         ${CATCH2_DIR}/catch_amalgamated.cpp

@@ -33,6 +33,7 @@ TradeFeedHandler::TradeFeedHandler(const std::vector<std::string>& symbols,
     , cfg_(std::move(market))
     , tpHost_(tpHost)
     , tpPort_(tpPort)
+    , backfillHttp_(market.backfillRestHost, market.backfillRestPort, market.backfillRestPath)
     , startTime_(std::chrono::system_clock::now())
 {
     sessionId_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -46,6 +47,16 @@ TradeFeedHandler::TradeFeedHandler(const std::vector<std::string>& symbols,
                   ? t2s::TRADE_ROW_WIDTH : t2s::AGG_TRADE_ROW_WIDTH;
     tpCfg.sessionId = sessionId_;
     tp_ = std::make_unique<t2s::TpPublisher>(tpCfg, running_);
+
+    // Backfill of trade-id gaps (trade_backfill.hpp). Rate limits: a tenth
+    // of the exchange's weight limit, like the quote handlers' snapshots.
+    t2s::TradeBackfillConfig bfCfg;
+    bfCfg.enabled = cfg_.backfillEnabled;
+    bfCfg.maxGapIds = cfg_.backfillMaxGapIds;
+    bfCfg.sched.weightPerRequest = cfg_.backfillWeight;
+    bfCfg.sched.weightLimitPerMin = cfg_.backfillWeightLimit;
+    backfillFetcher_ = std::make_unique<BackfillFetcher>(backfillHttp_, cfg_.backfillRestPath, cfg_.schema);
+    backfill_ = std::make_unique<t2s::TradeBackfill<BackfillFetcher>>(*backfillFetcher_, bfCfg);
 }
 
 TradeFeedHandler::~TradeFeedHandler() {
@@ -88,7 +99,9 @@ void TradeFeedHandler::run() {
                 t2s::TradeGap gap;
                 gap.sym = g.sym; gap.firstId = g.firstId; gap.lastId = g.lastId;
                 gap.recovered = g.recovered; gap.recoveredThroughId = g.recoveredThroughId;
-                resumeGaps_.push_back(gap);
+                spdlog::warn("Resuming open gap {} ids {}..{} (recovered through {})",
+                             gap.sym, gap.firstId, gap.lastId, gap.recoveredThroughId);
+                backfill_->addGap(gap);
             }
             spdlog::info("TP trade state for {}: last logged id known for {} symbol(s), {} open gap(s) to resume",
                          cfg_.tpTable, st.lastIds.size(), st.openGaps.size());
@@ -96,6 +109,11 @@ void TradeFeedHandler::run() {
             spdlog::warn("No trade state from TP for {}: a gap left by this handler's downtime cannot be detected", cfg_.tpTable);
         }
     }
+    backfill_->start();
+    spdlog::info("Gap backfill {}: {}{} weight {}/{} per min, max gap {} ids",
+                 cfg_.backfillEnabled ? "enabled" : "DISABLED (gaps are recorded as unrecoverable)",
+                 cfg_.backfillRestHost, cfg_.backfillRestPath, cfg_.backfillWeight,
+                 cfg_.backfillWeightLimit, cfg_.backfillMaxGapIds);
 
     // Main loop with reconnection
     while (running_) {
@@ -117,6 +135,7 @@ void TradeFeedHandler::run() {
 
     // Cleanup
     spdlog::info("Cleaning up...");
+    backfill_->stop();
     tp_->close();
     spdlog::info("TP connection closed");
 
@@ -196,6 +215,7 @@ void TradeFeedHandler::validateTradeId(const std::string& sym, long long tradeId
             spdlog::warn("Gap: {} missed={} (last={} got={}){}", sym, gap.missing(), r.previous, tradeId,
                          afterRestart ? " - left by this handler's downtime" : "");
             recordGap(gap, t2s::GapStatus::Detected, afterRestart ? "handlerRestart" : "");
+            backfill_->addGap(gap);
             break;
         }
     }
@@ -208,6 +228,46 @@ void TradeFeedHandler::recordGap(const t2s::TradeGap& gap, t2s::GapStatus status
     // Queued until TP acknowledges it: a gap must never go unrecorded.
     gapEvents_.push(t2s::buildGapRow(nowNs, gap, cfg_.tpTable, status, reason));
     gapEvents_.flush(*tp_);
+}
+
+void TradeFeedHandler::pumpBackfill() {
+    const std::int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    backfill_->pump(nowMs,
+        [this](const std::string& sym, const t2s::BackfillTrade& t, long long recvNs) {
+            publishBackfilled(sym, t, recvNs);
+        },
+        [this](const t2s::TradeGap& g, t2s::GapStatus st, const std::string& reason) {
+            if (st == t2s::GapStatus::Recovered) {
+                spdlog::warn("Gap RECOVERED: {} ids {}..{} ({} trades backfilled)", g.sym, g.firstId, g.lastId, g.recovered);
+            } else if (st == t2s::GapStatus::Unrecoverable) {
+                spdlog::error("Gap UNRECOVERABLE: {} ids {}..{} reason={} (recovered {} of {})",
+                              g.sym, g.firstId, g.lastId, reason, g.recovered, g.missing());
+            }
+            recordGap(g, st, reason);
+        });
+}
+
+void TradeFeedHandler::publishBackfilled(const std::string& sym, const t2s::BackfillTrade& t, long long recvTimeUtcNs) {
+    // A backfilled row is a normal row of this session (next fhSeqNo, the
+    // resend ring covers it) with one difference: REST does not return the
+    // event time, so exchEventTimeMs is null. That null is what marks the row
+    // as backfilled. `time` is when the REST reply arrived; the trade's own
+    // time is exchTradeTimeMs.
+    ++fhSeqNo_;
+    t2s::KOwned row;
+    if (cfg_.schema == t2s::TradeSchema::SpotTrade) {
+        row = t2s::buildTradeRow(recvTimeUtcNs, sym, t.id, t.price, t.qty, t.buyerIsMaker,
+                                 t2s::GAP_NULL_LONG, t.tradeTimeMs, 0LL, 0LL, fhSeqNo_, KDB_EPOCH_OFFSET_NS);
+    } else {
+        row = t2s::buildAggTradeRow(recvTimeUtcNs, sym, t.id, t.firstTradeId, t.lastTradeId,
+                                    t.price, t.qty, t.qtyExRpi, t.buyerIsMaker,
+                                    t2s::GAP_NULL_LONG, t.tradeTimeMs, 0LL, 0LL, fhSeqNo_, KDB_EPOCH_OFFSET_NS);
+    }
+    tp_->publish(row.release(), fhSeqNo_);
+    lastPubTime_ = std::chrono::system_clock::now();
+    ++msgsPublished_;
+    ++ctrBackfilled_;
 }
 
 void TradeFeedHandler::processMessage(const std::string& msg) {
@@ -455,6 +515,7 @@ void TradeFeedHandler::runWebSocketLoop() {
 
         std::string msg = beast::buffers_to_string(buffer.data());
         processMessage(msg);
+        pumpBackfill();
 
         // Publish health every HEALTH_INTERVAL_SEC seconds
         auto now = std::chrono::steady_clock::now();
@@ -530,6 +591,13 @@ void TradeFeedHandler::publishHealth() {
         {"exchDuplicates", ctrExchDuplicates_},
         {"nqMissing",      ctrNqMissing_},      // futures only: aggTrade events without `nq`
         {"gapEventsPending", static_cast<long long>(gapEvents_.size())},
+        {"gapsOpen",         static_cast<long long>(backfill_->openGaps())},
+        {"gapsRecovered",    backfill_->gapsRecovered()},
+        {"gapsUnrecoverable", backfill_->gapsUnrecoverable()},
+        {"tradesBackfilled", ctrBackfilled_},
+        {"backfillRequests", backfill_->pagesRequested()},
+        {"backfillFailures", backfill_->pagesFailed()},
+        {"rateLimitPauses",  backfill_->scheduler().rateLimitPauses()},
         {"tpReconnects",   tp_->reconnects()},
         {"rowsResent",     tp_->rowsResent()},
         {"rowsUnresendable", tp_->rowsUnresendable()},

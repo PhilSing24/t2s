@@ -41,6 +41,17 @@ struct MarketConfig {
     std::string  streamSuffix = "@trade";
     std::string  tpTable      = "trade_binance";
     TradeSchema  schema       = TradeSchema::SpotTrade;
+
+    // Backfill of trade-id gaps over REST (see trade_backfill.hpp). The
+    // defaults are the spot values; backfillEnabled is false unless the
+    // handler's config has a "backfill" block.
+    bool        backfillEnabled        = false;
+    std::string backfillRestHost       = "api.binance.com";
+    std::string backfillRestPort       = "443";
+    std::string backfillRestPath       = "/api/v3/historicalTrades";
+    int         backfillWeight         = 25;       ///< request weight of one page
+    int         backfillWeightLimit    = 6000;     ///< the exchange's IP weight limit per minute
+    long long   backfillMaxGapIds      = 500000;   ///< a larger gap is unrecoverable (tooLarge)
 };
 
 /// Which exchange rule keeps the local book in step with the diff stream.

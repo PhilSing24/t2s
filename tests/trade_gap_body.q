@@ -69,10 +69,10 @@ if[.d.step ~ "assert_ids";
   if[count miss:want except ids; .d.fail raze (string count miss; " id(s) of "; string f; ".."; string l; " are not on disk, e.g. "; string first miss)];
   if[(count where ids in want) <> count want; .d.fail raze ("ids "; string f; ".."; string l; " appear "; string count where ids in want; " times on disk, expected "; string count want)];
   if[(count ids) <> count distinct ids; .d.fail raze (string (count ids) - count distinct ids; " duplicated id(s) on disk")];
-  if["1" ~ .d.arg `backfilled;
+  if[(enlist "1") ~ .d.arg `backfilled;
     bf:exec idc from (update idc:ids from d) where null exchEventTimeMs;
     if[not (asc bf) ~ want; .d.fail raze ("rows marked as backfilled (null exchEventTimeMs): "; string count bf; ", expected exactly ids "; string f; ".."; string l)]];
-  .d.pass raze (string t; ": ids "; string f; ".."; string l; " are on disk exactly once"; $["1" ~ .d.arg `backfilled; ", and they are exactly the rows marked as backfilled"; ""]; " ("; string count ids; " rows, no duplicate id)");
+  .d.pass raze (string t; ": ids "; string f; ".."; string l; " are on disk exactly once"; $[(enlist "1") ~ .d.arg `backfilled; ", and they are exactly the rows marked as backfilled"; ""]; " ("; string count ids; " rows, no duplicate id)");
   .d.done[]];
 
 .d.fail raze ("unknown step: "; .d.step);

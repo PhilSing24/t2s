@@ -41,6 +41,8 @@
 #include "market_config.hpp"
 #include "tp_publisher.hpp"
 #include "trade_gap.hpp"
+#include "trade_backfill.hpp"
+#include "rest_client.hpp"
 
 // kdb+ C API
 extern "C" {
@@ -190,6 +192,16 @@ private:
     std::vector<t2s::TradeGap> resumeGaps_;
     /// trade_gap events waiting for TP's acknowledgement
     t2s::GapEventQueue gapEvents_;
+    /// Backfill of gaps over REST: the HTTP client, the page fetcher, the driver
+    RestClient backfillHttp_;
+    using BackfillFetcher = t2s::RestTradeFetcher<RestClient>;
+    std::unique_ptr<BackfillFetcher> backfillFetcher_;
+    std::unique_ptr<t2s::TradeBackfill<BackfillFetcher>> backfill_;
+    long long ctrBackfilled_{0};       ///< backfilled rows published
+    /// Take finished pages, publish their trades, report progress, request more
+    void pumpBackfill();
+    /// Publish one backfilled trade: a normal row whose exchEventTimeMs is null
+    void publishBackfilled(const std::string& sym, const t2s::BackfillTrade& t, long long recvTimeUtcNs);
     /// Queue a trade_gap event (one row per status change of a gap)
     void recordGap(const t2s::TradeGap& gap, t2s::GapStatus status, const std::string& reason);
 
