@@ -34,6 +34,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace t2s {
 
@@ -191,6 +192,49 @@ public:
         }
         r0(r);
         return EventResult::Acked;
+    }
+
+    /// What TP has logged for a trade table: last exchange trade id per
+    /// symbol, and the gaps still open. See .tp.tradeState in tp.q.
+    struct TradeState {
+        bool ok = false;
+        std::vector<std::pair<std::string, long long>> lastIds;
+        struct OpenGap { std::string sym; long long firstId, lastId, recovered, recoveredThroughId; };
+        std::vector<OpenGap> openGaps;
+    };
+
+    TradeState tradeState() {
+        TradeState st;
+        if (handle_ <= 0) return st;
+        K r = k(handle_, const_cast<S>(".tp.tradeState"), ks(const_cast<S>(cfg_.table.c_str())), (K)0);
+        if (r == nullptr) {
+            spdlog::error("TP connection lost while asking for the trade state");
+            kclose(handle_); handle_ = -1; ++reconnects_;
+            return st;
+        }
+        if (r->t == -128) {
+            spdlog::error("TP could not give the trade state for {}: {}", cfg_.table, r->s);
+            r0(r);
+            return st;
+        }
+        // (syms; ids; gapSyms; gapFirst; gapLast; gapRecovered; gapThrough)
+        if (r->t == 0 && r->n == 7) {
+            K syms = kK(r)[0], ids = kK(r)[1];
+            if (syms->t == KS && ids->t == KJ && syms->n == ids->n) {
+                for (J i = 0; i < syms->n; ++i) st.lastIds.emplace_back(kS(syms)[i], kJ(ids)[i]);
+            }
+            K gs = kK(r)[2], gf = kK(r)[3], gl = kK(r)[4], gr = kK(r)[5], gt = kK(r)[6];
+            if (gs->t == KS && gf->t == KJ && gl->t == KJ && gr->t == KJ && gt->t == KJ) {
+                for (J i = 0; i < gs->n; ++i) {
+                    long long through = kJ(gt)[i];
+                    st.openGaps.push_back({kS(gs)[i], kJ(gf)[i], kJ(gl)[i], kJ(gr)[i],
+                                           through == static_cast<long long>(0x8000000000000000ULL) ? 0 : through});
+                }
+            }
+            st.ok = true;
+        }
+        r0(r);
+        return st;
     }
 
     void close() {

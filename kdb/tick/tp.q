@@ -355,6 +355,38 @@ pubsub.init[]
 .tp.fhDict:{[t] nv:.tp.fh.stats t; nv[0]!nv 1};
 .tp.fhStatus:{[] {[t] (`table`reportedAt!(t; .tp.fh.time t)), .tp.fhDict t} each key .tp.fh.stats};
 
+/ Trade state: what a (re)starting trade handler needs to know about what is
+/ already logged, so that the trades its downtime left unreceived are
+/ detected and backfilled instead of going unnoticed.
+/   .tp.lastId   per trade table, the highest exchange trade id logged per
+/                symbol (spot: tradeId; futures: aggTradeId)
+/   .tp.gaps     the latest trade_gap event per gap
+/ Both are kept in memory as rows pass, rebuilt from today's log at start-up
+/ and carried in the session file across a day with no log yet.
+.tp.tradeIdCol:`trade_binance`trade_binance_fut ! `tradeId`aggTradeId;
+.tp.idx.tradeId:(key .tp.tradeIdCol) ! {[t] (cols value t)?.tp.tradeIdCol t} each key .tp.tradeIdCol;
+.tp.lastId:(key .tp.tradeIdCol) ! (count .tp.tradeIdCol)#enlist (`symbol$()) ! `long$();
+.tp.noteTradeId:{[tbl; data] s:data 1; .tp.lastId[tbl; s]:(data .tp.idx.tradeId tbl) | .tp.lastId[tbl; s];};
+
+.tp.gaps:([srcTable:`symbol$(); sym:`symbol$(); firstMissingId:`long$()]
+  lastMissingId:`long$(); status:`symbol$(); recovered:`long$(); recoveredThroughId:`long$(); reason:`symbol$(); time:`timestamp$());
+/ data: a trade_gap row in .schema.tradeGap order (stamps, if any, ignored)
+.tp.noteGap:{[data]
+  `.tp.gaps upsert (data 2; data 1; data 3; data 4; data 6; data 7; data 8; data 9; data 0);};
+.tp.openGapStatuses:`detected`partial;
+
+/ Called once by a trade handler when it starts. Seven parallel lists, easy
+/ to read from C: (symbols; their last logged ids; then for each OPEN gap
+/ of the table: sym; firstMissingId; lastMissingId; recovered; recoveredThroughId)
+.tp.tradeState:{[tbl]
+  if[not tbl in key .tp.tradeIdCol; '"not a trade table: ", string tbl];
+  ids:.tp.lastId tbl;
+  g:0!select from .tp.gaps where srcTable = tbl, status in .tp.openGapStatuses;
+  (key ids; value ids; g `sym; g `firstMissingId; g `lastMissingId; g `recovered; g `recoveredThroughId)};
+
+/ Every gap TP knows of (today's, plus any still open from before)
+.tp.gapStatus:{[] 0!.tp.gaps};
+
 / Session file. The session id and last logged fhSeqNo per table, so a TP
 / that restarts still knows which handler session it was serving and can
 / tell a reconnecting handler exactly where to resend from. Written at
@@ -364,7 +396,7 @@ pubsub.init[]
 / (.tp.recoverFhSeq), so the file never has to be fresher than that.
 .tp.session.save:{[]
   f:.tp.cfg.sessionFile; fStr:1 _ string f;
-  payload:`id`lastSeq`saved!(.tp.session.id; .tp.seq.last; .z.p);
+  payload:`id`lastSeq`saved`lastId`gaps!(.tp.session.id; .tp.seq.last; .z.p; .tp.lastId; .tp.gaps);
   r:.[set; (hsym `$ fStr,".tmp"; payload); {[e] -1 "TP: ERROR writing session file - ",e; `error}];
   if[r ~ `error; :()];
   @[system; "mv ",fStr,".tmp ",fStr; {[e] -1 "TP: ERROR renaming session file - ",e}];
@@ -377,6 +409,8 @@ pubsub.init[]
   known:.tp.tables inter key v `id;
   .tp.session.id[known]:(v `id) known;
   .tp.seq.last[known]:(v `lastSeq) known;
+  if[`lastId in key v; {[v;t] .tp.lastId[t]:(v `lastId) t}[v] each (key .tp.lastId) inter key v `lastId];
+  if[`gaps in key v; .tp.gaps:v `gaps];
   -1 raze ("TP: session file loaded (saved "; string v `saved; "): sessions "; .Q.s1 .tp.session.id; ", last fhSeqNo "; .Q.s1 .tp.seq.last);
   };
 
@@ -488,6 +522,7 @@ pubsub.init[]
   .tp.log[tbl; data];
   pubsub.publish[tbl; data];
   .tp.ctr.events[tbl]+:1;
+  if[tbl = `trade_gap; .tp.noteGap data; .tp.session.save[]];
   last data};
 
 upd:{[tbl;data]
@@ -522,6 +557,7 @@ upd:{[tbl;data]
       -1 raze ("TP: handle "; string h; " publishes "; string tbl; " without a session registration - accepting and counting")]];
   .tp.checkSeq[tbl; data .tp.idx.fhSeqNo tbl];
   .tp.skew.record[tbl; data];
+  if[tbl in key .tp.tradeIdCol; .tp.noteTradeId[tbl; data]];
   / Append TP-side fields: tpRecvTimeUtcNs, tpSeqNo (the last two schema columns)
   data:data, (.tp.tsToNs[.z.p]; .tp.nextSeqNo[]);
   if[null .tp.seq.firstTp tbl; .tp.seq.firstTp[tbl]:last data];
@@ -568,10 +604,12 @@ upd:{[tbl;data]
 .tp.scan.fhLast:.tp.tables ! .tp.nTables#0Nj;
 .tp.scan.tpFirst:.tp.tables ! .tp.nTables#0Nj;
 .tp.scanUpd:{[t;d]
+  if[t = `trade_gap; if[(count d) = count cols trade_gap; .tp.noteGap d]; :()];
   if[not t in .tp.tables; :()];
   if[(count d) <> count cols value t; :()];
   .tp.scan.tpMax:.tp.scan.tpMax | last d;
   .tp.scan.fhLast[t]:d .tp.idx.fhSeqNo t;
+  if[t in key .tp.tradeIdCol; .tp.noteTradeId[t; d]];
   if[null .tp.scan.tpFirst t; .tp.scan.tpFirst[t]:last d];
  };
 .tp.scanLog:{[f]
@@ -736,6 +774,8 @@ upd:{[tbl;data]
   .tp.ctr.unregisteredRows:.tp.tables ! .tp.nTables#0j;
   .tp.ctr.schemaMismatch:.tp.tables ! .tp.nTables#0j;
   .tp.seq.firstTp:.tp.tables ! .tp.nTables#0Nj;
+  / Closed gaps belong to the day that ended; open ones stay until resolved.
+  .tp.gaps:select from .tp.gaps where status in .tp.openGapStatuses;
  };
 
 .tp.currentDate:.tp.today[];

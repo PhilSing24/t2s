@@ -73,6 +73,30 @@ void TradeFeedHandler::run() {
         return;
     }
 
+    // What did TP already log? Seeding the id tracker with the last trade id
+    // per symbol makes the first live trade comparable: whatever was traded
+    // while this handler was not running shows up as a gap, is recorded and
+    // backfilled. Open gaps from a previous run are picked up again.
+    {
+        t2s::TpPublisher::TradeState st = tp_->tradeState();
+        if (st.ok) {
+            for (const auto& kv : st.lastIds) {
+                idTracker_.seed(kv.first, kv.second);
+                seededSyms_.insert(kv.first);
+            }
+            for (const auto& g : st.openGaps) {
+                t2s::TradeGap gap;
+                gap.sym = g.sym; gap.firstId = g.firstId; gap.lastId = g.lastId;
+                gap.recovered = g.recovered; gap.recoveredThroughId = g.recoveredThroughId;
+                resumeGaps_.push_back(gap);
+            }
+            spdlog::info("TP trade state for {}: last logged id known for {} symbol(s), {} open gap(s) to resume",
+                         cfg_.tpTable, st.lastIds.size(), st.openGaps.size());
+        } else {
+            spdlog::warn("No trade state from TP for {}: a gap left by this handler's downtime cannot be detected", cfg_.tpTable);
+        }
+    }
+
     // Main loop with reconnection
     while (running_) {
         try {
@@ -166,11 +190,16 @@ void TradeFeedHandler::validateTradeId(const std::string& sym, long long tradeId
             gap.lastId = r.lastMissing;
             ++ctrExchGaps_;
             ctrExchMissed_ += gap.missing();
-            spdlog::warn("Gap: {} missed={} (last={} got={})", sym, gap.missing(), r.previous, tradeId);
-            recordGap(gap, t2s::GapStatus::Detected, "");
+            // The first live id after a seed from TP: the gap is what this
+            // handler's downtime left, not something lost while it ran.
+            const bool afterRestart = seededSyms_.count(sym) > 0;
+            spdlog::warn("Gap: {} missed={} (last={} got={}){}", sym, gap.missing(), r.previous, tradeId,
+                         afterRestart ? " - left by this handler's downtime" : "");
+            recordGap(gap, t2s::GapStatus::Detected, afterRestart ? "handlerRestart" : "");
             break;
         }
     }
+    seededSyms_.erase(sym);
 }
 
 void TradeFeedHandler::recordGap(const t2s::TradeGap& gap, t2s::GapStatus status, const std::string& reason) {

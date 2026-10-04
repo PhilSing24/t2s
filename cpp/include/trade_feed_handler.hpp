@@ -33,6 +33,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 #include <unordered_map>
 #include <atomic>
@@ -183,6 +184,10 @@ private:
 
     /// Last exchange trade id per symbol; classifies every incoming id
     t2s::TradeIdTracker idTracker_;
+    /// Symbols whose last id came from TP and has not been compared yet
+    std::unordered_set<std::string> seededSyms_;
+    /// Gaps a previous run left open (from TP's trade state), to resume
+    std::vector<t2s::TradeGap> resumeGaps_;
     /// trade_gap events waiting for TP's acknowledgement
     t2s::GapEventQueue gapEvents_;
     /// Queue a trade_gap event (one row per status change of a gap)
