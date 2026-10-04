@@ -284,7 +284,7 @@ private:
     void publishInvalid(int symIdx, long long fhRecvTimeUtcNs);
     
     /// Publish L5 quote to kdb+
-    void publishL5(const L5Quote& quote);
+    void publishQuote(const BookQuote& quote);
     
     /// Check publish timeouts for all symbols
     void checkPublishTimeouts(long long fhRecvTimeUtcNs);

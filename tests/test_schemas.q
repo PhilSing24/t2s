@@ -20,7 +20,21 @@
 / Column counts
 / -------------------------------------------------------
 .t.assertEq["trade has 12 base columns"; 12; count cols .schema.trade];
-.t.assertEq["quote has 28 base columns"; 28; count cols .schema.quote];
+.t.assertEq["quote depth comes from config/shared.json"; 5; .schema.depth];
+.t.assert["shared config was found inside the repo"; .schema.cfg.file like "*/config/shared.json"];
+.t.assertEq["symbols come from config/shared.json"; `BTCUSDT`ETHUSDT`SOLUSDT; .schema.symbols];
+.t.assertEq["quote has 8 + 4*depth base columns"; 8 + 4 * .schema.depth; count cols .schema.quote];
+.t.assertEq["quote at depth 5 keeps the layout it had before depth was configurable";
+  `time`sym`bidPrice1`bidPrice2`bidPrice3`bidPrice4`bidPrice5`bidQty1`bidQty2`bidQty3`bidQty4`bidQty5`askPrice1`askPrice2`askPrice3`askPrice4`askPrice5`askQty1`askQty2`askQty3`askQty4`askQty5`isValid`exchEventTimeMs`fhRecvTimeUtcNs`fhParseUs`fhSendUs`fhSeqNo;
+  cols .schema.mkQuote[5; `symbol$()]];
+.t.assertEq["quote at depth 3 has 20 columns"; 20; count cols .schema.mkQuote[3; `symbol$()]];
+.t.assertEq["quote at depth 3 column order";
+  `time`sym`bidPrice1`bidPrice2`bidPrice3`bidQty1`bidQty2`bidQty3`askPrice1`askPrice2`askPrice3`askQty1`askQty2`askQty3`isValid`exchEventTimeMs`fhRecvTimeUtcNs`fhParseUs`fhSendUs`fhSeqNo;
+  cols .schema.mkQuote[3; `symbol$()]];
+.t.assertEq["quote column types"; "psffffbjjjjj"; exec t from meta .schema.mkQuote[1; `symbol$()]];
+.t.assertEq["an extra long column goes after exchEventTimeMs";
+  `isValid`exchEventTimeMs`exchTransactTimeMs`fhRecvTimeUtcNs;
+  (cols .schema.mkQuote[2; enlist `exchTransactTimeMs]) 10 11 12 13];
 .t.assertEq["health has 10 columns"; 10; count cols .schema.health];
 
 / -------------------------------------------------------

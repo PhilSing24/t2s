@@ -1,9 +1,4 @@
 {
-    "symbols": [
-        "btcusdt",
-        "ethusdt",
-        "solusdt"
-    ],
     "market": {
         "host": "stream.binance.com",
         "port": "9443",

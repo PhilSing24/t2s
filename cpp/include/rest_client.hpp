@@ -84,10 +84,10 @@ public:
      *   futures: https://fapi.binance.com/fapi/v1/depth (same shape plus E and T)
      * 
      * @param symbol Symbol in uppercase (e.g., "BTCUSDT")
-     * @param limit Number of levels (default BOOK_DEPTH)
+     * @param limit Number of levels per side to request
      * @return SnapshotData with bids, asks, and lastUpdateId
      */
-    SnapshotData fetchSnapshot(const std::string& symbol, int limit = BOOK_DEPTH) {
+    SnapshotData fetchSnapshot(const std::string& symbol, int limit = 1000) {
         SnapshotData result;
         
         try {

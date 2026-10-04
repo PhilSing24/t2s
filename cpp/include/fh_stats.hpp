@@ -16,9 +16,7 @@
 #include <utility>
 #include <vector>
 
-extern "C" {
-#include "k.h"
-}
+#include "k_object.hpp"   // includes k.h and undefines its one-letter macros
 
 namespace t2s {
 

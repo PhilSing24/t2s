@@ -11,6 +11,7 @@
 #include "k_object.hpp"
 #include "json_reader.hpp"
 #include "fh_stats.hpp"
+#include "quote_row.hpp"
 
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
@@ -52,6 +53,7 @@ QuoteFeedHandler::QuoteFeedHandler(const std::vector<std::string>& symbols,
     BookConfig bookCfg;
     bookCfg.snapshotLimit = static_cast<std::size_t>(cfg_.snapshotLimit);
     bookCfg.sync = cfg_.sync;
+    bookCfg.depth = cfg_.depth;
     bookMgr_ = std::make_unique<OrderBookManager>(symbolsUpper_, bookCfg);
 
     // Per-symbol "latest request id" tracking, used to discard stale
@@ -153,7 +155,10 @@ std::string QuoteFeedHandler::buildDepthStreamPath() const {
 }
 
 int QuoteFeedHandler::registerSession(int h, long long nextFhSeqNo) {
-    const long long width = 28LL;   // feed-handler columns of the quote schema
+    // Feed-handler columns of the quote schema for our depth. TP compares it
+    // with its own schema (built from the same shared.json) and refuses us
+    // if they differ.
+    const long long width = t2s::quoteRowWidth(cfg_.depth, cfg_.publishTransactTime);
     K r = k(h, (S)".tp.registerSession",
             ks((S)cfg_.tpTable.c_str()), kj(sessionId_), kj(nextFhSeqNo), kj(width), (K)0);
     if (r == nullptr) {
@@ -644,119 +649,58 @@ void QuoteFeedHandler::maybePublish(int symIdx, long long fhRecvTimeUtcNs) {
     // (increment fhSeqNo, publish) if shouldPublish accepts it.
     // Bumping fhSeqNo unconditionally caused TP to see "gaps" whenever
     // shouldPublish filtered an unchanged L5.
-    L5Quote quote = bookMgr_->getL5(symIdx, fhRecvTimeUtcNs, fhSeqNo_ + 1);
+    BookQuote quote = bookMgr_->getQuote(symIdx, fhRecvTimeUtcNs, fhSeqNo_ + 1);
 
     if (bookMgr_->shouldPublish(symIdx, quote)) {
         ++fhSeqNo_;
         quote.fhSeqNo = fhSeqNo_;
-        publishL5(quote);
+        publishQuote(quote);
         bookMgr_->recordPublish(symIdx, quote);
     }
 }
 
 void QuoteFeedHandler::publishInvalid(int symIdx, long long fhRecvTimeUtcNs) {
     ++fhSeqNo_;
-    L5Quote quote;
+    BookQuote quote(cfg_.depth);
     quote.sym = bookMgr_->getSymbol(symIdx);
     quote.isValid = false;
     quote.fhRecvTimeUtcNs = fhRecvTimeUtcNs;
     quote.fhSeqNo = fhSeqNo_;
     // All price/qty fields default to 0.0
     
-    publishL5(quote);
+    publishQuote(quote);
     bookMgr_->recordPublish(symIdx, quote);
     
     spdlog::warn("Published INVALID for {}", quote.sym);
 }
 
-void QuoteFeedHandler::publishL5(const L5Quote& quote) {
-    // Start send timer
+void QuoteFeedHandler::publishQuote(const BookQuote& quote) {
+    // Row layout: see quote_row.hpp (generated from the configured depth,
+    // matching kdb/schemas.q). fhSendUs is the time spent building the row.
+    const bool withT = cfg_.publishTransactTime;
     auto sendStart = std::chrono::steady_clock::now();
-    
-    // Build kdb+ row matching quote_binance L5 schema
-    // FH sends 28 fields, TP adds tpRecvTimeUtcNs (29th)
-    // Schema: time, sym, bidPrice1..5, bidQty1..5, askPrice1..5, askQty1..5, 
-    //         isValid, exchEventTimeMs, fhRecvTimeUtcNs, fhParseUs, fhSendUs, fhSeqNo
-    
-    t2s::KOwned row(knk(28,
-        // time, sym
-        ktj(-KP, quote.fhRecvTimeUtcNs - KDB_EPOCH_OFFSET_NS),
-        ks((S)quote.sym.c_str()),
-        // Bid prices (5)
-        kf(quote.bidPrice1),
-        kf(quote.bidPrice2),
-        kf(quote.bidPrice3),
-        kf(quote.bidPrice4),
-        kf(quote.bidPrice5),
-        // Bid quantities (5)
-        kf(quote.bidQty1),
-        kf(quote.bidQty2),
-        kf(quote.bidQty3),
-        kf(quote.bidQty4),
-        kf(quote.bidQty5),
-        // Ask prices (5)
-        kf(quote.askPrice1),
-        kf(quote.askPrice2),
-        kf(quote.askPrice3),
-        kf(quote.askPrice4),
-        kf(quote.askPrice5),
-        // Ask quantities (5)
-        kf(quote.askQty1),
-        kf(quote.askQty2),
-        kf(quote.askQty3),
-        kf(quote.askQty4),
-        kf(quote.askQty5),
-        // Metadata
-        kb(quote.isValid),
-        kj(quote.exchEventTimeMs),
-        kj(quote.fhRecvTimeUtcNs),
-        kj(lastParseUs_),                              // fhParseUs
-        kj(0LL),                                       // fhSendUs placeholder
-        kj(quote.fhSeqNo)
-    ));
-    
-    // Capture send time and patch the placeholder via borrowed view.
+    t2s::KOwned row(t2s::buildQuoteRow(quote, lastParseUs_, 0LL, withT));
     auto sendEnd = std::chrono::steady_clock::now();
     long long fhSendUs = std::chrono::duration_cast<std::chrono::microseconds>(
         sendEnd - sendStart).count();
-    t2s::KBorrowed sendField(kK(row.get())[26]);
-    sendField.get()->j = fhSendUs;
-    
+    kK(row.get())[t2s::quoteSendUsIndex(cfg_.depth, withT)]->j = fhSendUs;
+
+    // Publish to TP (async)
     K result = k(-tpHandle_, (S)".u.upd", ks((S)cfg_.tpTable.c_str()), row.release(), (K)0);
-    
-    // Update health: message published
+
     lastPubTime_ = std::chrono::system_clock::now();
     ++msgsPublished_;
-    
-    // Check if TP connection died
+
     if (result == nullptr) {
         spdlog::error("TP connection lost, reconnecting...");
         connState_ = "reconnecting";
         kclose(tpHandle_);
         tpHandle_ = -1;
-        // Re-register announcing the row we are about to resend.
+        // Re-register announcing this row's fhSeqNo as the next one, then resend it
         if (connectToTP(quote.fhSeqNo)) {
-            // Build a fresh row for the resend - the original was consumed
-            // by the failed k() above.
-            t2s::KOwned row2(knk(28,
-                ktj(-KP, quote.fhRecvTimeUtcNs - KDB_EPOCH_OFFSET_NS),
-                ks((S)quote.sym.c_str()),
-                kf(quote.bidPrice1), kf(quote.bidPrice2), kf(quote.bidPrice3),
-                kf(quote.bidPrice4), kf(quote.bidPrice5),
-                kf(quote.bidQty1), kf(quote.bidQty2), kf(quote.bidQty3),
-                kf(quote.bidQty4), kf(quote.bidQty5),
-                kf(quote.askPrice1), kf(quote.askPrice2), kf(quote.askPrice3),
-                kf(quote.askPrice4), kf(quote.askPrice5),
-                kf(quote.askQty1), kf(quote.askQty2), kf(quote.askQty3),
-                kf(quote.askQty4), kf(quote.askQty5),
-                kb(quote.isValid),
-                kj(quote.exchEventTimeMs),
-                kj(quote.fhRecvTimeUtcNs),
-                kj(lastParseUs_),
-                kj(fhSendUs),
-                kj(quote.fhSeqNo)
-            ));
-            k(-tpHandle_, (S)".u.upd", ks((S)cfg_.tpTable.c_str()), row2.release(), (K)0);
+            K row2 = t2s::buildQuoteRow(quote, lastParseUs_, fhSendUs, withT);
+            k(-tpHandle_, (S)".u.upd", ks((S)cfg_.tpTable.c_str()), row2, (K)0);
+            connState_ = "connected";
         }
     }
 }
@@ -820,10 +764,10 @@ void QuoteFeedHandler::checkPublishTimeouts(long long fhRecvTimeUtcNs) {
     for (int symIdx : needsPublish) {
         // Heartbeats are for valid quotes only. A book whose known depth
         // is exhausted has already published its one invalid row.
-        L5Quote quote = bookMgr_->getL5(symIdx, fhRecvTimeUtcNs, fhSeqNo_ + 1);
+        BookQuote quote = bookMgr_->getQuote(symIdx, fhRecvTimeUtcNs, fhSeqNo_ + 1);
         if (!quote.isValid) continue;
         ++fhSeqNo_;
-        publishL5(quote);
+        publishQuote(quote);
         bookMgr_->recordPublish(symIdx, quote);
     }
 }

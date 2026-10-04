@@ -1,6 +1,6 @@
 /**
  * @file order_book_manager.hpp
- * @brief Full-depth local order books with snapshot reconciliation; publishes L5
+ * @brief Full-depth local order books with snapshot reconciliation; publishes the top N levels
  *
  * Each symbol keeps EVERY price level it knows, not just the published top
  * five, so deleting a top-of-book level promotes the next real level
@@ -50,8 +50,10 @@
 // CONFIGURATION
 // ============================================================================
 
-/// Number of price levels to maintain per side (L5)
-constexpr int BOOK_DEPTH = 5;
+/// Default number of price levels PUBLISHED per side. The real value comes
+/// from config/shared.json (quote_depth) through BookConfig::depth; the
+/// book itself always keeps every level it knows.
+constexpr int DEFAULT_BOOK_DEPTH = 5;
 
 /// Publish timeout in milliseconds (publish even if no change)
 constexpr int PUBLISH_TIMEOUT_MS = 50;
@@ -63,6 +65,7 @@ constexpr size_t MAX_DELTA_BUFFER_SIZE = 1000;
 
 /// Sizing of the local book (see the file comment for the horizon).
 struct BookConfig {
+    int         depth           = DEFAULT_BOOK_DEPTH;  ///< levels published per side
     std::size_t snapshotLimit   = 1000;  ///< levels per side requested from REST
     std::size_t refreshLowWater = 100;   ///< known levels below which a refresh is wanted
     std::size_t maxLevels       = 4000;  ///< cap on stored levels per side
@@ -104,43 +107,33 @@ struct PriceLevel {
 };
 
 /**
- * @brief L5 quote for kdb+ publication (22 price/qty fields + metadata)
+ * @brief Top-of-book quote for kdb+ publication: `depth` levels per side + metadata
+ *
+ * Index 0 is the best level. A slot the book has no level for is 0/0.
  */
-struct L5Quote {
+struct BookQuote {
     std::string sym;
-    
-    // Bids (best to worst: index 0 = best bid)
-    double bidPrice1 = 0.0, bidQty1 = 0.0;
-    double bidPrice2 = 0.0, bidQty2 = 0.0;
-    double bidPrice3 = 0.0, bidQty3 = 0.0;
-    double bidPrice4 = 0.0, bidQty4 = 0.0;
-    double bidPrice5 = 0.0, bidQty5 = 0.0;
-    
-    // Asks (best to worst: index 0 = best ask)
-    double askPrice1 = 0.0, askQty1 = 0.0;
-    double askPrice2 = 0.0, askQty2 = 0.0;
-    double askPrice3 = 0.0, askQty3 = 0.0;
-    double askPrice4 = 0.0, askQty4 = 0.0;
-    double askPrice5 = 0.0, askQty5 = 0.0;
-    
+
+    std::vector<double> bidPrices, bidQtys;   // best to worst
+    std::vector<double> askPrices, askQtys;
+
     bool isValid = false;
     long long exchEventTimeMs = 0;
     long long exchTransactTimeMs = 0;   // futures only (0 on spot)
     long long fhRecvTimeUtcNs = 0;
     long long fhSeqNo = 0;
-    
-    // Compare L5 for change detection (price and qty only)
-    bool samePricesAs(const L5Quote& other) const {
-        return bidPrice1 == other.bidPrice1 && bidQty1 == other.bidQty1 &&
-               bidPrice2 == other.bidPrice2 && bidQty2 == other.bidQty2 &&
-               bidPrice3 == other.bidPrice3 && bidQty3 == other.bidQty3 &&
-               bidPrice4 == other.bidPrice4 && bidQty4 == other.bidQty4 &&
-               bidPrice5 == other.bidPrice5 && bidQty5 == other.bidQty5 &&
-               askPrice1 == other.askPrice1 && askQty1 == other.askQty1 &&
-               askPrice2 == other.askPrice2 && askQty2 == other.askQty2 &&
-               askPrice3 == other.askPrice3 && askQty3 == other.askQty3 &&
-               askPrice4 == other.askPrice4 && askQty4 == other.askQty4 &&
-               askPrice5 == other.askPrice5 && askQty5 == other.askQty5;
+
+    BookQuote() : BookQuote(DEFAULT_BOOK_DEPTH) {}
+    explicit BookQuote(int depth)
+        : bidPrices(depth, 0.0), bidQtys(depth, 0.0),
+          askPrices(depth, 0.0), askQtys(depth, 0.0) {}
+
+    int depth() const { return static_cast<int>(bidPrices.size()); }
+
+    // Compare levels for change detection (price and qty only)
+    bool samePricesAs(const BookQuote& other) const {
+        return bidPrices == other.bidPrices && bidQtys == other.bidQtys &&
+               askPrices == other.askPrices && askQtys == other.askQtys;
     }
 };
 
@@ -251,7 +244,8 @@ public:
      *        guaranteed, so the quote is reported invalid.
      */
     bool depthExhausted(int idx) const {
-        return books_[idx].bid.below(BOOK_DEPTH) || books_[idx].ask.below(BOOK_DEPTH);
+        const std::size_t d = static_cast<std::size_t>(cfg_.depth);
+        return books_[idx].bid.below(d) || books_[idx].ask.below(d);
     }
 
     // ========================================================================
@@ -455,19 +449,22 @@ public:
     }
 
     // ========================================================================
-    // L5 EXTRACTION
+    // QUOTE EXTRACTION
     // ========================================================================
 
+    /// Number of levels published per side
+    int depth() const { return cfg_.depth; }
+
     /**
-     * @brief Extract L5 quote for publication
+     * @brief Extract the top `depth` levels for publication
      *
      * isValid is true only when the book is sequence-valid AND both sides
-     * can guarantee their top BOOK_DEPTH levels (see depthExhausted). An
-     * invalid quote carries no levels. Slots beyond the exchange's real
-     * depth (a genuinely thin book) are zero.
+     * can guarantee their top levels (see depthExhausted). An invalid
+     * quote carries no levels. Slots beyond the exchange's real depth (a
+     * genuinely thin book) are zero.
      */
-    L5Quote getL5(int idx, long long fhRecvTimeUtcNs, long long fhSeqNo) const {
-        L5Quote q;
+    BookQuote getQuote(int idx, long long fhRecvTimeUtcNs, long long fhSeqNo) const {
+        BookQuote q(cfg_.depth);
         q.sym = idxToSym_[idx];
         q.isValid = (states_[idx] == BookState::VALID) && !depthExhausted(idx);
         q.exchEventTimeMs = exchEventTimeMs_[idx];
@@ -478,21 +475,16 @@ public:
         if (states_[idx] != BookState::VALID && states_[idx] != BookState::SYNCING) return q;
         if (states_[idx] == BookState::VALID && !q.isValid) return q;
 
-        double* bp[BOOK_DEPTH] = {&q.bidPrice1, &q.bidPrice2, &q.bidPrice3, &q.bidPrice4, &q.bidPrice5};
-        double* bq[BOOK_DEPTH] = {&q.bidQty1, &q.bidQty2, &q.bidQty3, &q.bidQty4, &q.bidQty5};
-        double* ap[BOOK_DEPTH] = {&q.askPrice1, &q.askPrice2, &q.askPrice3, &q.askPrice4, &q.askPrice5};
-        double* aq[BOOK_DEPTH] = {&q.askQty1, &q.askQty2, &q.askQty3, &q.askQty4, &q.askQty5};
-
         const auto& bl = books_[idx].bid.levels;
         const auto& al = books_[idx].ask.levels;
-        for (int i = 0; i < BOOK_DEPTH; ++i) {
-            if (static_cast<std::size_t>(i) < bl.size()) {
+        for (std::size_t i = 0; i < static_cast<std::size_t>(cfg_.depth); ++i) {
+            if (i < bl.size()) {
                 const PriceLevel& l = bl[bl.size() - 1 - i];   // best is at the back
-                *bp[i] = l.price; *bq[i] = l.qty;
+                q.bidPrices[i] = l.price; q.bidQtys[i] = l.qty;
             }
-            if (static_cast<std::size_t>(i) < al.size()) {
+            if (i < al.size()) {
                 const PriceLevel& l = al[al.size() - 1 - i];
-                *ap[i] = l.price; *aq[i] = l.qty;
+                q.askPrices[i] = l.price; q.askQtys[i] = l.qty;
             }
         }
         return q;
@@ -503,7 +495,7 @@ public:
     // ========================================================================
 
     /// Should the current quote be published? (first, validity change, change, heartbeat)
-    bool shouldPublish(int idx, const L5Quote& current) {
+    bool shouldPublish(int idx, const BookQuote& current) {
         auto now = std::chrono::steady_clock::now();
 
         if (!hasPublished_[idx]) return true;
@@ -516,7 +508,7 @@ public:
         return elapsed >= PUBLISH_TIMEOUT_MS;
     }
 
-    void recordPublish(int idx, const L5Quote& quote) {
+    void recordPublish(int idx, const BookQuote& quote) {
         lastPublished_[idx] = quote;
         lastPublishTimes_[idx] = std::chrono::steady_clock::now();
         hasPublished_[idx] = true;
@@ -725,7 +717,7 @@ private:
     long long refreshFailures_ = 0;
     long long depthExhaustedEvents_ = 0;
 
-    std::vector<L5Quote> lastPublished_;
+    std::vector<BookQuote> lastPublished_;
     std::vector<std::chrono::steady_clock::time_point> lastPublishTimes_;
     std::vector<bool> hasPublished_;
 };

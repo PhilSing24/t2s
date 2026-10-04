@@ -99,6 +99,14 @@ if[not null .tp.clock.fixed;
 
 \l ../schemas.q
 
+/ Refuse to start if existing partitions / tmp dirs hold quote tables of a
+/ depth other than the configured one (see schemas.q). TP writes neither
+/ place; it checks so that a wrong depth stops the pipeline at its first
+/ process instead of after rows were logged. Same defaults as wdb.q.
+.tp.cfg.hdbDir:$[count v:getenv `T2S_HDB_DIR; v; "../hdb"];
+.tp.cfg.tmpDir:$[count v:getenv `T2S_TMP_DIR; v; "../"];
+.schema.requireDepth["TP"; .tp.cfg.hdbDir; .tp.cfg.tmpDir];
+
 trade_binance:.schema.extend[.schema.trade; `tpRecvTimeUtcNs`tpSeqNo];
 trade_binance_fut:.schema.extend[.schema.aggTrade; `tpRecvTimeUtcNs`tpSeqNo];
 quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo];
@@ -702,6 +710,7 @@ system "t 1000";   / EOD check every second
 -1"=======================================================";
 -1"Tables: ",(" " sv string .tp.tables)," health_feed_handler";
 -1"Schema: kdb/schemas.q; FH row widths ",.Q.s1[.tp.fhWidth];
+-1"Shared: ",.schema.cfg.file,"; quote depth ",string[.schema.depth],"; symbols ",(" " sv string .schema.symbols);
 -1"tpSeqNo: ",string[.tp.tpSeqNo]," reserved to ",string[.tp.seq.reserved]," in ",string .tp.cfg.seqFile;
 -1"Replay index: every ",string[.tp.cfg.indexEvery]," rows; disk free ",string[.tp.disk.freeMB]," MB (threshold ",string[.tp.cfg.minFreeMB]," MB)";
 -1"";

@@ -1,0 +1,8 @@
+{
+    "symbols": [
+        "btcusdt",
+        "ethusdt",
+        "solusdt"
+    ],
+    "quote_depth": 5
+}

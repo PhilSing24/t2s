@@ -62,6 +62,7 @@ bool buildMarketConfig(const FeedHandlerConfig& config, t2s::QuoteMarketConfig& 
     m.weightLimitPerMin = config.weightLimitPerMin;
     m.tpTable           = config.marketTpTable;
     m.healthName        = (m.sync == t2s::DepthSync::Futures) ? "quote_fh_fut" : "quote_fh";
+    m.depth             = config.quoteDepth;
     return true;
 }
 
@@ -103,6 +104,8 @@ int main(int argc, char* argv[]) {
         shutdownLogger();
         return 1;
     }
+    spdlog::info("Symbols and depth from {}: depth={} (row width {})", config.sharedConfigPath,
+                 market.depth, 4 * market.depth + 8 + (market.publishTransactTime ? 1 : 0));
     spdlog::info("Market: ws={}:{}{} suffix={} rest={}{} limit={} weight={}/{} per min table={}",
                  market.wsHost, market.wsPort, market.wsPathPrefix, market.streamSuffix,
                  market.restHost, market.restPath, market.snapshotLimit,

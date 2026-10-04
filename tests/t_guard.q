@@ -47,7 +47,7 @@ absolutize:{[cwd;p] canon $[(count p) and "/" = first p; p; raze (cwd; "/"; p)]}
 
 / Which variables to check, per process.
 pathVars:$[proc = `tp;
-  (".tp.cfg.logDir"; ".tp.logFile"; ".tp.cfg.seqFile"; ".tp.cfg.wdbCheckpointFile");
+  (".tp.cfg.logDir"; ".tp.logFile"; ".tp.cfg.seqFile"; ".tp.cfg.wdbCheckpointFile"; ".tp.cfg.hdbDir"; ".tp.cfg.tmpDir");
   (".wdb.cfg.hdbDir"; ".wdb.cfg.checkpointFile"; ".wdb.tmpDir"; ".wdb.tmpPath .wdb.today[]"; ".wdb.replay.tmpFile")];
 / Test-only clock overrides. Allowed ONLY in a sandboxed process: if one is
 / set, every path above must already have passed, which this guard

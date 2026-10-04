@@ -89,6 +89,8 @@ t2s_spawn_tp() {
             T2S_TP_LOG_DIR="$T2S_SB_TPLOGS" \
             T2S_TP_SEQ_FILE="$T2S_SB_TPSEQ" \
             T2S_WDB_CHECKPOINT="$T2S_SB_CHECKPOINT" \
+            T2S_HDB_DIR="$T2S_SB_HDB" \
+            T2S_TMP_DIR="$T2S_SB_TMP" \
             T2S_TP_MAX_SKEW_MS=0 \
             "$@" \
             q tp.q
