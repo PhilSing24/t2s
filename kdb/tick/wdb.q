@@ -203,9 +203,8 @@ quote_binance:.schema.extend[.schema.quote; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTime
 quote_binance_fut:.schema.extend[.schema.quoteFut; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeUtcNs];
 
 / Position of tpSeqNo in the incoming row, PER TABLE. The schemas have
-/ different widths (12, 14, 28 and 29 feed-handler columns at quote depth 5),
-/ so the index differs: 13 for trade_binance, 15 for trade_binance_fut, 29
-/ for quote_binance, 30 for quote_binance_fut. A
+/ different widths, so the index differs (e.g. 13 for trade_binance, 31
+/ for quote_binance at quote depth 5). It is derived from each schema. A
 / single index taken from the trade schema read askPrice2 for quotes and
 / fhSeqNo for futures and dropped live rows as duplicates once the
 / checkpoint was non-zero (found in the first live run of this code).

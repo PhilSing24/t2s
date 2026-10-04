@@ -92,23 +92,35 @@ if[0 = count .schema.symbols; .schema.cfg.die raze (.schema.cfg.file; ": symbols
   );
 
 / Quote feed handler output: the top .schema.depth levels of the book per
-/ side, plus flags and timing. The layout is GENERATED from the depth in
-/ config/shared.json (8 + 4*depth columns: 28 at depth 5):
+/ side, plus flags, exchange update ids and timing. The layout is GENERATED
+/ from the depth in config/shared.json (10 + 4*depth columns: 30 at depth 5):
 /   time, sym, bidPrice1..N, bidQty1..N, askPrice1..N, askQty1..N,
 /   isValid, exchEventTimeMs, <extra>, fhRecvTimeUtcNs, fhParseUs, fhSendUs, fhSeqNo
+/ Update ids (null on an invalid row). A row covers the exchange events
+/ applied since the previous published row of the same symbol:
+/   exchFirstUpdateId  U of the first of those events
+/   exchUpdateId       u of the last: the update id the book is at. A REST
+/                      depth snapshot with lastUpdateId = exchUpdateId shows
+/                      exactly this row's levels.
+/ A heartbeat row repeats the ids of the row before it. With these, sequence
+/ continuity can be verified from the stored rows alone
+/ (kdb/utils/check_quote_seq.q).
 / The C++ side builds its row from the same depth (cpp/include/quote_row.hpp).
 .schema.levelCols:{[n] raze {[n;p] `$p ,/: string 1 + til n}[n] each ("bidPrice"; "bidQty"; "askPrice"; "askQty")};
 .schema.mkQuote:{[n; extra]
   c:`time`sym, .schema.levelCols[n], `isValid`exchEventTimeMs, extra, `fhRecvTimeUtcNs`fhParseUs`fhSendUs`fhSeqNo;
   t:"ps", ((4 * n)#"f"), "bj", ((count extra)#"j"), "jjjj";
   flip c ! t $\: ()};
-.schema.quote:.schema.mkQuote[.schema.depth; `symbol$()];
+.schema.quote:.schema.mkQuote[.schema.depth; `exchFirstUpdateId`exchUpdateId];
 
-/ USD-M futures quote handler output: the same layout plus
-/ exchTransactTimeMs, the `T` (transaction time) of the futures depth event,
-/ right after exchEventTimeMs (`E`). Spot depth events have no `T`.
-/ 9 + 4*depth columns: 29 at depth 5.
-.schema.quoteFut:.schema.mkQuote[.schema.depth; enlist `exchTransactTimeMs];
+/ USD-M futures quote handler output: the same layout plus two fields only
+/ the futures depth event has (12 + 4*depth columns: 32 at depth 5):
+/   exchTransactTimeMs  `T`, transaction time, right after exchEventTimeMs (`E`)
+/   exchPrevUpdateId    `pu` of the first event of the row's range, i.e. the
+/                       `u` of the event before it. Futures ids are not
+/                       consecutive, so this is what chains one row to the
+/                       previous row's exchUpdateId.
+.schema.quoteFut:.schema.mkQuote[.schema.depth; `exchTransactTimeMs`exchFirstUpdateId`exchUpdateId`exchPrevUpdateId];
 
 / Tables holding quote rows; their depth is checked against existing data
 / at start-up (see .schema.requireDepth below).

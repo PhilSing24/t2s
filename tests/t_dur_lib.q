@@ -35,7 +35,7 @@
 .d.tables:`trade_binance`quote_binance`trade_binance_fut`quote_binance_fut;
 .d.side:.d.tables ! `trade`quote`aggTrade`quoteFut;
 .d.baseSchema:.d.tables ! (.schema.trade; .schema.quote; .schema.aggTrade; .schema.quoteFut);
-.d.width:.d.tables ! {[t] count cols .d.baseSchema t} each .d.tables;   / 12 28 14 29 at quote depth 5
+.d.width:.d.tables ! {[t] count cols .d.baseSchema t} each .d.tables;   / 12 30 14 32 at quote depth 5
 
 / ---------------------------------------------------------------------------
 / Synthetic rows. fhSeqNo must stay contiguous per side for the whole life of
@@ -69,14 +69,17 @@
    1.0; 0.9; 0.8; 0.7; 0.6;
    102.5+i*0.01; 103.0+i*0.01; 103.5+i*0.01; 104.0+i*0.01; 104.5+i*0.01;
    1.0; 0.9; 0.8; 0.7; 0.6;
-   1b; `long$1700000000000+i; "j"$ts; 10j; 15j; seq)};
+   1b; `long$1700000000000+i; 5000+10*i; 5009+10*i; "j"$ts; 10j; 15j; seq)};
 
 / Futures quote row: the quote row with exchTransactTimeMs inserted after
-/ exchEventTimeMs (29 feed-handler columns at depth 5).
+/ exchEventTimeMs and exchPrevUpdateId after exchUpdateId (32 feed-handler
+/ columns at depth 5).
 .d.mkQuoteFut:{[ts;i;seq]
   r:.d.mkQuote[ts;i;seq];
-  k:1 + (cols .schema.quoteFut)?`exchEventTimeMs;
-  (k # r), (enlist `long$1699999999990+i), k _ r};
+  k:1 + (cols .schema.quote)?`exchEventTimeMs;
+  r:(k # r), (enlist `long$1699999999990+i), k _ r;
+  k:1 + (cols .schema.quoteFut)?`exchUpdateId;
+  (k # r), (enlist 4999+10*i), k _ r};
 
 / Futures aggTrade row: 14 feed-handler columns (aggTradeId, firstTradeId,
 / lastTradeId between sym and price). fhSeqNo sits at index 13.

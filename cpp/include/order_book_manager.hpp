@@ -78,6 +78,8 @@ enum class SnapshotOutcome {
     AWAITING_BRIDGE,  ///< initial sync: snapshot applied, waiting for the bridging delta
     SYNC_FAILED,      ///< initial sync: buffered deltas do not bridge (snapshot too old)
     REFRESHED,        ///< background refresh swapped in; the book stayed VALID throughout
+    REFRESH_AWAITING_BRIDGE, ///< refresh snapshot is ahead of the stream: held as a shadow until
+                             ///< the bridging event arrives, then swapped in (counted then)
     REFRESH_FAILED,   ///< background refresh could not bridge; the live book is untouched
     IGNORED           ///< no snapshot was expected in this state
 };
@@ -122,6 +124,12 @@ struct BookQuote {
     long long exchTransactTimeMs = 0;   // futures only (0 on spot)
     long long fhRecvTimeUtcNs = 0;
     long long fhSeqNo = 0;
+
+    // Exchange update ids of the events applied since the previous
+    // published quote of this symbol (a heartbeat repeats the previous ids):
+    long long exchFirstUpdateId = 0;    // U of the first of those events
+    long long exchUpdateId = 0;         // u of the last: the id the book is at
+    long long exchPrevUpdateId = 0;     // futures only: pu of the first of those events
 
     BookQuote() : BookQuote(DEFAULT_BOOK_DEPTH) {}
     explicit BookQuote(int depth)
@@ -197,6 +205,10 @@ public:
         snapshotRequested_.resize(numSymbols_, false);
         refreshPending_.resize(numSymbols_, false);
         wasExhausted_.resize(numSymbols_, false);
+        shadows_.resize(numSymbols_);
+        rangeFirstU_.resize(numSymbols_, 0);
+        rangePrevU_.resize(numSymbols_, 0);
+        rangeClosed_.resize(numSymbols_, true);
 
         lastPublished_.resize(numSymbols_);
         lastPublishTimes_.resize(numSymbols_);
@@ -254,7 +266,7 @@ public:
 
     /// VALID book whose known depth is running low and no refresh is in flight.
     bool wantsRefresh(int idx) const {
-        return states_[idx] == BookState::VALID && !refreshPending_[idx] &&
+        return states_[idx] == BookState::VALID && !refreshPending_[idx] && !shadows_[idx].pending &&
                (books_[idx].bid.below(cfg_.refreshLowWater) ||
                 books_[idx].ask.below(cfg_.refreshLowWater));
     }
@@ -275,7 +287,7 @@ public:
         ++refreshFailures_;
     }
 
-    bool refreshPending(int idx) const { return refreshPending_[idx]; }
+    bool refreshPending(int idx) const { return refreshPending_[idx] || shadows_[idx].pending; }
 
     // -- counters (all symbols, since start) --------------------------------
     long long bufferOverflows() const { return bufferOverflows_; }
@@ -409,6 +421,13 @@ public:
         if (v == Verdict::APPLY) {
             applyLevels(books_[idx], bidUpdates, askUpdates);
             seq_[idx].lastId = finalUpdateId;
+            // Update-id range for the next published quote: opened by the
+            // first event applied after a publish, extended by later ones.
+            if (rangeClosed_[idx]) {
+                rangeFirstU_[idx] = firstUpdateId;
+                rangePrevU_[idx] = d.prevFinalUpdateId;
+                rangeClosed_[idx] = false;
+            }
             exchEventTimeMs_[idx] = eventTimeMs;
             exchTransactTimeMs_[idx] = d.transactTimeMs;
             states_[idx] = BookState::VALID;
@@ -421,6 +440,25 @@ public:
         // A refresh is in flight: keep a copy for the shadow book.
         if (refreshPending_[idx]) {
             bufferDelta(idx, d);
+        }
+        // A refresh snapshot ahead of the stream is waiting for its bridging
+        // event. Until then the live book stays on the stream's own chain, so
+        // the published update ids never jump to a snapshot id.
+        if (shadows_[idx].pending) {
+            Shadow& sh = shadows_[idx];
+            Verdict sv = checkSequence(sh.seq, d);
+            if (sv == Verdict::FAIL) {
+                sh = Shadow{};
+                ++refreshFailures_;
+            } else if (sv == Verdict::APPLY) {
+                applyLevels(sh.book, bidUpdates, askUpdates);
+                sh.seq.lastId = finalUpdateId;
+                books_[idx] = std::move(sh.book);     // now at the same update id as the live book
+                seq_[idx] = sh.seq;
+                sh = Shadow{};
+                wasExhausted_[idx] = depthExhausted(idx);
+                ++depthRefreshes_;
+            }
         }
         return true;
     }
@@ -436,6 +474,10 @@ public:
         snapshotRequested_[idx] = false;
         refreshPending_[idx] = false;
         wasExhausted_[idx] = false;
+        shadows_[idx] = Shadow{};
+        rangeFirstU_[idx] = 0;
+        rangePrevU_[idx] = 0;
+        rangeClosed_[idx] = true;
     }
 
     /// Reset all books (on reconnect)
@@ -471,6 +513,11 @@ public:
         q.exchTransactTimeMs = exchTransactTimeMs_[idx];
         q.fhRecvTimeUtcNs = fhRecvTimeUtcNs;
         q.fhSeqNo = fhSeqNo;
+        if (q.isValid) {
+            q.exchFirstUpdateId = rangeFirstU_[idx];
+            q.exchUpdateId = seq_[idx].lastId;
+            q.exchPrevUpdateId = (cfg_.sync == t2s::DepthSync::Futures) ? rangePrevU_[idx] : 0;
+        }
 
         if (states_[idx] != BookState::VALID && states_[idx] != BookState::SYNCING) return q;
         if (states_[idx] == BookState::VALID && !q.isValid) return q;
@@ -512,7 +559,11 @@ public:
         lastPublished_[idx] = quote;
         lastPublishTimes_[idx] = std::chrono::steady_clock::now();
         hasPublished_[idx] = true;
+        rangeClosed_[idx] = true;      // the next applied event opens a new id range
     }
+
+    /// Was the last quote published for this symbol a valid one?
+    bool lastPublishedValid(int idx) const { return hasPublished_[idx] && lastPublished_[idx].isValid; }
 
     /// Symbols whose last publish is older than the heartbeat timeout
     std::vector<int> getTimeoutPublishNeeded() {
@@ -684,8 +735,24 @@ private:
             return SnapshotOutcome::REFRESH_FAILED;
         }
 
-        // If no buffered delta bridged, the snapshot is ahead of the stream:
-        // sseq.needBridge stays set and the next live delta must bridge it.
+        // No buffered delta bridged: the snapshot is ahead of the stream. Hold
+        // it as a shadow; applyDelta() swaps it in when the bridging event
+        // arrives. The live book keeps following the stream meanwhile.
+        if (sseq.needBridge && lastUpdateId == seq_[idx].lastId) {
+            // The snapshot is exactly the state the live book is at: swap now
+            // and stay on the live chain.
+            books_[idx] = std::move(shadow);
+            wasExhausted_[idx] = depthExhausted(idx);
+            ++depthRefreshes_;
+            return SnapshotOutcome::REFRESHED;
+        }
+        if (sseq.needBridge) {
+            shadows_[idx].book = std::move(shadow);
+            shadows_[idx].seq = sseq;
+            shadows_[idx].pending = true;
+            return SnapshotOutcome::REFRESH_AWAITING_BRIDGE;
+        }
+
         books_[idx] = std::move(shadow);
         seq_[idx] = sseq;
         wasExhausted_[idx] = depthExhausted(idx);
@@ -711,6 +778,15 @@ private:
     std::vector<bool> snapshotRequested_;
     std::vector<bool> refreshPending_;
     std::vector<bool> wasExhausted_;
+
+    /// Refresh snapshot waiting for its bridging event (see applyDelta)
+    struct Shadow { Book book; Seq seq; bool pending = false; };
+    std::vector<Shadow> shadows_;
+
+    // Update-id range of the events applied since the last published quote
+    std::vector<long long> rangeFirstU_;   ///< U of the first event of the range
+    std::vector<long long> rangePrevU_;    ///< pu of that event (futures)
+    std::vector<bool> rangeClosed_;        ///< a quote was published since the last applied event
 
     long long bufferOverflows_ = 0;
     long long depthRefreshes_ = 0;

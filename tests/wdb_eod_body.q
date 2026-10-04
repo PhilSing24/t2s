@@ -70,6 +70,7 @@ mkQuote:{[i]
    1.0; 0.9; 0.8; 0.7; 0.6;
    1b;
    `long$1700000000000+i;
+   5000+10*i; 5009+10*i;          / exchFirstUpdateId, exchUpdateId
    `long$now+i*1000;
    `long$10+i;
    `long$15+i;

@@ -73,7 +73,7 @@ struct QuoteMarketConfig {
     DepthSync   sync         = DepthSync::Spot;
     // Published row layout
     int  depth               = 5;                  ///< levels per side (quote_depth in config/shared.json)
-    bool publishTransactTime = false;              ///< add exchTransactTimeMs (futures `T`) to the row
+    bool publishTransactTime = false;              ///< futures row layout: adds exchTransactTimeMs (`T`) and exchPrevUpdateId (`pu`)
 };
 
 /**

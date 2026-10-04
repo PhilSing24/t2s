@@ -3,8 +3,8 @@
 #
 # config/shared.json holds the symbols and quote_depth for all handlers and
 # for the q schemas. This test uses sandbox copies of it (T2S_SHARED_CONFIG):
-#   1. depth 3: TP builds a 20-column quote schema; a registration announcing
-#      28 columns is refused, 20 is accepted
+#   1. depth 3: TP builds a 22-column quote schema; a registration announcing
+#      30 columns (depth 5) is refused, 22 is accepted
 #   2. the real quote handler binary configured for depth 5 is refused by a
 #      depth-3 TP and exits with code 2 before touching the network
 #   3. an HDB partition written at depth 5: TP and WDB configured for depth 3
@@ -76,10 +76,10 @@ TP_PID=$(t2s_spawn_tp "$T2S_PORT_TP" "$TP_LOG" "T2S_SHARED_CONFIG=$D3")
 t2s_wait_port "$T2S_PORT_TP" 6 || { fail "TP did not start at depth 3"; cat "$TP_LOG"; exit 1; }
 t2s_guard tp "$T2S_PORT_TP" > /dev/null || { fail "TP guard"; exit 1; }
 [[ "$(qtp '.schema.depth')" == "3" ]] && pass "TP runs at depth 3" || fail "TP depth is $(qtp '.schema.depth')"
-[[ "$(qtp '.tp.fhWidth`quote_binance')" == "20" ]] && pass "quote row width is 20 (8 + 4*3)" || fail "quote width $(qtp '.tp.fhWidth`quote_binance')"
+[[ "$(qtp '.tp.fhWidth`quote_binance')" == "22" ]] && pass "quote row width is 22 (10 + 4*3)" || fail "quote width $(qtp '.tp.fhWidth`quote_binance')"
 [[ "$(qtp '.schema.symbols')" == '`BTCUSDT`ETHUSDT' ]] && pass "symbols come from the shared file" || fail "symbols $(qtp '.schema.symbols')"
-[[ "$(qtp '@[{.tp.registerSession[`quote_binance;1;1;28]}; 0; {x}]')" == *"width mismatch"* ]] && pass "a depth-5 width (28) is refused at registration" || fail "width 28 was not refused"
-[[ "$(qtp '.tp.registerSession[`quote_binance;1;1;20]')" == '`ok' ]] && pass "the depth-3 width (20) registers" || fail "width 20 did not register"
+[[ "$(qtp '@[{.tp.registerSession[`quote_binance;1;1;30]}; 0; {x}]')" == *"width mismatch"* ]] && pass "a depth-5 width (30) is refused at registration" || fail "width 30 was not refused"
+[[ "$(qtp '.tp.registerSession[`quote_binance;1;1;22]')" == '`ok' ]] && pass "the depth-3 width (22) registers" || fail "width 22 did not register"
 
 echo ""
 echo "=== 2. the real quote handler at depth 5 is refused by the depth-3 TP ==="
@@ -94,7 +94,7 @@ PYEOF
     rc=$?
     [[ $rc -eq 2 ]] && pass "handler exited with code 2" || { fail "handler exit code $rc (expected 2)"; tail -5 "$T2S_SANDBOX/qfh.log"; }
     grep -q "TP REJECTED session registration for quote_binance" "$T2S_SANDBOX/qfh.log" && pass "handler log names the rejection" || fail "handler log lacks the rejection"
-    grep -q "handler sends 28 columns, schema expects 20" "$T2S_SANDBOX/qfh.log" && pass "the message gives both widths" || fail "widths not in the message"
+    grep -q "handler sends 30 columns, schema expects 22" "$T2S_SANDBOX/qfh.log" && pass "the message gives both widths" || fail "widths not in the message"
     grep -q "Connecting to Binance" "$T2S_SANDBOX/qfh.log" && fail "handler reached the network" || pass "handler never connected to the exchange"
 else
     echo "  SKIP: build/quote_feed_handler not built"
@@ -190,11 +190,11 @@ CFGEOF
     ./build/quote_feed_handler_fut "$T2S_SANDBOX/cfg/quote_feed_handler.json" > "$T2S_SANDBOX/h.log" 2>&1 < /dev/null; rc=$?
     unset T2S_SHARED_CONFIG
     [[ $rc -eq 1 ]] && grep -q 'handles market.schema "futures_depth"' "$T2S_SANDBOX/h.log" && pass "futures binary refuses the spot config" || fail "futures binary with spot config rc=$rc"
-    # The futures binary announces the futures row width (29 at depth 5) to a depth-5 TP
+    # TP's expected widths for the two quote layouts at depth 5
     t2s_sandbox_reset; shared "$D5" 5
     TP_PID=$(t2s_spawn_tp "$T2S_PORT_TP" "$TP_LOG" "T2S_SHARED_CONFIG=$D5")
     t2s_wait_port "$T2S_PORT_TP" 6 || { fail "TP did not start"; exit 1; }
-    [[ "$(qtp '.tp.fhWidth`quote_binance`quote_binance_fut')" == "28 29" ]] && pass "TP expects 28 and 29 columns for the two quote tables" || fail "widths $(qtp '.tp.fhWidth`quote_binance`quote_binance_fut')"
+    [[ "$(qtp '.tp.fhWidth`quote_binance`quote_binance_fut')" == "30 32" ]] && pass "TP expects 30 and 32 columns for the two quote tables" || fail "widths $(qtp '.tp.fhWidth`quote_binance`quote_binance_fut')"
     stop_all
 else
     echo "  SKIP: quote handler binaries not built"

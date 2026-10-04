@@ -157,8 +157,8 @@ begin_scenario 1 "schemas.q loaded; wrong row width refused at registration and 
     tp -step register_bad -table trade_binance     -width 13
     tp -step register_bad -table quote_binance     -width 12
     tp -step register_bad -table trade_binance_fut -width 12
-    # a spot-layout quote row (28 columns) must not get into the futures quote table (29)
-    tp -step register_bad -table quote_binance_fut -width 28
+    # a spot-layout quote row (30 columns) must not get into the futures quote table (32)
+    tp -step register_bad -table quote_binance_fut -width 30
     tp -step tp_status -key rejectedRegistrations -value 4
     grep -q "REJECTED registration" "$TP_LOG" || fail "TP log lacks REJECTED registration line"
     tp -step publish_bad_width -table trade_binance -date "$TODAY"

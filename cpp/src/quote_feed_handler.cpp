@@ -237,6 +237,18 @@ void QuoteFeedHandler::runWebSocketLoop() {
     connState_ = "connecting";
     
     // Reset all books on reconnect
+    // A connection that was lost leaves a hole in every symbol's quotes:
+    // mark it with one invalid row per symbol whose last published row was
+    // valid, so the hole is visible in the stored data (and to
+    // kdb/utils/check_quote_seq.q) and not only in this handler's log.
+    if (tpHandle_ > 0) {
+        long long nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        for (int i = 0; i < bookMgr_->numSymbols(); ++i) {
+            if (bookMgr_->lastPublishedValid(i)) publishInvalid(i, nowNs);
+        }
+    }
+
     bookMgr_->resetAll();
     // Snapshots still in flight belong to the previous connection's update
     // id sequence: mark them stale so their results are discarded.
@@ -631,6 +643,13 @@ void QuoteFeedHandler::applySnapshotResults() {
                 spdlog::info("{} depth refreshed in the background (lastUpdateId={}, known levels {}/{})",
                              sym, r.data.lastUpdateId,
                              bookMgr_->knownLevels(symIdx, true), bookMgr_->knownLevels(symIdx, false));
+                break;
+            case SnapshotOutcome::REFRESH_AWAITING_BRIDGE:
+                // The snapshot is ahead of the stream; the book swaps it in
+                // when the bridging event arrives (counted as a refresh then).
+                snapshotScheduler_->onSynced(symIdx);
+                spdlog::debug("{} refresh snapshot (lastUpdateId={}) held until the stream reaches it",
+                              sym, r.data.lastUpdateId);
                 break;
             case SnapshotOutcome::REFRESH_FAILED:
                 snapshotScheduler_->onFailure(symIdx, nowMs);

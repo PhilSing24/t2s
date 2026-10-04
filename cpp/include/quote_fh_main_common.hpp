@@ -69,8 +69,9 @@ inline bool buildMarketConfig(const FeedHandlerConfig& config, t2s::QuoteMarketC
     m.tpTable           = config.marketTpTable;
     m.healthName        = (m.sync == t2s::DepthSync::Futures) ? "quote_fh_fut" : "quote_fh";
     m.depth             = config.quoteDepth;
-    // Futures depth events carry a transaction time T, stored in
-    // quote_binance_fut.exchTransactTimeMs; spot events have none.
+    // Futures depth events carry a transaction time T and a previous
+    // update id pu, stored in quote_binance_fut (exchTransactTimeMs,
+    // exchPrevUpdateId); spot events have neither.
     m.publishTransactTime = (m.sync == t2s::DepthSync::Futures);
     return true;
 }
@@ -113,7 +114,7 @@ inline int run(int argc, char* argv[], const char* defaultConfigPath, const char
         return 1;
     }
     spdlog::info("Symbols and depth from {}: depth={} (row width {})", config.sharedConfigPath,
-                 market.depth, 4 * market.depth + 8 + (market.publishTransactTime ? 1 : 0));
+                 market.depth, 4 * market.depth + 10 + (market.publishTransactTime ? 2 : 0));
     spdlog::info("Market: ws={}:{}{} suffix={} rest={}{} limit={} weight={}/{} per min table={}",
                  market.wsHost, market.wsPort, market.wsPathPrefix, market.streamSuffix,
                  market.restHost, market.restPath, market.snapshotLimit,

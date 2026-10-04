@@ -613,23 +613,35 @@ TEST_CASE("Known depth running low asks for a refresh; the refresh is seamless",
     REQUIRE(mgr.getQuote(0, 0, 0).bidPrices[1] == 84.0);
 }
 
-TEST_CASE("A refresh snapshot ahead of the stream is bridged by the next delta", "[ordrbook][refresh]") {
+TEST_CASE("A refresh snapshot ahead of the stream waits for its bridging delta", "[ordrbook][refresh]") {
     OrderBookManager mgr({"BTCUSDT"}, smallCfg());
     mgr.applySnapshot(0, 100, bidsN(100.0, 20), asksN(101.0, 20));
     REQUIRE(mgr.applyDelta(0, 101, 101, {}, {}, 0));
     mgr.beginRefresh(0);
     REQUIRE(mgr.applyDelta(0, 102, 102, {pl(100.0, 5.0)}, {}, 0));
 
-    // Snapshot at id 110: newer than every delta we have seen
-    REQUIRE(mgr.onSnapshot(0, 110, bidsN(99.0, 20), asksN(101.0, 20)) == SnapshotOutcome::REFRESHED);
+    // Snapshot at id 110: newer than every delta we have seen. It is held
+    // as a shadow; the live book stays on the stream.
+    REQUIRE(mgr.onSnapshot(0, 110, bidsN(99.0, 20), asksN(101.0, 20)) == SnapshotOutcome::REFRESH_AWAITING_BRIDGE);
     REQUIRE(mgr.isValid(0));
-    REQUIRE(mgr.getQuote(0, 0, 0).bidPrices[0] == 99.0);
+    REQUIRE(mgr.depthRefreshes() == 0);
+    REQUIRE(mgr.refreshPending(0));
+    REQUIRE_FALSE(mgr.wantsRefresh(0));
+    REQUIRE(mgr.getQuote(0, 0, 0).bidPrices[0] == 100.0);
+    REQUIRE(mgr.getQuote(0, 0, 0).exchUpdateId == 102);
 
-    REQUIRE(mgr.applyDelta(0, 103, 108, {pl(99.0, 0.0)}, {}, 0));   // older than the snapshot: skipped
-    REQUIRE(mgr.getQuote(0, 0, 0).bidPrices[0] == 99.0);
-    REQUIRE(mgr.applyDelta(0, 109, 112, {pl(99.0, 3.0)}, {}, 0));   // bridges 111
-    REQUIRE(mgr.getQuote(0, 0, 0).bidQtys[0] == 3.0);
-    REQUIRE_FALSE(mgr.applyDelta(0, 120, 121, {}, {}, 0));          // a real gap is still a gap
+    REQUIRE(mgr.applyDelta(0, 103, 108, {pl(100.0, 6.0)}, {}, 0));   // live applies it; older than the snapshot for the shadow
+    REQUIRE(mgr.getQuote(0, 0, 0).bidQtys[0] == 6.0);
+    REQUIRE(mgr.depthRefreshes() == 0);
+
+    REQUIRE(mgr.applyDelta(0, 109, 112, {pl(99.0, 3.0)}, {}, 0));    // bridges 111: shadow swapped in
+    REQUIRE(mgr.depthRefreshes() == 1);
+    REQUIRE_FALSE(mgr.refreshPending(0));
+    BookQuote q = mgr.getQuote(0, 0, 0);
+    REQUIRE(q.bidPrices[0] == 99.0);                                 // the snapshot's book (100 was gone by id 110)
+    REQUIRE(q.bidQtys[0] == 3.0);
+    REQUIRE(q.exchUpdateId == 112);
+    REQUIRE_FALSE(mgr.applyDelta(0, 120, 121, {}, {}, 0));           // a real gap is still a gap
     REQUIRE(mgr.getState(0) == BookState::INVALID);
 }
 
@@ -754,6 +766,7 @@ TEST_CASE("Randomised market: a valid L5 always equals the exchange's top five",
         bool pending = false; int deliverIn = 0; long long snapId = 0;
         std::vector<PriceLevel> pb, pa;
         long long validRows = 0, invalidRows = 0, deletes = 0, refreshes = 0;
+        long long prevQuoteU = 0; bool havePrev = false;
 
         for (int step = 0; step < 20000; ++step) {
             // One event: a handful of level changes near the touch, with drift
@@ -781,7 +794,8 @@ TEST_CASE("Randomised market: a valid L5 always equals the exchange's top five",
             REQUIRE(mgr.applyDelta(0, ev));
 
             if (pending && --deliverIn <= 0) {
-                REQUIRE(mgr.onSnapshot(0, snapId, pb, pa) == SnapshotOutcome::REFRESHED);
+                SnapshotOutcome o = mgr.onSnapshot(0, snapId, pb, pa);
+                REQUIRE((o == SnapshotOutcome::REFRESHED || o == SnapshotOutcome::REFRESH_AWAITING_BRIDGE));
                 pending = false; ++refreshes;
             }
             if (!pending && mgr.wantsRefresh(0)) {
@@ -791,8 +805,22 @@ TEST_CASE("Randomised market: a valid L5 always equals the exchange's top five",
             }
 
             BookQuote q = mgr.getQuote(0, 0, 0);
-            if (!q.isValid) { ++invalidRows; continue; }
+            if (!q.isValid) { ++invalidRows; havePrev = false; continue; }
             ++validRows;
+            // Every step publishes: the stored ids must chain exactly as the
+            // continuity tool (kdb/utils/check_quote_seq.q) will require.
+            REQUIRE(q.exchUpdateId == id);
+            if (havePrev) {
+                if (fut) {
+                    REQUIRE((q.exchPrevUpdateId == prevQuoteU ||
+                             (q.exchFirstUpdateId <= prevQuoteU && prevQuoteU <= q.exchUpdateId)));
+                } else {
+                    REQUIRE(q.exchFirstUpdateId <= prevQuoteU + 1);
+                    REQUIRE(q.exchUpdateId >= prevQuoteU);
+                }
+            }
+            mgr.recordPublish(0, q);
+            prevQuoteU = q.exchUpdateId; havePrev = true;
             double bp[5] = {q.bidPrices[0], q.bidPrices[1], q.bidPrices[2], q.bidPrices[3], q.bidPrices[4]};
             double bq[5] = {q.bidQtys[0], q.bidQtys[1], q.bidQtys[2], q.bidQtys[3], q.bidQtys[4]};
             double ap[5] = {q.askPrices[0], q.askPrices[1], q.askPrices[2], q.askPrices[3], q.askPrices[4]};
@@ -964,16 +992,20 @@ TEST_CASE("Futures: background refresh bridges with the futures rule", "[ordrboo
     REQUIRE(mgr.applyDelta(0, fev(1800, 1801, 1610)));            // chain continues from the live stream
     REQUIRE_FALSE(mgr.applyDelta(0, fev(2000, 2001, 1900)));      // and still detects a gap
 
-    // Refresh snapshot ahead of the stream: the next live event must bridge it
+    // Refresh snapshot ahead of the stream: held until an event bridges it
     OrderBookManager m2({"BTCUSDT"}, futSmallCfg());
     m2.applySnapshot(0, 1000, bidsN(100.0, 20), asksN(101.0, 20));
     REQUIRE(m2.applyDelta(0, fev(990, 1010, 985)));
     m2.beginRefresh(0);
     REQUIRE(m2.applyDelta(0, fev(1100, 1110, 1010)));
-    REQUIRE(m2.onSnapshot(0, 1300, bidsN(99.0, 20), asksN(101.0, 20)) == SnapshotOutcome::REFRESHED);
-    REQUIRE(m2.applyDelta(0, fev(1200, 1250, 1110, {pl(99.0, 0.0)})));   // before the snapshot: dropped
+    REQUIRE(m2.onSnapshot(0, 1300, bidsN(99.0, 20), asksN(101.0, 20)) == SnapshotOutcome::REFRESH_AWAITING_BRIDGE);
+    REQUIRE(m2.getQuote(0, 0, 0).bidPrices[0] == 100.0);                 // live book untouched
+    REQUIRE(m2.applyDelta(0, fev(1200, 1250, 1110, {pl(100.0, 8.0)})));  // before the snapshot: live only
+    REQUIRE(m2.getQuote(0, 0, 0).bidQtys[0] == 8.0);
+    REQUIRE(m2.depthRefreshes() == 0);
+    REQUIRE(m2.applyDelta(0, fev(1290, 1310, 1250, {pl(99.0, 5.0)})));   // straddles 1300: swap
+    REQUIRE(m2.depthRefreshes() == 1);
     REQUIRE(m2.getQuote(0, 0, 0).bidPrices[0] == 99.0);
-    REQUIRE(m2.applyDelta(0, fev(1290, 1310, 1250, {pl(99.0, 5.0)})));   // straddles 1300
     REQUIRE(m2.getQuote(0, 0, 0).bidQtys[0] == 5.0);
     REQUIRE(m2.applyDelta(0, fev(1400, 1401, 1310)));
 }
@@ -1013,4 +1045,81 @@ TEST_CASE("Depth exhaustion is judged against the configured depth", "[ordrbook]
     REQUIRE(mgr.applyDelta(0, 103, 103, {pl(84.0, 0.0), pl(83.0, 0.0)}, {}, 0));   // 2 left
     REQUIRE(mgr.depthExhausted(0));
     REQUIRE_FALSE(mgr.getQuote(0, 0, 0).isValid);
+}
+
+// ============================================================================
+// Exchange update ids carried by the published quote
+// ============================================================================
+
+TEST_CASE("Spot quote carries the id range of the events since the last publish", "[ordrbook][ids]") {
+    OrderBookManager mgr({"BTCUSDT"});
+    mgr.bufferDelta(0, BufferedDelta{95, 99, 0, {}, {}});          // stale
+    mgr.bufferDelta(0, BufferedDelta{100, 102, 0, {}, {}});        // bridges 101
+    mgr.bufferDelta(0, BufferedDelta{103, 104, 0, {}, {}});
+    REQUIRE(mgr.onSnapshot(0, 100, bidsN(100.0, 10), asksN(101.0, 10)) == SnapshotOutcome::SYNCED);
+
+    BookQuote q1 = mgr.getQuote(0, 0, 1);
+    REQUIRE(q1.exchFirstUpdateId == 100);       // U of the bridging event, not of the stale one
+    REQUIRE(q1.exchUpdateId == 104);
+    REQUIRE(q1.exchPrevUpdateId == 0);          // spot has no pu
+    mgr.recordPublish(0, q1);
+
+    // Heartbeat: nothing applied since the publish, ids repeat
+    BookQuote hb = mgr.getQuote(0, 0, 2);
+    REQUIRE(hb.exchFirstUpdateId == 100);
+    REQUIRE(hb.exchUpdateId == 104);
+    mgr.recordPublish(0, hb);
+
+    // Three events before the next publish: the range covers all three
+    REQUIRE(mgr.applyDelta(0, 105, 106, {}, {}, 0));
+    REQUIRE(mgr.applyDelta(0, 107, 107, {}, {}, 0));
+    REQUIRE(mgr.applyDelta(0, 108, 111, {pl(100.0, 9.0)}, {}, 0));
+    BookQuote q2 = mgr.getQuote(0, 0, 3);
+    REQUIRE(q2.exchFirstUpdateId == 105);       // == previous exchUpdateId + 1
+    REQUIRE(q2.exchUpdateId == 111);
+    mgr.recordPublish(0, q2);
+
+    // A stale event (skipped) does not open a range
+    REQUIRE(mgr.applyDelta(0, 104, 110, {}, {}, 0));
+    BookQuote q3 = mgr.getQuote(0, 0, 4);
+    REQUIRE(q3.exchFirstUpdateId == 105);
+    REQUIRE(q3.exchUpdateId == 111);
+
+    // An invalid quote carries no ids
+    REQUIRE_FALSE(mgr.applyDelta(0, 200, 201, {}, {}, 0));
+    BookQuote bad = mgr.getQuote(0, 0, 5);
+    REQUIRE_FALSE(bad.isValid);
+    REQUIRE(bad.exchFirstUpdateId == 0);
+    REQUIRE(bad.exchUpdateId == 0);
+}
+
+TEST_CASE("Futures quote carries U, u and the pu of the first event of the range", "[ordrbook][ids][futures]") {
+    OrderBookManager mgr({"BTCUSDT"}, futCfg());
+    mgr.applySnapshot(0, 1000, bidsN(100.0, 10), asksN(101.0, 10));
+    REQUIRE(mgr.applyDelta(0, fev(990, 1010, 985)));
+    BookQuote q1 = mgr.getQuote(0, 0, 1);
+    REQUIRE(q1.exchFirstUpdateId == 990);
+    REQUIRE(q1.exchUpdateId == 1010);
+    REQUIRE(q1.exchPrevUpdateId == 985);
+    mgr.recordPublish(0, q1);
+
+    REQUIRE(mgr.applyDelta(0, fev(1500, 1520, 1010)));
+    REQUIRE(mgr.applyDelta(0, fev(2900, 2901, 1520)));
+    BookQuote q2 = mgr.getQuote(0, 0, 2);
+    REQUIRE(q2.exchPrevUpdateId == 1010);       // == previous exchUpdateId: the chain a reader can verify
+    REQUIRE(q2.exchFirstUpdateId == 1500);
+    REQUIRE(q2.exchUpdateId == 2901);
+}
+
+TEST_CASE("lastPublishedValid tells whether a hole needs marking", "[ordrbook][ids]") {
+    OrderBookManager mgr({"BTCUSDT", "ETHUSDT"});
+    REQUIRE_FALSE(mgr.lastPublishedValid(0));
+    mgr.applySnapshot(0, 100, bidsN(100.0, 10), asksN(101.0, 10));
+    REQUIRE(mgr.applyDelta(0, 101, 101, {}, {}, 0));
+    mgr.recordPublish(0, mgr.getQuote(0, 0, 1));
+    REQUIRE(mgr.lastPublishedValid(0));
+    REQUIRE_FALSE(mgr.lastPublishedValid(1));
+    BookQuote inv(5); inv.sym = "BTCUSDT";
+    mgr.recordPublish(0, inv);
+    REQUIRE_FALSE(mgr.lastPublishedValid(0));
 }
