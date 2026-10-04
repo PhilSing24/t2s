@@ -234,6 +234,8 @@ Paths and ports can also be set per process through environment variables, which
 | `T2S_TP_SEQ_FILE`    | TP      | `$T2S_TP_LOG_DIR/tp.tpSeqNo` | tpSeqNo reservation file (see below)     |
 | `T2S_TP_MIN_FREE_MB` | TP      | `5120`                      | `.health[]` degrades when the log dir's filesystem has less free space |
 | `T2S_SHARED_CONFIG`  | all     | `config/shared.json`        | Symbols and quote depth. Handlers look next to their own config file; q walks up from the script (or current) directory |
+| `T2S_ALERT_WINDOW_SEC` | TP, WDB | `3600` | How long a problem stays flagged in `.health[]` and `status.sh` |
+| `T2S_TP_SESSION_FILE` | TP | `$T2S_TP_LOG_DIR/tp.sessions` | Session, trade-id and open-gap state carried across TP restarts |
 | `T2S_LOG_RETENTION_DAYS`, `T2S_LOG_PROTECTED` | logmgr | `7`, unset (no protected dates) | Retention policy inputs (see below) |
 | `T2S_WDB_MAXROWS`, `T2S_WDB_ROLL_GRACE_SEC`, `T2S_WDB_ROLL_FALLBACK_SEC`, `T2S_WDB_REPLAY_DELAY_MS`, `T2S_TP_INDEX_EVERY`, `T2S_TP_FAKE_DATE`, `T2S_WDB_FAKE_DATE` | both | unset | Test hooks only. The fake dates fix the process clock; `start.sh` refuses to run with either set, and the test guard only allows them inside `tests/sandbox`. |
 
@@ -259,7 +261,7 @@ To change the depth: stop the pipeline, let the day roll or move `tmp.<date>` aw
 - *Snapshots can never storm.* Every snapshot request goes through `SnapshotScheduler`: exponential backoff per symbol after a failure (1 s doubling to 60 s, with jitter), a budget of 10% of the exchange's request-weight limit shared by all symbols (twelve depth-1000 snapshots a minute on either market), and a pause of all requests on HTTP 429 or 418 for the server's `Retry-After` (at least 60 s and 300 s), or for 60 s when the used-weight header reaches half the limit.
 - *Bounded buffer.* While a book waits for its snapshot, deltas are buffered up to 1000 per symbol; on overflow the oldest is dropped and counted. A snapshot that then cannot bridge to the remaining deltas is rejected by the sync rule and retried under backoff.
 - *Full-depth book.* The book keeps every level it knows, so deleting a top level promotes the next real one instead of leaving an empty slot. A snapshot returns at most 1000 levels per side; its worst price is the side's *horizon*, and levels beyond it are unknown until they change. When fewer than 100 known levels remain on a side, the handler fetches a new snapshot in the background and swaps it in without publishing an invalid row. If a side ever has fewer known levels than the published depth, the quote is invalid rather than possibly wrong.
-- *Counters.* Each handler reports its counters to TP every 5 s (`.tp.fhStatus[]`, `fhStats` in `.health[]`, one `FH` line per table in `./status.sh`): `bookGaps`, `resyncs`, `snapshotRequests`, `snapshotFailures`, `rateLimitPauses`, `bufferOverflows`, `depthRefreshes`, `refreshFailures`, `depthExhausted`, `wsReconnects` for the quote handlers; `exchGaps`, `exchMissed`, `exchOutOfOrder`, `exchDuplicates`, `wsReconnects` for the trade handlers. They are cumulative since the handler started. `quote_binance_fut` also stores `exchTransactTimeMs`, the futures event's transaction time `T`.
+- *Counters.* Each handler reports its counters to TP every 5 s (`.tp.fhStatus[]`, `fhStats` in `.health[]`, one `FH` line per table in `./status.sh`): `bookGaps`, `resyncs`, `snapshotRequests`, `snapshotFailures`, `rateLimitPauses`, `bufferOverflows`, `depthRefreshes`, `refreshFailures`, `depthExhausted`, `wsReconnects` for the quote handlers; `exchGaps`, `exchMissed`, `exchOutOfOrder`, `exchDuplicates`, `wsReconnects` for the trade handlers. They are cumulative since the handler started; `status.sh` raises attention on their recent increase, not on the totals. `quote_binance_fut` also stores `exchTransactTimeMs`, the futures event's transaction time `T`.
 
 **Exchange update ids.** Every valid quote row stores the range of exchange depth events applied since the previous published row of its symbol: `exchFirstUpdateId` (`U` of the first event), `exchUpdateId` (`u` of the last, the update id the book is at) and, on futures, `exchPrevUpdateId` (`pu` of the first event). A heartbeat row repeats the previous ids; an invalid row has nulls. Two uses:
 
@@ -283,6 +285,43 @@ The tool adds each missing column as a file of typed nulls and rewrites the tabl
 
 **tpSeqNo is monotonic and durable.** TP stamps every row with a sequence number that never goes backwards: across TP restarts, across midnight, and whether or not today's log exists. It keeps a small reservation file, `tp.tpSeqNo` in the log directory, and hands out a number only after a reservation covering it has been written atomically, so a crash can skip up to 10,000 numbers but never reuse one. On the first start without that file TP seeds the counter from the newest log in the log directory, whatever its date, and warns if the seed would be below WDB's persisted checkpoint. **Log retention must never delete `tp.tpSeqNo`.** If TP ever hands out a number below WDB's checkpoint anyway, WDB halts with `status=error` and writes nothing until an operator intervenes.
 
+**No silent loss.** Every way a row can go missing is either repaired or recorded in the data.
+
+| Where rows can be lost | What happens |
+|---|---|
+| Handler to TP (TP restart, dropped connection) | Each handler keeps its last 4096 published rows. On reconnect TP replies with the last `fhSeqNo` it has logged for the session and the handler resends everything after it. `missed` stays 0. If the ring were ever too short, the rows it could not resend arrive as a jump and TP counts them as `missed`. |
+| TP to WDB | WDB replays from TP's logs from its checkpoint (see below). |
+| Exchange to trade handler (reconnect, handler crash or restart) | Binance numbers trades per symbol without holes. A jump in the id is recorded in `trade_gap` and the missing trades are fetched over REST and published. A restarted handler first asks TP for the last id it logged per symbol (`.tp.tradeState`), so the trades its downtime left are covered too. |
+| Exchange to quote handler | A book cannot be backfilled. The hole is marked by one invalid row per symbol, and `check_quote_seq.q` proves from the stored update ids that there is no unmarked break. |
+
+*`trade_gap`.* One row per status change of a gap: `time`, `sym`, `srcTable` (`trade_binance` or `trade_binance_fut`), `firstMissingId`, `lastMissingId`, `missing`, `status`, `recovered`, `recoveredThroughId`, `reason`. The status goes `detected`, then `partial` after each backfilled page, then `recovered`, or `unrecoverable` with a reason. The current state of every gap is its latest row:
+
+```q
+select by srcTable, sym, firstMissingId from trade_gap where date = 2026.10.04     / or .schema.gapLatest
+```
+
+`reason` on a `detected` row is `handlerRestart` when the gap is what a handler's downtime left. On an `unrecoverable` row it is one of:
+
+| Reason | Meaning |
+|---|---|
+| `tooLarge` | more missing ids than `backfill.max_gap_ids` in the handler's config (default 500,000). Larger holes can be filled later from the Binance daily archive with the loaders in `kdb/utils/` |
+| `tooOld` | futures only: the endpoint serves the past two days |
+| `notServed` | the exchange no longer returns these ids |
+| `restFailed` | the request kept failing (10 attempts with backoff) |
+| `backfillDisabled` | the handler's config has no `backfill` block |
+
+*Backfilled rows.* Spot trades come from `GET /api/v3/historicalTrades`, futures aggTrades from `GET /fapi/v1/aggTrades`, both by id and without an API key. A backfilled row is an ordinary row of its table, with two things to know:
+
+- `exchEventTimeMs` is null, because REST does not return the event time. That null is the marker: `select from trade_binance where null exchEventTimeMs` lists the backfilled trades.
+- `time` is the handler's receive time, as for every row, so here it is the moment the REST reply arrived, and it decides the partition. The trade's own time is `exchTradeTimeMs`. Analytics that need trades in trade order should sort on `exchTradeTimeMs` or the trade id, not on `time`. `fhParseUs` and `fhSendUs` are 0.
+
+Requests use the same scheduler as the quote snapshots: a tenth of the exchange's weight limit, backoff after a failure, a pause on HTTP 429 or 418. TP derives each gap's progress from the backfilled rows it logs, so a handler that dies mid-backfill resumes exactly where the log ends, with no id fetched or published twice.
+
+*Files next to the TP logs.* `tp.tpSeqNo` (the tpSeqNo reservation) and `tp.sessions` (session id and last `fhSeqNo` per table, last trade id per symbol, open gaps). Neither is ever a retention candidate; do not delete them.
+
+*Recent problems, not old totals.* `.health[]` and `./status.sh` flag what is wrong now (a process down, WDB halted, disk, clock, a handler that stopped reporting, a trade gap open for more than ten minutes) and what went wrong within the last `T2S_ALERT_WINDOW_SEC` seconds (default 3600). Counters since start are still printed, as totals. `./status.sh` shows a `GAPS` line and a `RECENT` line; `.tp.incidents[]` lists the recent incidents.
+
+
 **Feed handler sessions.** Every handler connection starts with a synchronous `.tp.registerSession[table; sessionId; nextFhSeqNo; rowWidth]` call. The session id is the handler's start time, so a new id is a restart and the same id on a new connection is a reconnect; TP logs and counts both, and counts the rows missed in between as `missed`. The row width is checked against `kdb/schemas.q` at registration: a mismatched binary is refused and exits with the reason in its own log. TP never drops a row on a guess: a backward fhSeqNo inside a session is accepted and counted as `outOfOrder`, rows from an unregistered publisher are accepted and counted, and rows with the wrong width are rejected and counted as `schemaMismatch`. See `.health[]` and `.tp.status[]`.
 
 **Partition date.** WDB routes every row to the HDB partition for the date of its own `time` column, which is the feed handler's UTC receive timestamp, for all three tables. Rows are never assigned a date by when an end-of-day message arrived, and WDB rolls on its own clock, so a missed or late end-of-day cannot mix two days into one partition. Trade-off: Binance's archive files are split by exchange time, so a live partition and an archive day differ by the handful of rows whose exchange timestamp falls on one side of midnight and whose receive timestamp falls on the other. Comparing the two needs those few rows from the neighbouring partition.
@@ -304,6 +343,10 @@ The runner discovers `tests/test_*.q`, `tests/test_*.sh`, and any compiled binar
 - **`test_depth_config.sh`** — the shared symbols/depth config: depth 3 end to end (schema, widths, registration, the real quote handler refused with exit code 2), TP and WDB refusing to start over partitions or tmp dirs of another depth, bad shared configs, each quote binary refusing the other market's config.
 - **`test_hdb_migrate.sh`** — the layout guard and `hdb_migrate.q` on an old-layout sandbox HDB: refusal to start, dry run, byte-identical old files after `-apply`, null columns, HDB-wide queries, and what the tool refuses.
 - **`test_quote_seq.sh`** — `check_quote_seq.q` on synthetic partitions: clean chains on both markets, marked and unmarked breaks with their times, rows without ids.
+- **`test_resend.sh`** — `build/sim_trade_publisher` (synthetic trades through the handlers' own `TpPublisher`) with TP killed by `kill -9` and by SIGTERM mid-stream: `missed` stays 0 and the logged `fhSeqNo` is exactly 1..N; with a ring of one row, what cannot be resent equals TP's `missed`.
+- **`test_trade_gap.sh`** — trade-id gaps: recorded in `trade_gap`, kept while TP is down, detected across a handler restart (also with TP killed, and on a new day), backfilled from a fake exchange with every missing id on disk exactly once, the unrecoverable reasons, and a handler killed mid-backfill resuming without duplicates.
+- **`test_recent_status.sh`** — problems are flagged while within the alert window and clear afterwards, while totals remain.
+- **`build/test_resend_ring`**, **`build/test_trade_gap`**, **`build/test_trade_backfill`** — C++ unit tests (Catch2) for the resend ring, gap detection and the gap row, and the backfill with a fake fetcher (paging, rate budget, failures, every unrecoverable reason, resume, the REST reply parsers).
 - **`test_smoke.sh`** — starts each q process (tp, wdb) in isolation against test ports, asserts `.health[]` returns a sane response. Catches load-time errors and missing `.health[]` interface.
 - **`test_wdb_eod.sh`** — full TP→WDB integration test: publishes synthetic data, forces EOD, verifies a partition lands in the sandbox HDB with correct row counts. Validates the EOD persistence path end-to-end.
 - **`build/test_order_book`** — C++ unit tests (Catch2) for `OrderBookManager`: state machine (INIT→SYNCING→VALID→INVALID), full-depth storage, horizon and background refresh, spot and USD-M futures sync rules, configurable depth, delta semantics (insert/update/delete via qty=0), sequence-gap detection, multi-symbol independence, and Binance-spec compliance for overlapping deltas, boundary cases, and entirely-stale events.
@@ -449,7 +492,7 @@ The ML pipeline (`kdb/ml/`) is actively developed and APIs may change. The live 
 
 C++ unit tests cover `OrderBookManager` (both sync rules, depth, horizon, refresh, a randomised market), `SnapshotScheduler`, `SnapshotWorker`, `JsonReader`, the quote row, plus narrower units of the trade FH path: `buildTradeRow` (both schemas), `buildStreamPath`, and futures aggTrade parsing. The end-to-end FH classes themselves are still exercised via the live pipeline rather than in isolated tests. Trade output was end-to-end validated against the Binance Vision archive on 2026-05-09 (1,002,373 BTCUSDT trades, byte-identical modulo µs/ms timestamp resolution — Binance Vision archives carry microsecond precision, the WebSocket stream publishes milliseconds). Futures aggTrade output was validated against the Binance Vision archive on 2026-06-06 (2,274,464 BTCUSDT aggTrades, full UTC day span).
 
-WDB replay reads across daily logs, so a disconnect spanning midnight UTC is caught up in full. A TP restart still loses, per feed handler, the row that was in flight when TP died; TP counts it as `missed` and the fix (handlers resending from a small buffer after registration) is a planned step.
+WDB replay reads across daily logs, so a disconnect spanning midnight UTC is caught up in full. A TP restart no longer loses the rows that were in flight: handlers resend them (see **No silent loss**).
 
 The quote book is exact inside the snapshot horizon only (1000 levels per side, the futures maximum). A fast move through all known levels on one side makes that side's quotes invalid until the background refresh lands; this is counted as `depthExhausted`, never published as a valid row.
 
