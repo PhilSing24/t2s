@@ -25,6 +25,7 @@
 /   assert_log_monotone  tpSeqNo over ALL sandbox TP logs (log order) is
 /                      strictly increasing, hence unique
 /   assert_log_rows    -table has -rows rows across all sandbox TP logs
+/   assert_fh_exact    fhSeqNo for -table across the logs is exactly 1..-rows
 /   assert_fh_sessions fhSeqNo for -table across the logs restarts from 1
 /                      exactly -restarts times and has no gaps inside a run
 / -
@@ -38,7 +39,8 @@
 .d.register:{[h;t;sid]
   nextSeq:1 + .d.peekSeq .d.side t;
   r:h (".tp.registerSession"; t; sid; nextSeq; .d.width t);
-  if[not r ~ `ok; .d.fail raze ("registration returned "; .Q.s1 r)];
+  / reply: the last fhSeqNo TP has logged for this session, or -1 (nothing to resend)
+  if[not -7h = type r; .d.fail raze ("registration returned "; .Q.s1 r)];
   -1 raze ("  registered session "; string sid; " for "; string t; " (next fhSeqNo "; string nextSeq; ")")};
 
 if[.d.step ~ "publish";
@@ -149,5 +151,16 @@ if[.d.step ~ "assert_fh_sessions";
   if[restarts <> want; .d.fail raze (string t; ": "; string restarts; " fhSeqNo restart(s) in the logs, expected "; string want)];
   if[gaps > 0; .d.fail raze (string t; ": "; string gaps; " fhSeqNo gap(s) inside a run")];
   .d.pass raze (string t; ": "; string restarts; " fhSeqNo restart(s), no gaps inside runs, "; string count fh; " rows"); .d.done[]];
+
+if[.d.step ~ "assert_fh_exact";
+  / fhSeqNo of -table across all sandbox TP logs is exactly 1..-rows, in order:
+  / nothing missing, nothing twice, nothing out of order
+  t:`$.d.arg `table; n:"J"$.d.arg `rows;
+  fh:last .d.tpLogRows t;
+  if[not fh ~ 1 + til n;
+    .d.fail raze (string t; ": logged fhSeqNo is not 1.."; string n; " - "; string count fh; " rows, ";
+                  string count distinct fh; " distinct, "; string count (1 + til n) except fh; " missing, ";
+                  string (count fh) - count distinct fh; " duplicated")];
+  .d.pass raze (string t; ": logged fhSeqNo is exactly 1.."; string n; " (none missing, none twice)"); .d.done[]];
 
 .d.fail raze ("unknown step: "; .d.step);

@@ -79,7 +79,7 @@ t2s_guard tp "$T2S_PORT_TP" > /dev/null || { fail "TP guard"; exit 1; }
 [[ "$(qtp '.tp.fhWidth`quote_binance')" == "22" ]] && pass "quote row width is 22 (10 + 4*3)" || fail "quote width $(qtp '.tp.fhWidth`quote_binance')"
 [[ "$(qtp '.schema.symbols')" == '`BTCUSDT`ETHUSDT' ]] && pass "symbols come from the shared file" || fail "symbols $(qtp '.schema.symbols')"
 [[ "$(qtp '@[{.tp.registerSession[`quote_binance;1;1;30]}; 0; {x}]')" == *"width mismatch"* ]] && pass "a depth-5 width (30) is refused at registration" || fail "width 30 was not refused"
-[[ "$(qtp '.tp.registerSession[`quote_binance;1;1;22]')" == '`ok' ]] && pass "the depth-3 width (22) registers" || fail "width 22 did not register"
+[[ "$(qtp '.tp.registerSession[`quote_binance;1;1;22]')" == '-1' ]] && pass "the depth-3 width (22) registers" || fail "width 22 did not register"
 
 echo ""
 echo "=== 2. the real quote handler at depth 5 is refused by the depth-3 TP ==="

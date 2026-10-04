@@ -217,7 +217,9 @@ begin_scenario 2 "TP SIGTERM + restart same day: tpSeqNo continues, sessions con
     tp -step publish -table quote_binance     -rows 10 -date "$TODAY" -session 2002
     tp -step publish -table trade_binance_fut -rows 5  -date "$TODAY" -session 2003
     sleep 1
-    grep -q "continues for trade_binance after TP restart" "$TP_LOG" || fail "TP log lacks session-continues line"
+    # The session file told the restarted TP which sessions it was serving
+    grep -q "session file loaded" "$TP_LOG" || fail "TP did not load its session file"
+    grep -q "FH RECONNECT for trade_binance session 2001" "$TP_LOG" || fail "TP log lacks the reconnect line for the continuing session"
     if grep -q "RESTART detected" "$TP_LOG"; then fail "TP misreported a reconnect after its own restart as a handler restart"; fi
     tp -step tp_status -key tradeRestarts -value 0
     tp -step tp_status -key tradeMissed -value 0

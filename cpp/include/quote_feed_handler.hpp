@@ -43,6 +43,7 @@
 #include "snapshot_worker.hpp"
 #include "snapshot_scheduler.hpp"
 #include "market_config.hpp"
+#include "tp_publisher.hpp"
 
 extern "C" {
 #include "k.h"
@@ -139,7 +140,7 @@ public:
     long long messageCount() const { return fhSeqNo_; }
 
     /// Non-empty if TP rejected this handler's session registration.
-    const std::string& fatalError() const { return fatalError_; }
+    const std::string& fatalError() const { return tp_->fatalError(); }
 
 private:
     // ========================================================================
@@ -162,8 +163,8 @@ private:
     /// Order book manager (flat arrays, all symbols)
     std::unique_ptr<OrderBookManager> bookMgr_;
     
-    /// Tickerplant connection handle
-    int tpHandle_{-1};
+    /// Connection to the tickerplant: registration, publishing, resend ring.
+    std::unique_ptr<t2s::TpPublisher> tp_;
     
     /// FH sequence number
     long long fhSeqNo_{0};
@@ -171,8 +172,6 @@ private:
     /// Session id announced to TP on every connect (process start time, ns).
     long long sessionId_{0};
 
-    /// Reason TP refused us, if any.
-    std::string fatalError_;
     
     /// Binance reconnection attempt counter
     int binanceReconnectAttempt_{0};
@@ -250,12 +249,7 @@ private:
     /// Build WebSocket path for depth streams
     std::string buildDepthStreamPath() const;
     
-    /// Connect to tickerplant with retry and register the session
-    /// (nextFhSeqNo = fhSeqNo of the next row we will send)
-    bool connectToTP(long long nextFhSeqNo);
 
-    /// Sync .tp.registerSession on a fresh handle: 1 ok, 0 retry, -1 fatal
-    int registerSession(int h, long long nextFhSeqNo);
     
     /// Sleep with exponential backoff
     bool sleepWithBackoff(int attempt);

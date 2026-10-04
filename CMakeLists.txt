@@ -87,6 +87,15 @@ target_link_libraries(quote_feed_handler_fut PRIVATE t2s_fh)
 # cpp/third_party/catch2/. See tests/README or the project README for
 # download instructions.
 # ---------------------------------------------------------------------------
+# ============================================================
+# Test publisher: synthetic trade rows through the real TpPublisher.
+# Used by the sandbox tests; not part of the pipeline.
+# ============================================================
+add_executable(sim_trade_publisher
+    cpp/tools/sim_trade_publisher.cpp
+)
+target_link_libraries(sim_trade_publisher PRIVATE t2s_fh)
+
 if(EXISTS ${CATCH2_DIR}/catch_amalgamated.cpp)
 
     # OrderBookManager is header-only, so this test does not link the
@@ -143,6 +152,21 @@ if(EXISTS ${CATCH2_DIR}/catch_amalgamated.cpp)
     target_link_libraries(test_quote_row PRIVATE
         ${KDB_DIR}/c.o
         Threads::Threads
+    )
+
+    add_executable(test_resend_ring
+        tests/test_resend_ring.cpp
+        ${CATCH2_DIR}/catch_amalgamated.cpp
+    )
+    target_include_directories(test_resend_ring PRIVATE
+        ${INCLUDE_DIR}
+        ${KDB_DIR}
+        ${CATCH2_DIR}
+    )
+    target_link_libraries(test_resend_ring PRIVATE
+        ${KDB_DIR}/c.o
+        Threads::Threads
+        spdlog::spdlog
     )
 
     add_executable(test_json_reader

@@ -43,6 +43,10 @@
 .tp.cfg.seqFile:hsym `$ $[count v:getenv `T2S_TP_SEQ_FILE; v; .tp.cfg.logDir,"/tp.tpSeqNo"];
 .tp.cfg.seqReserve:10000;
 
+/ Session file (see .tp.session.save). Like tp.tpSeqNo it lives in the log
+/ dir and is never a retention candidate.
+.tp.cfg.sessionFile:hsym `$ $[count v:getenv `T2S_TP_SESSION_FILE; v; .tp.cfg.logDir,"/tp.sessions"];
+
 / Replay index: one (tpSeqNo; byte offset; chunk) entry per this many rows,
 / written next to the log as <date>.idx, so WDB can seek instead of
 / rescanning the day. See kdb/tick/logreader.q.
@@ -345,6 +349,31 @@ pubsub.init[]
 .tp.fhDict:{[t] nv:.tp.fh.stats t; nv[0]!nv 1};
 .tp.fhStatus:{[] {[t] (`table`reportedAt!(t; .tp.fh.time t)), .tp.fhDict t} each key .tp.fh.stats};
 
+/ Session file. The session id and last logged fhSeqNo per table, so a TP
+/ that restarts still knows which handler session it was serving and can
+/ tell a reconnecting handler exactly where to resend from. Written at
+/ every registration, at the midnight rotation and at exit - the moments
+/ after which the day's log may hold no row for a table. Whenever today's
+/ log does hold rows for a table, the fhSeqNo of its last logged row wins
+/ (.tp.recoverFhSeq), so the file never has to be fresher than that.
+.tp.session.save:{[]
+  f:.tp.cfg.sessionFile; fStr:1 _ string f;
+  payload:`id`lastSeq`saved!(.tp.session.id; .tp.seq.last; .z.p);
+  r:.[set; (hsym `$ fStr,".tmp"; payload); {[e] -1 "TP: ERROR writing session file - ",e; `error}];
+  if[r ~ `error; :()];
+  @[system; "mv ",fStr,".tmp ",fStr; {[e] -1 "TP: ERROR renaming session file - ",e}];
+  };
+.tp.session.load:{[]
+  f:.tp.cfg.sessionFile;
+  if[() ~ key f; -1 "TP: no session file - sessions start fresh"; :()];
+  v:@[get; f; {[e] -1 "TP: ERROR reading session file - ",e; ()}];
+  if[not (99h = type v) and all `id`lastSeq in key v; -1 "TP: session file unreadable - sessions start fresh"; :()];
+  known:.tp.tables inter key v `id;
+  .tp.session.id[known]:(v `id) known;
+  .tp.seq.last[known]:(v `lastSeq) known;
+  -1 raze ("TP: session file loaded (saved "; string v `saved; "): sessions "; .Q.s1 .tp.session.id; ", last fhSeqNo "; .Q.s1 .tp.seq.last);
+  };
+
 / Registration. Called synchronously by every feed handler right after it
 / connects (and after every reconnect). Throws on a wrong width or unknown
 / table so the handler sees an error and exits at its own startup.
@@ -363,34 +392,41 @@ pubsub.init[]
   prevId:.tp.session.id tbl;
   lastSeq:.tp.seq.last tbl;
   kind:$[null prevId; `new; sessionId = prevId; `reconnect; `restart];
+  / Reply: the last fhSeqNo TP has LOGGED for this session, so the handler
+  / can resend from its ring everything after it; -1 when TP holds nothing
+  / for the session (a new or restarted handler). Rows the handler cannot
+  / resend show up as a jump on its next row and are counted there
+  / (.tp.checkSeq), so nothing is counted as missed at registration.
+  reply:-1j;
   if[kind = `new;
-    / First registration this TP process has seen for the table. If TP
-    / recovered a last fhSeqNo from the log, the handler may have continued
-    / (TP was down: count what it missed) or restarted meanwhile.
+    / No session on record (no session file). With a last fhSeqNo recovered
+    / from the log, the handler either continued across a TP restart or
+    / restarted meanwhile.
     $[null lastSeq;
-        -1 raze ("TP: session "; string sessionId; " registered for "; string tbl; " (handle "; string h; ", next fhSeqNo "; string nextSeq; ")");
+        [.tp.seq.last[tbl]:nextSeq - 1;
+         -1 raze ("TP: session "; string sessionId; " registered for "; string tbl; " (handle "; string h; ", next fhSeqNo "; string nextSeq; ")")];
       (nextSeq - 1) < lastSeq;
         [.tp.ctr.restarts[tbl]+:1;
+         .tp.seq.last[tbl]:nextSeq - 1;
          -1 raze ("TP: FH RESTART detected for "; string tbl; " (handler restarted while TP was down): fhSeqNo was "; string lastSeq; ", resumes at "; string nextSeq)];
-      [missed:(nextSeq - 1) - lastSeq;   / parenthesised: q evaluates right to left
-       if[missed > 0; .tp.ctr.gaps[tbl]+:1; .tp.ctr.missed[tbl]+:missed];
+      [reply:lastSeq;
        -1 raze ("TP: session "; string sessionId; " continues for "; string tbl; " after TP restart: last logged fhSeqNo "; string lastSeq;
-                ", next "; string nextSeq; $[missed > 0; raze (" -> "; string missed; " rows MISSED while TP was down"); ", no gap"])]]];
+                ", handler is at "; string nextSeq - 1; " -> expecting a resend of "; string (nextSeq - 1) - lastSeq; " row(s)")]]];
   if[kind = `restart;
     .tp.ctr.restarts[tbl]+:1;
+    .tp.seq.last[tbl]:nextSeq - 1;
     -1 raze ("TP: FH RESTART detected for "; string tbl; ": session "; string prevId; " -> "; string sessionId;
              " (handle "; string h; "), fhSeqNo was "; string lastSeq; ", resumes at "; string nextSeq)];
   if[kind = `reconnect;
     .tp.ctr.reconnects[tbl]+:1;
-    missed:$[null lastSeq; 0; (nextSeq - 1) - lastSeq];
-    if[missed > 0; .tp.ctr.gaps[tbl]+:1; .tp.ctr.missed[tbl]+:missed];
-    -1 raze ("TP: FH RECONNECT for "; string tbl; " session "; string sessionId; " (handle "; string h; "): last fhSeqNo "; string lastSeq;
-             ", next "; string nextSeq; $[missed > 0; raze (" -> "; string missed; " rows MISSED"); ", no gap"])];
-  .tp.seq.last[tbl]:nextSeq - 1;
+    $[null lastSeq; .tp.seq.last[tbl]:nextSeq - 1; reply:lastSeq];
+    -1 raze ("TP: FH RECONNECT for "; string tbl; " session "; string sessionId; " (handle "; string h; "): last logged fhSeqNo "; string lastSeq;
+             ", handler is at "; string nextSeq - 1; $[(not null lastSeq) and (nextSeq - 1) > lastSeq; raze (" -> expecting a resend of "; string (nextSeq - 1) - lastSeq; " row(s)"); ", nothing to resend"])];
   .tp.session.id[tbl]:sessionId;
   .tp.session.handle[tbl]:h;
   .tp.handleTable[h]:tbl;
-  `ok
+  .tp.session.save[];
+  reply
  };
 
 / Sequence check for one accepted row. Never drops: returns after counting.
@@ -551,7 +587,9 @@ upd:{[tbl;data]
   logFile:.tp.logFilePath[];
   if[() ~ key logFile; -1 "TP: no log for today - no fhSeqNo to recover"; :()];
   r:.tp.scanLog[logFile];
-  .tp.seq.last:r 1;
+  / Tables with rows in today's log: the last logged row is the truth.
+  / Tables without: keep what the session file said.
+  .tp.seq.last:.tp.seq.last ^ r 1;
   .tp.seq.firstTp:r 2;
   -1 raze ("TP: recovered fhSeqNo of the last logged row per table: "; .Q.s1 .tp.seq.last;
            " (log max tpSeqNo "; string r 0; ")");
@@ -663,6 +701,7 @@ upd:{[tbl;data]
            " tpSeqNo:"; string .tp.tpSeqNo);
   pubsub.callendofday[];
   .tp.rotate[];
+  .tp.session.save[];
   .tp.logCount:0j;
   / Daily operational counters reset; sessions, last fhSeqNo and tpSeqNo
   / carry across midnight (handlers do not restart at EOD, and tpSeqNo is
@@ -687,6 +726,9 @@ upd:{[tbl;data]
   ];
   };
 
+/ SIGTERM / exit: leave the session file current
+.z.exit:{[x] .tp.session.save[]};
+
 .tp.ticks:0j;
 .z.ts:{[]
   .tp.checkEOD[];
@@ -703,6 +745,7 @@ system"p ",string .tp.cfg.port;
 / Order matters: seed tpSeqNo from the reservation file (or migrate), then
 / recover per-table fhSeqNo from today's log, then open the log for writes.
 .tp.seq.load[];
+.tp.session.load[];
 .tp.recoverFhSeq[];
 .tp.openLog[];
 .tp.disk.check[];

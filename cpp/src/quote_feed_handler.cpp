@@ -40,6 +40,17 @@ QuoteFeedHandler::QuoteFeedHandler(const std::vector<std::string>& symbols,
     sessionId_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
         startTime_.time_since_epoch()).count();
 
+    t2s::TpPublisherConfig tpCfg;
+    tpCfg.host = tpHost_;
+    tpCfg.port = tpPort_;
+    tpCfg.table = cfg_.tpTable;
+    // Feed-handler columns of the quote schema for our depth. TP compares it
+    // with its own schema (built from the same shared.json) and refuses us
+    // if they differ.
+    tpCfg.width = t2s::quoteRowWidth(cfg_.depth, cfg_.publishTransactTime);
+    tpCfg.sessionId = sessionId_;
+    tp_ = std::make_unique<t2s::TpPublisher>(tpCfg, running_);
+
     // Store lowercase (for WebSocket) and uppercase (for internal use)
     for (const auto& sym : symbols) {
         symbolsLower_.push_back(sym);
@@ -76,10 +87,7 @@ QuoteFeedHandler::QuoteFeedHandler(const std::vector<std::string>& symbols,
 }
 
 QuoteFeedHandler::~QuoteFeedHandler() {
-    if (tpHandle_ > 0) {
-        kclose(tpHandle_);
-        spdlog::debug("TP connection closed in destructor");
-    }
+    tp_->close();
 }
 
 // ============================================================================
@@ -96,9 +104,9 @@ void QuoteFeedHandler::run() {
     spdlog::info("Snapshot worker thread started");
 
     // Connect to tickerplant and register this session
-    if (!connectToTP(fhSeqNo_ + 1)) {
-        if (!fatalError_.empty()) {
-            spdlog::critical("TP rejected this handler: {} - exiting", fatalError_);
+    if (!tp_->connect(fhSeqNo_ + 1)) {
+        if (!tp_->fatalError().empty()) {
+            spdlog::critical("TP rejected this handler: {} - exiting", tp_->fatalError());
         } else {
             spdlog::warn("Shutdown before TP connection established");
         }
@@ -130,11 +138,8 @@ void QuoteFeedHandler::run() {
     snapshotWorker_->stop();
     spdlog::info("Snapshot worker stopped");
 
-    if (tpHandle_ > 0) {
-        kclose(tpHandle_);
-        tpHandle_ = -1;
-        spdlog::info("TP connection closed");
-    }
+    tp_->close();
+    spdlog::info("TP connection closed");
     
     spdlog::info("Shutdown complete (processed {} messages)", fhSeqNo_);
 }
@@ -152,59 +157,6 @@ std::string QuoteFeedHandler::buildDepthStreamPath() const {
     // e.g. /stream?streams=btcusdt@depth@100ms/ethusdt@depth@100ms (spot)
     //      /public/stream?streams=btcusdt@depth@100ms/...          (USD-M futures)
     return cfg_.wsPathPrefix + t2s::buildStreamPath(symbolsLower_, cfg_.streamSuffix);
-}
-
-int QuoteFeedHandler::registerSession(int h, long long nextFhSeqNo) {
-    // Feed-handler columns of the quote schema for our depth. TP compares it
-    // with its own schema (built from the same shared.json) and refuses us
-    // if they differ.
-    const long long width = t2s::quoteRowWidth(cfg_.depth, cfg_.publishTransactTime);
-    K r = k(h, (S)".tp.registerSession",
-            ks((S)cfg_.tpTable.c_str()), kj(sessionId_), kj(nextFhSeqNo), kj(width), (K)0);
-    if (r == nullptr) {
-        spdlog::error("TP connection lost during session registration");
-        return 0;
-    }
-    if (r->t == -128) {
-        fatalError_ = "registration rejected for " + cfg_.tpTable + ": " + r->s;
-        spdlog::critical("TP REJECTED session registration for {} (sessionId={}, nextFhSeqNo={}, width={}): {}",
-                         cfg_.tpTable, sessionId_, nextFhSeqNo, width, r->s);
-        r0(r);
-        return -1;
-    }
-    r0(r);
-    spdlog::info("Session registered with TP: table={} sessionId={} nextFhSeqNo={} width={}",
-                 cfg_.tpTable, sessionId_, nextFhSeqNo, width);
-    return 1;
-}
-
-bool QuoteFeedHandler::connectToTP(long long nextFhSeqNo) {
-    int attempt = 0;
-    while (running_) {
-        spdlog::info("Connecting to TP on {}:{}...", tpHost_, tpPort_);
-        
-        int h = khpu((S)tpHost_.c_str(), tpPort_, (S)"");
-        
-        if (h > 0) {
-            int reg = registerSession(h, nextFhSeqNo);
-            if (reg == 1) {
-                tpHandle_ = h;
-                spdlog::info("Connected to TP (handle {})", h);
-                return true;
-            }
-            kclose(h);
-            if (reg < 0) {
-                running_ = false;   // fatal: exit the handler
-                return false;
-            }
-        } else {
-            spdlog::error("Failed to connect to TP");
-        }
-        if (!sleepWithBackoff(attempt++)) {
-            return false;
-        }
-    }
-    return false;
 }
 
 bool QuoteFeedHandler::sleepWithBackoff(int attempt) {
@@ -241,7 +193,7 @@ void QuoteFeedHandler::runWebSocketLoop() {
     // mark it with one invalid row per symbol whose last published row was
     // valid, so the hole is visible in the stored data (and to
     // kdb/utils/check_quote_seq.q) and not only in this handler's log.
-    if (tpHandle_ > 0) {
+    if (tp_->connected()) {
         long long nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
         for (int i = 0; i < bookMgr_->numSymbols(); ++i) {
@@ -704,28 +656,18 @@ void QuoteFeedHandler::publishQuote(const BookQuote& quote) {
         sendEnd - sendStart).count();
     kK(row.get())[t2s::quoteSendUsIndex(cfg_.depth, withT)]->j = fhSendUs;
 
-    // Publish to TP (async)
-    K result = k(-tpHandle_, (S)".u.upd", ks((S)cfg_.tpTable.c_str()), row.release(), (K)0);
+    // Publish to TP. The publisher keeps the row in its resend ring; if
+    // the connection is found dead it reconnects and resends whatever TP
+    // has not logged, this row included.
+    tp_->publish(row.release(), quote.fhSeqNo);
+    connState_ = tp_->connected() ? "connected" : "disconnected";
 
     lastPubTime_ = std::chrono::system_clock::now();
     ++msgsPublished_;
-
-    if (result == nullptr) {
-        spdlog::error("TP connection lost, reconnecting...");
-        connState_ = "reconnecting";
-        kclose(tpHandle_);
-        tpHandle_ = -1;
-        // Re-register announcing this row's fhSeqNo as the next one, then resend it
-        if (connectToTP(quote.fhSeqNo)) {
-            K row2 = t2s::buildQuoteRow(quote, lastParseUs_, fhSendUs, withT);
-            k(-tpHandle_, (S)".u.upd", ks((S)cfg_.tpTable.c_str()), row2, (K)0);
-            connState_ = "connected";
-        }
-    }
 }
 
 void QuoteFeedHandler::publishHealth() {
-    if (tpHandle_ <= 0) return;
+    if (!tp_->connected()) return;
     
     auto now = std::chrono::system_clock::now();
     
@@ -754,10 +696,10 @@ void QuoteFeedHandler::publishHealth() {
     ));
     
     // Publish to TP (fire and forget)
-    k(-tpHandle_, (S)".u.upd", ks((S)"health_feed_handler"), row.release(), (K)0);
+    k(-tp_->handle(), (S)".u.upd", ks((S)"health_feed_handler"), row.release(), (K)0);
 
     // Book-level counters, shown per table by TP's .health[] and status.sh
-    t2s::sendFhStats(tpHandle_, cfg_.tpTable, {
+    t2s::sendFhStats(tp_->handle(), cfg_.tpTable, {
         {"msgsReceived",     msgsReceived_},
         {"rowsPublished",    msgsPublished_},
         {"wsReconnects",     ctrWsReconnects_},
@@ -770,6 +712,9 @@ void QuoteFeedHandler::publishHealth() {
         {"depthRefreshes",   bookMgr_->depthRefreshes()},
         {"refreshFailures",  bookMgr_->refreshFailures()},
         {"depthExhausted",   bookMgr_->depthExhaustedEvents()},
+        {"tpReconnects",     tp_->reconnects()},
+        {"rowsResent",       tp_->rowsResent()},
+        {"rowsUnresendable", tp_->rowsUnresendable()},
     });
     
     spdlog::debug("Health published: uptime={}s msgs={}/{} state={}", 

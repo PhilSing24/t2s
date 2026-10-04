@@ -27,7 +27,7 @@
 .d.register:{[h;t;sid]
   nextSeq:1 + .d.peekSeq .d.side t;
   r:h (".tp.registerSession"; t; sid; nextSeq; .d.width t);
-  if[not r ~ `ok; .d.fail raze ("registration returned "; .Q.s1 r)]};
+  if[not -7h = type r; .d.fail raze ("registration returned "; .Q.s1 r)]};
 
 if[.d.step ~ "publish_timed";
   t:`$.d.arg `table; n:"J"$.d.arg `rows; d:"D"$.d.arg `date; sid:.d.sessionArg[]; maxMs:"J"$.d.arg `maxms;

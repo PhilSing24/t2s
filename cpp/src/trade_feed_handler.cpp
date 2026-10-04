@@ -37,13 +37,19 @@ TradeFeedHandler::TradeFeedHandler(const std::vector<std::string>& symbols,
 {
     sessionId_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
         startTime_.time_since_epoch()).count();
+
+    t2s::TpPublisherConfig tpCfg;
+    tpCfg.host = tpHost_;
+    tpCfg.port = tpPort_;
+    tpCfg.table = cfg_.tpTable;
+    tpCfg.width = (cfg_.schema == t2s::TradeSchema::SpotTrade)
+                  ? t2s::TRADE_ROW_WIDTH : t2s::AGG_TRADE_ROW_WIDTH;
+    tpCfg.sessionId = sessionId_;
+    tp_ = std::make_unique<t2s::TpPublisher>(tpCfg, running_);
 }
 
 TradeFeedHandler::~TradeFeedHandler() {
-    if (tpHandle_ > 0) {
-        kclose(tpHandle_);
-        spdlog::debug("TP connection closed in destructor");
-    }
+    tp_->close();
 }
 
 // ============================================================================
@@ -58,9 +64,9 @@ void TradeFeedHandler::run() {
 
     // Connect to tickerplant (retries until success or shutdown) and
     // register this session. First row will carry fhSeqNo 1.
-    if (!connectToTP(fhSeqNo_ + 1)) {
-        if (!fatalError_.empty()) {
-            spdlog::critical("TP rejected this handler: {} - exiting", fatalError_);
+    if (!tp_->connect(fhSeqNo_ + 1)) {
+        if (!tp_->fatalError().empty()) {
+            spdlog::critical("TP rejected this handler: {} - exiting", tp_->fatalError());
         } else {
             spdlog::warn("Shutdown before TP connection established");
         }
@@ -87,11 +93,8 @@ void TradeFeedHandler::run() {
 
     // Cleanup
     spdlog::info("Cleaning up...");
-    if (tpHandle_ > 0) {
-        kclose(tpHandle_);
-        tpHandle_ = -1;
-        spdlog::info("TP connection closed");
-    }
+    tp_->close();
+    spdlog::info("TP connection closed");
 
     spdlog::info("Shutdown complete (processed {} messages)", fhSeqNo_);
 }
@@ -120,61 +123,6 @@ bool shouldLogParseFailure(long long count) noexcept {
 }
 
 } // namespace
-
-int TradeFeedHandler::registerSession(int h, long long nextFhSeqNo) {
-    const long long width = (cfg_.schema == t2s::TradeSchema::SpotTrade)
-                            ? t2s::TRADE_ROW_WIDTH : t2s::AGG_TRADE_ROW_WIDTH;
-    // Sync call. The argument atoms are small; we deliberately do not r0
-    // them (the C API's ownership rules for sync k() differ between
-    // versions, and a leak of four atoms per connect is harmless).
-    K r = k(h, (S)".tp.registerSession",
-            ks((S)cfg_.tpTable.c_str()), kj(sessionId_), kj(nextFhSeqNo), kj(width), (K)0);
-    if (r == nullptr) {
-        spdlog::error("TP connection lost during session registration");
-        return 0;
-    }
-    if (r->t == -128) {
-        fatalError_ = std::string("registration rejected for ") + cfg_.tpTable + ": " + r->s;
-        spdlog::critical("TP REJECTED session registration for {} (sessionId={}, nextFhSeqNo={}, width={}): {}",
-                         cfg_.tpTable, sessionId_, nextFhSeqNo, width, r->s);
-        r0(r);
-        return -1;
-    }
-    r0(r);
-    spdlog::info("Session registered with TP: table={} sessionId={} nextFhSeqNo={} width={}",
-                 cfg_.tpTable, sessionId_, nextFhSeqNo, width);
-    return 1;
-}
-
-bool TradeFeedHandler::connectToTP(long long nextFhSeqNo) {
-    int attempt = 0;
-    while (running_) {
-        spdlog::info("Connecting to TP on {}:{}...", tpHost_, tpPort_);
-
-        int h = khpu((S)tpHost_.c_str(), tpPort_, (S)"");
-
-        if (h > 0) {
-            int reg = registerSession(h, nextFhSeqNo);
-            if (reg == 1) {
-                tpHandle_ = h;
-                spdlog::info("Connected to TP (handle {})", h);
-                return true;
-            }
-            kclose(h);
-            if (reg < 0) {
-                running_ = false;   // fatal: do not retry, exit the handler
-                return false;
-            }
-            // reg == 0: network failure during registration, retry below
-        } else {
-            spdlog::error("Failed to connect to TP");
-        }
-        if (!sleepWithBackoff(attempt++)) {
-            return false;  // Shutdown requested
-        }
-    }
-    return false;  // Shutdown requested
-}
 
 bool TradeFeedHandler::sleepWithBackoff(int attempt) {
     int delay = INITIAL_BACKOFF_MS;
@@ -368,43 +316,16 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
     spdlog::debug("Trade: sym={} primaryId={} price={:.2f} qty={:.4f} fhParseUs={} fhSendUs={} fhSeqNo={}",
         symStr, primaryId, priceV, qtyV, fhParseUs, fhSendUs, fhSeqNo_);
 
-    // Publish to TP. Async k() consumes its K args, so we release ownership
-    // out of the wrapper. After this, `row` is empty - any attempt to reuse
-    // it on the reconnect path below would just pass NULL (compile-time safe).
-    K result = k(-tpHandle_, (S)".u.upd", ks((S)cfg_.tpTable.c_str()), row.release(), (K)0);
+    // Publish to TP. The publisher keeps the row in its resend ring; if
+    // the connection is found dead it reconnects and resends whatever TP
+    // has not logged, this row included.
+    if (!tp_->connected()) connState_ = "reconnecting";
+    tp_->publish(row.release(), fhSeqNo_);
+    connState_ = tp_->connected() ? "connected" : "disconnected";
 
     // Update health: message published
     lastPubTime_ = std::chrono::system_clock::now();
     ++msgsPublished_;
-
-    // Check if TP connection died
-    if (result == nullptr) {
-        spdlog::error("TP connection lost, reconnecting...");
-        connState_ = "reconnecting";
-        kclose(tpHandle_);
-        tpHandle_ = -1;
-        // Re-register announcing the row we are about to resend (fhSeqNo_),
-        // so TP does not count it as out of order.
-        if (connectToTP(fhSeqNo_)) {
-            // Build a fresh row for the resend - the original was consumed
-            // by the failed k() above. (Pre-RAII this code reused the freed
-            // row pointer, a use-after-free.) Schema branch the same way.
-            t2s::KOwned row2;
-            if (cfg_.schema == t2s::TradeSchema::SpotTrade) {
-                row2 = t2s::buildTradeRow(
-                    fhRecvTimeUtcNs, symStr, primaryId, priceV, qtyV, buyerIsMaker,
-                    exchEventTimeMs, exchTradeTimeMs, fhParseUs, fhSendUs, fhSeqNo_,
-                    KDB_EPOCH_OFFSET_NS);
-            } else {  // FuturesAggTrade
-                row2 = t2s::buildAggTradeRow(
-                    fhRecvTimeUtcNs, symStr, primaryId, firstAggId, lastAggId,
-                    priceV, qtyV, qtyExRpi, buyerIsMaker,
-                    exchEventTimeMs, exchTradeTimeMs, fhParseUs, fhSendUs, fhSeqNo_,
-                    KDB_EPOCH_OFFSET_NS);
-            }
-            k(-tpHandle_, (S)".u.upd", ks((S)cfg_.tpTable.c_str()), row2.release(), (K)0);
-        }
-    }
 }
 
 void TradeFeedHandler::runWebSocketLoop() {
@@ -511,7 +432,7 @@ void TradeFeedHandler::runWebSocketLoop() {
 }
 
 void TradeFeedHandler::publishHealth() {
-    if (tpHandle_ <= 0) return;
+    if (!tp_->connected()) return;
 
     auto now = std::chrono::system_clock::now();
 
@@ -547,12 +468,12 @@ void TradeFeedHandler::publishHealth() {
     ));
 
     // Publish to TP (fire and forget)
-    k(-tpHandle_, (S)".u.upd", ks((S)"health_feed_handler"), row.release(), (K)0);
+    k(-tp_->handle(), (S)".u.upd", ks((S)"health_feed_handler"), row.release(), (K)0);
 
     // Exchange-hop counters, shown per table by TP's .health[] and status.sh.
     // exchGaps/exchMissed count jumps in the exchange's own trade ids, i.e.
     // trades Binance sent (or we failed to receive) between two messages.
-    t2s::sendFhStats(tpHandle_, cfg_.tpTable, {
+    t2s::sendFhStats(tp_->handle(), cfg_.tpTable, {
         {"msgsReceived",   msgsReceived_},
         {"rowsPublished",  msgsPublished_},
         {"wsReconnects",   ctrWsReconnects_},
@@ -561,6 +482,9 @@ void TradeFeedHandler::publishHealth() {
         {"exchOutOfOrder", ctrExchOutOfOrder_},
         {"exchDuplicates", ctrExchDuplicates_},
         {"nqMissing",      ctrNqMissing_},      // futures only: aggTrade events without `nq`
+        {"tpReconnects",   tp_->reconnects()},
+        {"rowsResent",     tp_->rowsResent()},
+        {"rowsUnresendable", tp_->rowsUnresendable()},
     });
 
     spdlog::debug("Health published: uptime={}s msgs={}/{} state={}",
