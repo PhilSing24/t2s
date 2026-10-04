@@ -1,0 +1,12 @@
+# t2s.target - the whole market-data pipeline: TP, WDB and the four feed
+# handlers. `systemctl --user start t2s.target` starts them in order,
+# `systemctl --user stop t2s.target` stops them in reverse (handlers, then
+# WDB with its flush, then TP). Enabled, it comes up when the user manager
+# starts, i.e. at WSL boot once lingering is on.
+[Unit]
+Description=t2s market data pipeline (TP, WDB, four feed handlers)
+Wants=t2s-tp.service t2s-wdb.service t2s-trade-fh.service t2s-quote-fh.service t2s-trade-fh-fut.service t2s-quote-fh-fut.service
+After=t2s-tp.service t2s-wdb.service t2s-trade-fh.service t2s-quote-fh.service t2s-trade-fh-fut.service t2s-quote-fh-fut.service
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,29 @@
+# t2s-tp.service - tickerplant (kdb/tick/tp.q, port 5010)
+[Unit]
+Description=t2s tickerplant (TP, port 5010)
+PartOf=t2s.target
+# Give up after 10 restarts in 5 minutes instead of looping forever
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/t2s/t2s.env
+WorkingDirectory=@T2S_ROOT@/kdb/tick
+# Refuse to start next to a tmux-mode pipeline (exit 3 = do not retry)
+ExecStartPre=@T2S_ROOT@/ops/systemd/guard.sh
+ExecStart=/usr/bin/env q tp.q
+# Started = listening: WDB and the handlers are ordered after this
+ExecStartPost=@T2S_ROOT@/ops/systemd/wait-port.sh 5010 60
+StandardInput=null
+# kill -9, a crash or a non-zero exit restarts it. Its tpSeqNo and sessions
+# survive (tp.tpSeqNo, tp.sessions); WDB reconnects and replays; the
+# handlers reconnect and resend what TP had not logged.
+Restart=on-failure
+RestartSec=2
+RestartPreventExitStatus=3
+# SIGTERM: tp.q saves its session file on exit
+TimeoutStopSec=30
+
+[Install]
+WantedBy=t2s.target

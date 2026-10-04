@@ -1,0 +1,30 @@
+# t2s-trade-fh-fut.service - USD-M futures trade feed handler (trade_binance_fut)
+[Unit]
+Description=t2s USD-M futures trade feed handler (trade_binance_fut)
+PartOf=t2s.target
+# Ordering only: handlers start after TP and WDB and stop before them. They
+# are not bound to TP - across a TP restart they reconnect and resend.
+After=t2s-tp.service t2s-wdb.service
+Wants=t2s-tp.service
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/t2s/t2s.env
+WorkingDirectory=@T2S_ROOT@
+ExecStartPre=@T2S_ROOT@/ops/systemd/guard.sh
+ExecStart=@T2S_ROOT@/build/trade_feed_handler_fut
+StandardInput=null
+# kill -9 or a crash restarts it; the restarted handler takes the last
+# logged trade id from TP, so what it missed is recorded and backfilled.
+# Exit 1 (bad config) and 2 (TP rejected the session: wrong row width) would
+# fail again at once: do not retry those. 3 = guard refused.
+Restart=on-failure
+RestartSec=2
+RestartPreventExitStatus=1 2 3
+# SIGTERM: the handler closes its sockets and exits 0
+TimeoutStopSec=20
+
+[Install]
+WantedBy=t2s.target

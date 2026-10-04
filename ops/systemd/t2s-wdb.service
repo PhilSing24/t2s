@@ -1,0 +1,30 @@
+# t2s-wdb.service - write-down database (kdb/tick/wdb.q, port 5011)
+[Unit]
+Description=t2s write-down database (WDB, port 5011)
+PartOf=t2s.target
+# Ordering only: WDB starts after TP and stops before it. It is not bound
+# to TP - if TP restarts, WDB reconnects and replays by itself.
+After=t2s-tp.service
+Wants=t2s-tp.service
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/t2s/t2s.env
+WorkingDirectory=@T2S_ROOT@/kdb/tick
+ExecStartPre=@T2S_ROOT@/ops/systemd/guard.sh
+ExecStart=/usr/bin/env q wdb.q
+ExecStartPost=@T2S_ROOT@/ops/systemd/wait-port.sh 5011 60
+StandardInput=null
+# Graceful stop: ask WDB over IPC to flush its buffers, write the checkpoint
+# and exit (what stop.sh does). If it has not exited when the script
+# returns, systemd sends SIGTERM, on which wdb.q flushes as well.
+ExecStop=@T2S_ROOT@/ops/systemd/wdb-stop.sh 5011 45
+TimeoutStopSec=90
+Restart=on-failure
+RestartSec=2
+RestartPreventExitStatus=3
+
+[Install]
+WantedBy=t2s.target
