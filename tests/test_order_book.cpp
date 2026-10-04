@@ -13,6 +13,8 @@
 #include "order_book_manager.hpp"
 #include "catch_amalgamated.hpp"
 
+#include <map>
+#include <random>
 #include <vector>
 #include <string>
 
@@ -146,7 +148,7 @@ TEST_CASE("getL5 reports isValid=false in non-VALID states", "[ordrbook][l5]") {
 // Snapshot semantics
 // ============================================================================
 
-TEST_CASE("Snapshot truncates to BOOK_DEPTH levels", "[ordrbook][snapshot]") {
+TEST_CASE("getL5 shows the top BOOK_DEPTH levels of a deeper snapshot", "[ordrbook][snapshot]") {
     OrderBookManager mgr({"BTCUSDT"});
 
     // Build 10 bids and 10 asks - manager should keep only top 5
@@ -484,4 +486,325 @@ TEST_CASE("After an overflow a snapshot older than the buffer is rejected", "[or
     REQUIRE(first.firstUpdateId == 501);
     REQUIRE_FALSE(mgr.applyDelta(0, first.firstUpdateId, first.finalUpdateId, {}, {}, 0));
     REQUIRE(mgr.getState(0) == BookState::INVALID);  // caller resyncs
+}
+
+// ============================================================================
+// Full-depth book: deletes are refilled by the next real level
+// ============================================================================
+
+namespace {
+
+std::vector<PriceLevel> bidsN(double best, int n) {
+    std::vector<PriceLevel> v;
+    for (int i = 0; i < n; ++i) v.push_back(pl(best - i, 1.0 + i));
+    return v;
+}
+std::vector<PriceLevel> asksN(double best, int n) {
+    std::vector<PriceLevel> v;
+    for (int i = 0; i < n; ++i) v.push_back(pl(best + i, 1.0 + i));
+    return v;
+}
+BookConfig smallCfg() {
+    BookConfig c; c.snapshotLimit = 20; c.refreshLowWater = 8; c.maxLevels = 60; return c;
+}
+
+} // namespace
+
+TEST_CASE("Deleting a top-5 level promotes the sixth level", "[ordrbook][depth]") {
+    OrderBookManager mgr({"BTCUSDT"});
+    mgr.applySnapshot(0, 100, bidsN(100.0, 10), asksN(101.0, 10));
+    REQUIRE(mgr.applyDelta(0, 101, 101, {}, {}, 0));
+    REQUIRE(mgr.knownLevels(0, true) == 10);
+
+    // Delete the best bid and the third ask
+    REQUIRE(mgr.applyDelta(0, 102, 102, {pl(100.0, 0.0)}, {pl(103.0, 0.0)}, 0));
+    L5Quote q = mgr.getL5(0, 0, 0);
+    REQUIRE(q.isValid);
+    REQUIRE(q.bidPrice1 == 99.0);
+    REQUIRE(q.bidPrice5 == 95.0);      // the old sixth level, not an empty slot
+    REQUIRE(q.bidQty5 == 6.0);
+    REQUIRE(q.askPrice3 == 104.0);
+    REQUIRE(q.askPrice5 == 106.0);
+}
+
+TEST_CASE("A level inserted below the top five is kept and surfaces later", "[ordrbook][depth]") {
+    OrderBookManager mgr({"BTCUSDT"});
+    mgr.applySnapshot(0, 100, bidsN(100.0, 5), asksN(101.0, 5));
+    REQUIRE(mgr.applyDelta(0, 101, 101, {pl(90.0, 7.0)}, {pl(120.0, 9.0)}, 0));
+    REQUIRE(mgr.getL5(0, 0, 0).bidPrice5 == 96.0);
+
+    REQUIRE(mgr.applyDelta(0, 102, 102, {pl(98.0, 0.0)}, {pl(101.0, 0.0)}, 0));
+    L5Quote q = mgr.getL5(0, 0, 0);
+    REQUIRE(q.bidPrice5 == 90.0);
+    REQUIRE(q.bidQty5 == 7.0);
+    REQUIRE(q.askPrice5 == 120.0);
+}
+
+TEST_CASE("A genuinely thin book publishes empty slots and stays valid", "[ordrbook][depth]") {
+    OrderBookManager mgr({"BTCUSDT"});                 // limit 1000: 5 levels = whole book
+    mgr.applySnapshot(0, 100, bids5(100.0), asks5(101.0));
+    REQUIRE(mgr.applyDelta(0, 101, 101, {pl(100.0, 0.0)}, {}, 0));
+    REQUIRE_FALSE(mgr.hasHorizon(0, true));
+    L5Quote q = mgr.getL5(0, 0, 0);
+    REQUIRE(q.isValid);
+    REQUIRE(q.bidPrice4 == 96.0);
+    REQUIRE(q.bidPrice5 == 0.0);                       // the exchange has no fifth bid
+    REQUIRE(mgr.depthExhaustedEvents() == 0);
+}
+
+TEST_CASE("A truncated snapshot sets a horizon; levels beyond it are not tracked", "[ordrbook][horizon]") {
+    OrderBookManager mgr({"BTCUSDT"}, smallCfg());
+    mgr.applySnapshot(0, 100, bidsN(100.0, 20), asksN(101.0, 20));   // 20 = limit: truncated
+    REQUIRE(mgr.hasHorizon(0, true));
+    REQUIRE(mgr.hasHorizon(0, false));
+
+    // bid 81 is the horizon; 80 and 50 are beyond it, 81.5 is inside
+    REQUIRE(mgr.applyDelta(0, 101, 101, {pl(80.0, 1.0), pl(50.0, 1.0), pl(81.5, 1.0)},
+                                        {pl(121.0, 1.0), pl(119.5, 1.0)}, 0));
+    REQUIRE(mgr.knownLevels(0, true) == 21);
+    REQUIRE(mgr.knownLevels(0, false) == 21);
+
+    // A snapshot with fewer levels than the limit is the whole book
+    OrderBookManager whole({"BTCUSDT"}, smallCfg());
+    whole.applySnapshot(0, 100, bidsN(100.0, 19), asksN(101.0, 19));
+    REQUIRE_FALSE(whole.hasHorizon(0, true));
+    REQUIRE(whole.applyDelta(0, 101, 101, {pl(10.0, 1.0)}, {}, 0));
+    REQUIRE(whole.knownLevels(0, true) == 20);
+}
+
+TEST_CASE("Known depth running low asks for a refresh; the refresh is seamless", "[ordrbook][refresh]") {
+    OrderBookManager mgr({"BTCUSDT"}, smallCfg());
+    mgr.applySnapshot(0, 100, bidsN(100.0, 20), asksN(101.0, 20));
+    REQUIRE(mgr.applyDelta(0, 101, 101, {}, {}, 0));
+    REQUIRE_FALSE(mgr.wantsRefresh(0));
+
+    // The market falls: the 13 best bids disappear, 7 known levels remain
+    std::vector<PriceLevel> del;
+    for (int i = 0; i < 13; ++i) del.push_back(pl(100.0 - i, 0.0));
+    REQUIRE(mgr.applyDelta(0, 102, 102, del, {}, 0));
+    REQUIRE(mgr.knownLevels(0, true) == 7);
+    REQUIRE(mgr.wantsRefresh(0));
+    REQUIRE(mgr.getL5(0, 0, 0).isValid);
+    REQUIRE(mgr.getL5(0, 0, 0).bidPrice1 == 87.0);
+
+    mgr.beginRefresh(0);
+    REQUIRE_FALSE(mgr.wantsRefresh(0));                 // one refresh at a time
+
+    // Deltas keep flowing while the snapshot is fetched; the book keeps publishing
+    REQUIRE(mgr.applyDelta(0, 103, 103, {pl(87.0, 9.0)}, {}, 0));
+    REQUIRE(mgr.applyDelta(0, 104, 104, {pl(86.0, 0.0)}, {}, 0));
+    REQUIRE(mgr.isValid(0));
+    REQUIRE(mgr.getL5(0, 0, 0).isValid);
+
+    // Snapshot taken at update id 103: 20 bids from 87 down to 68 (87 has qty 9)
+    auto snapBids = bidsN(87.0, 20); snapBids[0].qty = 9.0;
+    REQUIRE(mgr.onSnapshot(0, 103, snapBids, asksN(101.0, 20)) == SnapshotOutcome::REFRESHED);
+    REQUIRE(mgr.isValid(0));
+    REQUIRE(mgr.depthRefreshes() == 1);
+    REQUIRE(mgr.knownLevels(0, true) == 19);            // 20 from the snapshot, 86 deleted by delta 104
+    L5Quote q = mgr.getL5(0, 0, 0);
+    REQUIRE(q.isValid);
+    REQUIRE(q.bidPrice1 == 87.0);  REQUIRE(q.bidQty1 == 9.0);
+    REQUIRE(q.bidPrice2 == 85.0);                       // delta 104 was replayed onto the snapshot
+    REQUIRE(q.bidPrice5 == 82.0);
+
+    // The stream continues without a hiccup
+    REQUIRE(mgr.applyDelta(0, 105, 105, {pl(85.0, 0.0)}, {}, 0));
+    REQUIRE(mgr.getL5(0, 0, 0).bidPrice2 == 84.0);
+}
+
+TEST_CASE("A refresh snapshot ahead of the stream is bridged by the next delta", "[ordrbook][refresh]") {
+    OrderBookManager mgr({"BTCUSDT"}, smallCfg());
+    mgr.applySnapshot(0, 100, bidsN(100.0, 20), asksN(101.0, 20));
+    REQUIRE(mgr.applyDelta(0, 101, 101, {}, {}, 0));
+    mgr.beginRefresh(0);
+    REQUIRE(mgr.applyDelta(0, 102, 102, {pl(100.0, 5.0)}, {}, 0));
+
+    // Snapshot at id 110: newer than every delta we have seen
+    REQUIRE(mgr.onSnapshot(0, 110, bidsN(99.0, 20), asksN(101.0, 20)) == SnapshotOutcome::REFRESHED);
+    REQUIRE(mgr.isValid(0));
+    REQUIRE(mgr.getL5(0, 0, 0).bidPrice1 == 99.0);
+
+    REQUIRE(mgr.applyDelta(0, 103, 108, {pl(99.0, 0.0)}, {}, 0));   // older than the snapshot: skipped
+    REQUIRE(mgr.getL5(0, 0, 0).bidPrice1 == 99.0);
+    REQUIRE(mgr.applyDelta(0, 109, 112, {pl(99.0, 3.0)}, {}, 0));   // bridges 111
+    REQUIRE(mgr.getL5(0, 0, 0).bidQty1 == 3.0);
+    REQUIRE_FALSE(mgr.applyDelta(0, 120, 121, {}, {}, 0));          // a real gap is still a gap
+    REQUIRE(mgr.getState(0) == BookState::INVALID);
+}
+
+TEST_CASE("A refresh that cannot bridge leaves the live book untouched", "[ordrbook][refresh]") {
+    OrderBookManager mgr({"BTCUSDT"}, smallCfg());
+    mgr.applySnapshot(0, 100, bidsN(100.0, 20), asksN(101.0, 20));
+    REQUIRE(mgr.applyDelta(0, 101, 101, {}, {}, 0));
+    mgr.beginRefresh(0);
+    // 1200 deltas while waiting: the buffer overflows and loses 102..301
+    for (long long id = 102; id <= 1301; ++id) REQUIRE(mgr.applyDelta(0, id, id, {pl(100.0, double(id))}, {}, 0));
+    REQUIRE(mgr.bufferOverflows() == 200);
+
+    // Snapshot at 150 falls into the hole
+    REQUIRE(mgr.onSnapshot(0, 150, bidsN(50.0, 20), asksN(51.0, 20)) == SnapshotOutcome::REFRESH_FAILED);
+    REQUIRE(mgr.refreshFailures() == 1);
+    REQUIRE(mgr.isValid(0));
+    REQUIRE(mgr.getL5(0, 0, 0).bidPrice1 == 100.0);
+    REQUIRE(mgr.getL5(0, 0, 0).bidQty1 == 1301.0);
+    REQUIRE_FALSE(mgr.refreshPending(0));
+
+    // cancelRefresh (failed HTTP fetch) also counts and stops the buffering
+    mgr.beginRefresh(0);
+    mgr.cancelRefresh(0);
+    REQUIRE(mgr.refreshFailures() == 2);
+    REQUIRE(mgr.getDeltaBuffer(0).empty());
+}
+
+TEST_CASE("Fewer known levels than the depth: the quote is invalid, not wrong", "[ordrbook][horizon]") {
+    OrderBookManager mgr({"BTCUSDT"}, smallCfg());
+    mgr.applySnapshot(0, 100, bidsN(100.0, 20), asksN(101.0, 20));
+    REQUIRE(mgr.applyDelta(0, 101, 101, {}, {}, 0));
+
+    std::vector<PriceLevel> del;
+    for (int i = 0; i < 16; ++i) del.push_back(pl(100.0 - i, 0.0));   // 4 known bids left
+    REQUIRE(mgr.applyDelta(0, 102, 102, del, {}, 0));
+    REQUIRE(mgr.isValid(0));                      // the sequence is intact
+    REQUIRE(mgr.depthExhausted(0));
+    REQUIRE(mgr.depthExhaustedEvents() == 1);
+    L5Quote q = mgr.getL5(0, 0, 0);
+    REQUIRE_FALSE(q.isValid);
+    REQUIRE(q.bidPrice1 == 0.0);                  // carries no levels, like any invalid row
+
+    // A refresh restores it
+    mgr.beginRefresh(0);
+    REQUIRE(mgr.onSnapshot(0, 102, bidsN(84.0, 20), asksN(101.0, 20)) == SnapshotOutcome::REFRESHED);
+    REQUIRE(mgr.getL5(0, 0, 0).isValid);
+    REQUIRE(mgr.getL5(0, 0, 0).bidPrice5 == 80.0);
+    REQUIRE(mgr.depthExhaustedEvents() == 1);
+}
+
+TEST_CASE("The stored book is capped; trimming moves the horizon in", "[ordrbook][horizon]") {
+    OrderBookManager mgr({"BTCUSDT"}, smallCfg());                    // maxLevels 60
+    mgr.applySnapshot(0, 100, bidsN(100.0, 10), asksN(1000.0, 10));   // whole book, no horizon
+    REQUIRE(mgr.applyDelta(0, 101, 101, {}, {}, 0));
+    std::vector<PriceLevel> ins;
+    for (int i = 1; i <= 80; ++i) ins.push_back(pl(100.0 + i, 1.0));  // market rallies
+    REQUIRE(mgr.applyDelta(0, 102, 102, ins, {}, 0));
+    REQUIRE(mgr.knownLevels(0, true) == 60);
+    REQUIRE(mgr.hasHorizon(0, true));
+    REQUIRE(mgr.getL5(0, 0, 0).bidPrice1 == 180.0);
+    // 121 is the worst kept bid; an insert below it is now beyond the horizon
+    REQUIRE(mgr.applyDelta(0, 103, 103, {pl(95.0, 1.0)}, {}, 0));
+    REQUIRE(mgr.knownLevels(0, true) == 60);
+}
+
+TEST_CASE("onSnapshot performs the initial sync with the buffered deltas", "[ordrbook][sync]") {
+    OrderBookManager mgr({"BTCUSDT"});
+    mgr.bufferDelta(0, BufferedDelta{95, 99, 0, {}, {}});                    // stale
+    mgr.bufferDelta(0, BufferedDelta{100, 102, 0, {pl(100.0, 8.0)}, {}});    // bridges 101
+    mgr.bufferDelta(0, BufferedDelta{103, 104, 0, {pl(99.0, 0.0)}, {}});
+    REQUIRE(mgr.onSnapshot(0, 100, bidsN(100.0, 10), asksN(101.0, 10)) == SnapshotOutcome::SYNCED);
+    REQUIRE(mgr.isValid(0));
+    REQUIRE(mgr.getL5(0, 0, 0).bidQty1 == 8.0);
+    REQUIRE(mgr.getL5(0, 0, 0).bidPrice2 == 98.0);
+    REQUIRE(mgr.getDeltaBuffer(0).empty());
+
+    OrderBookManager waiting({"BTCUSDT"});
+    waiting.bufferDelta(0, BufferedDelta{90, 95, 0, {}, {}});
+    REQUIRE(waiting.onSnapshot(0, 100, bidsN(100.0, 10), asksN(101.0, 10)) == SnapshotOutcome::AWAITING_BRIDGE);
+    REQUIRE(waiting.getState(0) == BookState::SYNCING);
+
+    OrderBookManager tooOld({"BTCUSDT"});
+    tooOld.bufferDelta(0, BufferedDelta{200, 205, 0, {}, {}});
+    REQUIRE(tooOld.onSnapshot(0, 100, bidsN(100.0, 10), asksN(101.0, 10)) == SnapshotOutcome::SYNC_FAILED);
+    REQUIRE(tooOld.getState(0) == BookState::INVALID);
+
+    // A snapshot nobody asked for is ignored
+    REQUIRE(mgr.onSnapshot(0, 500, bidsN(1.0, 10), asksN(2.0, 10)) == SnapshotOutcome::IGNORED);
+    REQUIRE(mgr.getL5(0, 0, 0).bidQty1 == 8.0);
+}
+
+// ----------------------------------------------------------------------------
+// Property: whenever the quote is valid, its five levels are the exchange's.
+// ----------------------------------------------------------------------------
+
+TEST_CASE("Randomised market: a valid L5 always equals the exchange's top five", "[ordrbook][property]") {
+    for (unsigned seed : {1u, 2u, 3u, 4u, 5u}) {
+        std::mt19937 rng(seed);
+        auto rnd = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+
+        // The "exchange": integer prices, bids below mid, asks above
+        std::map<double, double> tb, ta;
+        int mid = 10000;
+        for (int i = 1; i <= 200; ++i) { tb[mid - i] = rnd(1, 9); ta[mid + i] = rnd(1, 9); }
+        long long id = 1000;
+
+        auto snapshot = [&](std::size_t limit, std::vector<PriceLevel>& b, std::vector<PriceLevel>& a) {
+            b.clear(); a.clear();
+            for (auto it = tb.rbegin(); it != tb.rend() && b.size() < limit; ++it) b.push_back(pl(it->first, it->second));
+            for (auto it = ta.begin(); it != ta.end() && a.size() < limit; ++it) a.push_back(pl(it->first, it->second));
+        };
+
+        BookConfig cfg = smallCfg();
+        OrderBookManager mgr({"X"}, cfg);
+        std::vector<PriceLevel> sb, sa;
+        snapshot(cfg.snapshotLimit, sb, sa);
+        REQUIRE(mgr.onSnapshot(0, id, sb, sa) == SnapshotOutcome::AWAITING_BRIDGE);
+
+        bool pending = false; int deliverIn = 0; long long snapId = 0;
+        std::vector<PriceLevel> pb, pa;
+        long long validRows = 0, invalidRows = 0, deletes = 0, refreshes = 0;
+
+        for (int step = 0; step < 20000; ++step) {
+            // One event: a handful of level changes near the touch, with drift
+            std::vector<PriceLevel> eb, ea;
+            int n = rnd(1, 6);
+            if (step % 500 < 60) mid += (step / 500) % 2 ? 2 : -2;      // trending bursts
+            for (int k = 0; k < n; ++k) {
+                bool isBid = rnd(0, 1);
+                double price = isBid ? mid - rnd(1, 40) : mid + rnd(1, 40);
+                double qty = rnd(0, 3) == 0 ? 0.0 : rnd(1, 9);
+                auto& side = isBid ? tb : ta;
+                if (qty == 0.0) { deletes += side.erase(price); } else { side[price] = qty; }
+                (isBid ? eb : ea).push_back(pl(price, qty));
+            }
+            // a trend also removes whatever the price crossed
+            for (auto it = tb.upper_bound(mid - 1); it != tb.end();) { eb.push_back(pl(it->first, 0.0)); it = tb.erase(it); ++deletes; }
+            for (auto it = ta.begin(); it != ta.end() && it->first <= mid;) { ea.push_back(pl(it->first, 0.0)); it = ta.erase(it); ++deletes; }
+
+            long long U = id + 1; id += rnd(1, 3);
+            REQUIRE(mgr.applyDelta(0, U, id, eb, ea, step));
+
+            if (pending && --deliverIn <= 0) {
+                REQUIRE(mgr.onSnapshot(0, snapId, pb, pa) == SnapshotOutcome::REFRESHED);
+                pending = false; ++refreshes;
+            }
+            if (!pending && mgr.wantsRefresh(0)) {
+                mgr.beginRefresh(0);
+                pending = true; deliverIn = rnd(1, 6);
+                snapshot(cfg.snapshotLimit, pb, pa); snapId = id;       // taken now, delivered later
+            }
+
+            L5Quote q = mgr.getL5(0, 0, 0);
+            if (!q.isValid) { ++invalidRows; continue; }
+            ++validRows;
+            double bp[5] = {q.bidPrice1, q.bidPrice2, q.bidPrice3, q.bidPrice4, q.bidPrice5};
+            double bq[5] = {q.bidQty1, q.bidQty2, q.bidQty3, q.bidQty4, q.bidQty5};
+            double ap[5] = {q.askPrice1, q.askPrice2, q.askPrice3, q.askPrice4, q.askPrice5};
+            double aq[5] = {q.askQty1, q.askQty2, q.askQty3, q.askQty4, q.askQty5};
+            auto bi = tb.rbegin(); auto ai = ta.begin();
+            for (int l = 0; l < 5; ++l) {
+                double ebp = 0, ebq = 0, eap = 0, eaq = 0;
+                if (bi != tb.rend()) { ebp = bi->first; ebq = bi->second; ++bi; }
+                if (ai != ta.end())  { eap = ai->first; eaq = ai->second; ++ai; }
+                if (bp[l] != ebp || bq[l] != ebq || ap[l] != eap || aq[l] != eaq) {
+                    FAIL("seed " << seed << " step " << step << " level " << l + 1
+                         << ": book " << bp[l] << "x" << bq[l] << " / " << ap[l] << "x" << aq[l]
+                         << " exchange " << ebp << "x" << ebq << " / " << eap << "x" << eaq);
+                }
+            }
+        }
+        INFO("seed " << seed << " valid " << validRows << " invalid " << invalidRows
+             << " deletes " << deletes << " refreshes " << refreshes);
+        REQUIRE(deletes > 5000);
+        REQUIRE(refreshes > 10);
+        REQUIRE(validRows > 19000);
+    }
 }

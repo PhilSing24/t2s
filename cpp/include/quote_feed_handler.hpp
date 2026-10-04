@@ -206,6 +206,16 @@ private:
 
     /// Monotonic milliseconds for the scheduler.
     static std::int64_t steadyNowMs();
+
+    // Book-level counters (snapshot requests and rate-limit pauses live in
+    // the scheduler; buffer overflows and depth refreshes in the book manager)
+    long long ctrSequenceGaps_{0};      ///< gaps in the exchange's update ids while VALID
+    long long ctrResyncs_{0};           ///< books rebuilt from scratch (gap or failed sync)
+    long long ctrSnapshotFailures_{0};  ///< snapshot fetches that failed or timed out
+
+    /// One STATS line with every counter, every STATS_INTERVAL_SEC and at exit.
+    void logStats() const;
+    static constexpr int STATS_INTERVAL_SEC = 60;
     
     // ========================================================================
     // HEALTH TRACKING

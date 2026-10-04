@@ -1,27 +1,35 @@
 /**
  * @file order_book_manager.hpp
- * @brief Flat-array order book manager for L5 depth with snapshot reconciliation
- * 
- * Optimized for 100+ symbols with:
- *   - O(1) symbol lookup via index mapping
- *   - Contiguous memory for cache efficiency
- *   - All book state in flat arrays
- *   - Publisher state integrated
- * 
- * Architecture:
- *   - Symbol string → index mapping (one-time lookup)
- *   - All price/qty data in flat arrays [numSymbols * DEPTH]
- *   - State machine per symbol (INIT → SYNCING → VALID)
- *   - L5 quote extraction for kdb+ publication
- * 
- * Memory layout for 100 symbols:
- *   bidPrices_:  100 * 5 * 8 bytes = 4,000 bytes
- *   bidQtys_:    100 * 5 * 8 bytes = 4,000 bytes
- *   askPrices_:  100 * 5 * 8 bytes = 4,000 bytes
- *   askQtys_:    100 * 5 * 8 bytes = 4,000 bytes
- *   Total book data: ~16 KB (fits in L1 cache)
- * 
- * @see docs/decisions/adr-009-L1-Order-Book-Architecture.md
+ * @brief Full-depth local order books with snapshot reconciliation; publishes L5
+ *
+ * Each symbol keeps EVERY price level it knows, not just the published top
+ * five, so deleting a top-of-book level promotes the next real level
+ * instead of leaving an empty slot (review pass 2 item 9).
+ *
+ * What "every level it knows" means - the snapshot horizon:
+ *   A REST snapshot returns at most `snapshotLimit` levels per side. The
+ *   diff stream only reports levels that CHANGE, so a level that was
+ *   beyond the snapshot's last price and has not changed since is unknown
+ *   to us. The worst price of a truncated snapshot is the side's horizon:
+ *   levels at or inside it are exact, levels beyond it are not stored. If
+ *   the snapshot returned fewer levels than the limit, the whole side is
+ *   known and there is no horizon.
+ *
+ *   When the market moves toward the horizon the known levels run down.
+ *   Below `refreshLowWater` known levels the book asks for a background
+ *   refresh (wantsRefresh): the live book keeps applying deltas and keeps
+ *   publishing, the deltas are also buffered, and when the new snapshot
+ *   arrives a shadow book is built from it with the normal sync rule and
+ *   swapped in. No invalid row is published. If a side ever has fewer
+ *   known levels than the published depth before the refresh lands, the
+ *   quote is published invalid (and counted) rather than with a slot that
+ *   might be wrong.
+ *
+ * Storage: one sorted vector of levels per side per symbol, worst price
+ * first so the frequent top-of-book inserts and deletes touch the end.
+ * Capped at `maxLevels`; trimming the worst level moves the horizon in.
+ *
+ * State machine per symbol: INIT -> SYNCING -> VALID -> INVALID.
  */
 
 #ifndef ORDER_BOOK_MANAGER_HPP
@@ -50,6 +58,23 @@ constexpr int PUBLISH_TIMEOUT_MS = 50;
 /// snapshot (100 s of a 100 ms stream). Enforced by bufferDelta(): on
 /// overflow the OLDEST delta is dropped and the overflow is counted.
 constexpr size_t MAX_DELTA_BUFFER_SIZE = 1000;
+
+/// Sizing of the local book (see the file comment for the horizon).
+struct BookConfig {
+    std::size_t snapshotLimit   = 1000;  ///< levels per side requested from REST
+    std::size_t refreshLowWater = 100;   ///< known levels below which a refresh is wanted
+    std::size_t maxLevels       = 4000;  ///< cap on stored levels per side
+};
+
+/// What OrderBookManager::onSnapshot did with a snapshot.
+enum class SnapshotOutcome {
+    SYNCED,           ///< initial sync: snapshot + buffered deltas bridged, book is VALID
+    AWAITING_BRIDGE,  ///< initial sync: snapshot applied, waiting for the bridging delta
+    SYNC_FAILED,      ///< initial sync: buffered deltas do not bridge (snapshot too old)
+    REFRESHED,        ///< background refresh swapped in; the book stayed VALID throughout
+    REFRESH_FAILED,   ///< background refresh could not bridge; the live book is untouched
+    IGNORED           ///< no snapshot was expected in this state
+};
 
 // ============================================================================
 // DATA STRUCTURES
@@ -142,93 +167,125 @@ enum class BookState {
 
 /**
  * @class OrderBookManager
- * @brief Manages L5 order books for multiple symbols with flat-array storage
- * 
- * Key design choices:
- *   - Symbol → index mapping for O(1) access
- *   - Flat arrays for all book data (cache-friendly)
- *   - Per-symbol state machine
- *   - Integrated publisher state (last published, timeout)
+ * @brief Full-depth order books for multiple symbols, L5 extraction, publisher state
  */
 class OrderBookManager {
 public:
     // ========================================================================
     // CONSTRUCTION
     // ========================================================================
-    
+
     /**
-     * @brief Initialize manager with symbol list
      * @param symbols List of symbols (uppercase, e.g., "BTCUSDT")
+     * @param cfg     Book sizing (snapshot limit, refresh low-water mark, cap)
      */
-    explicit OrderBookManager(const std::vector<std::string>& symbols) {
+    explicit OrderBookManager(const std::vector<std::string>& symbols,
+                              BookConfig cfg = BookConfig{})
+        : cfg_(cfg) {
         numSymbols_ = static_cast<int>(symbols.size());
-        
-        // Build symbol ↔ index mapping
+
         for (int i = 0; i < numSymbols_; ++i) {
             symToIdx_[symbols[i]] = i;
             idxToSym_.push_back(symbols[i]);
         }
-        
-        // Allocate flat arrays
-        const int totalLevels = numSymbols_ * BOOK_DEPTH;
-        bidPrices_.resize(totalLevels, 0.0);
-        bidQtys_.resize(totalLevels, 0.0);
-        askPrices_.resize(totalLevels, 0.0);
-        askQtys_.resize(totalLevels, 0.0);
-        
-        // Per-symbol state
+
+        books_.resize(numSymbols_);
+        seq_.resize(numSymbols_);
         states_.resize(numSymbols_, BookState::INIT);
-        lastUpdateIds_.resize(numSymbols_, 0);
-        snapshotUpdateIds_.resize(numSymbols_, 0);
         exchEventTimeMs_.resize(numSymbols_, 0);
         deltaBuffers_.resize(numSymbols_);
         snapshotRequested_.resize(numSymbols_, false);
-        
-        // Publisher state
+        refreshPending_.resize(numSymbols_, false);
+        wasExhausted_.resize(numSymbols_, false);
+
         lastPublished_.resize(numSymbols_);
         lastPublishTimes_.resize(numSymbols_);
         hasPublished_.resize(numSymbols_, false);
-        
-        // Initialize lastPublishTimes to now
+
         auto now = std::chrono::steady_clock::now();
         for (int i = 0; i < numSymbols_; ++i) {
             lastPublishTimes_[i] = now;
         }
     }
-    
+
     // ========================================================================
     // SYMBOL LOOKUP
     // ========================================================================
-    
-    /**
-     * @brief Get symbol index (returns -1 if not found)
-     */
+
     int getSymbolIndex(const std::string& sym) const {
         auto it = symToIdx_.find(sym);
         return (it != symToIdx_.end()) ? it->second : -1;
     }
-    
-    /**
-     * @brief Get symbol name by index
-     */
-    const std::string& getSymbol(int idx) const {
-        return idxToSym_[idx];
-    }
-    
-    /**
-     * @brief Get number of symbols
-     */
+    const std::string& getSymbol(int idx) const { return idxToSym_[idx]; }
     int numSymbols() const { return numSymbols_; }
-    
+
     // ========================================================================
     // STATE ACCESS
     // ========================================================================
-    
+
     BookState getState(int idx) const { return states_[idx]; }
+    /// Sequence-valid: every delta since the snapshot has been applied.
     bool isValid(int idx) const { return states_[idx] == BookState::VALID; }
     bool needsSnapshot(int idx) const { return states_[idx] == BookState::INIT && !snapshotRequested_[idx]; }
     void setSnapshotRequested(int idx, bool val) { snapshotRequested_[idx] = val; }
-    
+
+    /// Known levels on a side (all of them are inside the horizon).
+    std::size_t knownLevels(int idx, bool isBid) const {
+        return (isBid ? books_[idx].bid : books_[idx].ask).levels.size();
+    }
+    /// True if the side's snapshot was truncated, i.e. deeper levels are unknown.
+    bool hasHorizon(int idx, bool isBid) const {
+        return (isBid ? books_[idx].bid : books_[idx].ask).bounded;
+    }
+
+    /**
+     * @brief A side has fewer known levels than the published depth while
+     *        the exchange may have more beyond the horizon: L5 cannot be
+     *        guaranteed, so the quote is reported invalid.
+     */
+    bool depthExhausted(int idx) const {
+        return books_[idx].bid.below(BOOK_DEPTH) || books_[idx].ask.below(BOOK_DEPTH);
+    }
+
+    // ========================================================================
+    // BACKGROUND DEPTH REFRESH
+    // ========================================================================
+
+    /// VALID book whose known depth is running low and no refresh is in flight.
+    bool wantsRefresh(int idx) const {
+        return states_[idx] == BookState::VALID && !refreshPending_[idx] &&
+               (books_[idx].bid.below(cfg_.refreshLowWater) ||
+                books_[idx].ask.below(cfg_.refreshLowWater));
+    }
+
+    /// The caller is about to request a refresh snapshot: start buffering.
+    void beginRefresh(int idx) {
+        refreshPending_[idx] = true;
+        snapshotRequested_[idx] = true;
+        deltaBuffers_[idx].clear();
+    }
+
+    /// The refresh request failed: stop buffering, the live book carries on.
+    void cancelRefresh(int idx) {
+        if (!refreshPending_[idx]) return;
+        refreshPending_[idx] = false;
+        snapshotRequested_[idx] = false;
+        deltaBuffers_[idx].clear();
+        ++refreshFailures_;
+    }
+
+    bool refreshPending(int idx) const { return refreshPending_[idx]; }
+
+    // -- counters (all symbols, since start) --------------------------------
+    long long bufferOverflows() const { return bufferOverflows_; }
+    long long depthRefreshes() const { return depthRefreshes_; }
+    long long refreshFailures() const { return refreshFailures_; }
+    long long depthExhaustedEvents() const { return depthExhaustedEvents_; }
+
+    // ========================================================================
+    // DELTA BUFFER
+    // ========================================================================
+
     /**
      * @brief Buffer a delta while the book waits for its snapshot.
      *
@@ -236,8 +293,8 @@ public:
      * delta is dropped and counted. That is safe: a snapshot fetched later
      * is newer than the dropped deltas, which would have been skipped as
      * stale anyway. If a snapshot older than the oldest remaining delta
-     * does arrive, the bridge rule in applyDelta() ("Snapshot too old")
-     * rejects it and the book resyncs - nothing is applied over a hole.
+     * does arrive, the bridge rule ("Snapshot too old") rejects it and the
+     * book resyncs - nothing is applied over a hole.
      *
      * @return false if the buffer overflowed (oldest delta dropped)
      */
@@ -252,381 +309,375 @@ public:
         return true;
     }
 
-    /// Deltas dropped because a buffer was full (all symbols, since start)
-    long long bufferOverflows() const { return bufferOverflows_; }
+    std::deque<BufferedDelta>& getDeltaBuffer(int idx) { return deltaBuffers_[idx]; }
 
-    /**
-     * @brief Get delta buffer for a symbol (for replay after a snapshot)
-     */
-    std::deque<BufferedDelta>& getDeltaBuffer(int idx) {
-        return deltaBuffers_[idx];
-    }
-    
     // ========================================================================
     // BOOK OPERATIONS
     // ========================================================================
-    
+
     /**
-     * @brief Apply REST snapshot to a symbol's book
-     * @param idx Symbol index
-     * @param lastUpdateId Snapshot's lastUpdateId from REST API
-     * @param bids Bid levels from snapshot (sorted high→low)
-     * @param asks Ask levels from snapshot (sorted low→high)
+     * @brief Load a REST snapshot into a symbol's book (state -> SYNCING)
+     * @param bids Bid levels from the snapshot (best first)
+     * @param asks Ask levels from the snapshot (best first)
+     *
+     * All levels are kept. A side that came back with snapshotLimit levels
+     * was truncated by the exchange and gets a horizon at its worst price.
      */
     void applySnapshot(int idx, long long lastUpdateId,
                        const std::vector<PriceLevel>& bids,
                        const std::vector<PriceLevel>& asks) {
-        // Clear existing book
-        clearBook(idx);
-        
-        // Copy top BOOK_DEPTH levels
-        const int offset = idx * BOOK_DEPTH;
-        
-        for (size_t i = 0; i < bids.size() && i < BOOK_DEPTH; ++i) {
-            bidPrices_[offset + i] = bids[i].price;
-            bidQtys_[offset + i] = bids[i].qty;
-        }
-        
-        for (size_t i = 0; i < asks.size() && i < BOOK_DEPTH; ++i) {
-            askPrices_[offset + i] = asks[i].price;
-            askQtys_[offset + i] = asks[i].qty;
-        }
-        
-        snapshotUpdateIds_[idx] = lastUpdateId;
-        lastUpdateIds_[idx] = lastUpdateId;
+        books_[idx].bid.load(true, bids, cfg_.snapshotLimit, cfg_.maxLevels);
+        books_[idx].ask.load(false, asks, cfg_.snapshotLimit, cfg_.maxLevels);
+        seq_[idx] = Seq{true, lastUpdateId, lastUpdateId};
         states_[idx] = BookState::SYNCING;
+        wasExhausted_[idx] = false;
     }
-    
+
+    /**
+     * @brief A snapshot result arrived: initial sync or background refresh.
+     *
+     * Initial sync (state INIT): load the snapshot and replay the buffered
+     * deltas through the sync rule.
+     *
+     * Refresh (state VALID with a refresh pending): build a shadow book
+     * from the snapshot, replay the deltas buffered since the request, and
+     * swap it in. The live book is untouched if the deltas do not bridge.
+     */
+    SnapshotOutcome onSnapshot(int idx, long long lastUpdateId,
+                               const std::vector<PriceLevel>& bids,
+                               const std::vector<PriceLevel>& asks) {
+        snapshotRequested_[idx] = false;
+
+        if (states_[idx] == BookState::VALID && refreshPending_[idx]) {
+            return finishRefresh(idx, lastUpdateId, bids, asks);
+        }
+        refreshPending_[idx] = false;
+        if (states_[idx] != BookState::INIT) {
+            return SnapshotOutcome::IGNORED;
+        }
+
+        applySnapshot(idx, lastUpdateId, bids, asks);
+        auto& buf = deltaBuffers_[idx];
+        bool failed = false;
+        for (const auto& d : buf) {
+            if (!applyDelta(idx, d.firstUpdateId, d.finalUpdateId, d.bids, d.asks, d.eventTimeMs)) {
+                failed = true;
+                break;
+            }
+        }
+        buf.clear();
+        if (failed) return SnapshotOutcome::SYNC_FAILED;
+        return states_[idx] == BookState::VALID ? SnapshotOutcome::SYNCED
+                                                : SnapshotOutcome::AWAITING_BRIDGE;
+    }
+
     /**
      * @brief Apply delta update to a symbol's book
-     * @param idx Symbol index
      * @param firstUpdateId Delta's first update ID (U)
      * @param finalUpdateId Delta's final update ID (u)
      * @param bidUpdates Bid level updates (qty=0 means delete)
-     * @param askUpdates Ask level updates
-     * @param eventTimeMs Exchange event time
-     * @return true if applied successfully, false if sequence gap
+     * @return true if applied or skipped as stale, false on a sequence gap
+     *         (the book is then INVALID and must be rebuilt)
      */
     bool applyDelta(int idx, long long firstUpdateId, long long finalUpdateId,
                     const std::vector<PriceLevel>& bidUpdates,
                     const std::vector<PriceLevel>& askUpdates,
                     long long eventTimeMs) {
-        
         BookState state = states_[idx];
-        
-        if (state == BookState::SYNCING) {
-            // First delta after snapshot
-            // Must satisfy: U <= snapshotUpdateId+1 <= u
-            if (firstUpdateId > snapshotUpdateIds_[idx] + 1) {
-                // Snapshot is too old, need new snapshot
-                invalidate(idx, "Snapshot too old");
-                return false;
-            }
-            if (finalUpdateId < snapshotUpdateIds_[idx] + 1) {
-                // Delta is stale, skip it
-                return true;
-            }
-            // Transition to VALID
-            states_[idx] = BookState::VALID;
+        if (state != BookState::SYNCING && state != BookState::VALID) {
+            return false;   // INIT or INVALID - shouldn't be applying deltas
         }
-        else if (state == BookState::VALID) {
-            // Per Binance spec (How to manage a local order book correctly):
-            //   - u < lastUpdateId    -> stale, ignore (don't apply, don't advance)
-            //   - U > lastUpdateId+1  -> true gap, invalidate and re-snapshot
-            //   - otherwise (overlap or contiguous) -> apply; the event
-            //     payload is the absolute final state for those price levels
-            //     at update id u, so overwriting levels we've already seen
-            //     is safe.
-            if (finalUpdateId < lastUpdateIds_[idx]) {
-                return true;  // stale, no state change
-            }
-            if (firstUpdateId > lastUpdateIds_[idx] + 1) {
-                invalidate(idx, "Sequence gap");
-                return false;
-            }
-        }
-        else {
-            // INIT or INVALID - shouldn't be applying deltas
+
+        Verdict v = checkSequence(seq_[idx], firstUpdateId, finalUpdateId);
+        if (v == Verdict::FAIL) {
+            invalidate(idx, "Sequence gap");
             return false;
         }
-        
-        // Apply bid updates
-        for (const auto& upd : bidUpdates) {
-            applyLevelUpdate(idx, true, upd);
+        if (v == Verdict::APPLY) {
+            applyLevels(books_[idx], bidUpdates, askUpdates);
+            seq_[idx].lastId = finalUpdateId;
+            exchEventTimeMs_[idx] = eventTimeMs;
+            states_[idx] = BookState::VALID;
+
+            bool exhausted = depthExhausted(idx);
+            if (exhausted && !wasExhausted_[idx]) ++depthExhaustedEvents_;
+            wasExhausted_[idx] = exhausted;
         }
-        
-        // Apply ask updates
-        for (const auto& upd : askUpdates) {
-            applyLevelUpdate(idx, false, upd);
+
+        // A refresh is in flight: keep a copy for the shadow book.
+        if (refreshPending_[idx]) {
+            bufferDelta(idx, BufferedDelta{firstUpdateId, finalUpdateId, eventTimeMs,
+                                           bidUpdates, askUpdates});
         }
-        
-        lastUpdateIds_[idx] = finalUpdateId;
-        exchEventTimeMs_[idx] = eventTimeMs;
         return true;
     }
-    
-    /**
-     * @brief Reset a symbol's book to INIT state
-     */
+
+    /// Reset a symbol's book to INIT state
     void reset(int idx) {
-        clearBook(idx);
+        books_[idx] = Book{};
         states_[idx] = BookState::INIT;
-        lastUpdateIds_[idx] = 0;
-        snapshotUpdateIds_[idx] = 0;
+        seq_[idx] = Seq{};
         exchEventTimeMs_[idx] = 0;
         deltaBuffers_[idx].clear();
         snapshotRequested_[idx] = false;
+        refreshPending_[idx] = false;
+        wasExhausted_[idx] = false;
     }
-    
-    /**
-     * @brief Reset all books (on reconnect)
-     */
+
+    /// Reset all books (on reconnect)
     void resetAll() {
-        for (int i = 0; i < numSymbols_; ++i) {
-            reset(i);
-        }
+        for (int i = 0; i < numSymbols_; ++i) reset(i);
     }
-    
-    /**
-     * @brief Mark book as invalid
-     */
-    void invalidate(int idx, const char* reason) {
+
+    /// Mark book as invalid (caller logs the reason)
+    void invalidate(int idx, const char* /*reason*/) {
         states_[idx] = BookState::INVALID;
-        // Caller should log the reason
     }
-    
+
     // ========================================================================
     // L5 EXTRACTION
     // ========================================================================
-    
+
     /**
      * @brief Extract L5 quote for publication
-     * @param idx Symbol index
-     * @param fhRecvTimeUtcNs Feed handler receive timestamp
-     * @param fhSeqNo Feed handler sequence number
-     * @return L5Quote ready for kdb+ publication
+     *
+     * isValid is true only when the book is sequence-valid AND both sides
+     * can guarantee their top BOOK_DEPTH levels (see depthExhausted). An
+     * invalid quote carries no levels. Slots beyond the exchange's real
+     * depth (a genuinely thin book) are zero.
      */
     L5Quote getL5(int idx, long long fhRecvTimeUtcNs, long long fhSeqNo) const {
         L5Quote q;
         q.sym = idxToSym_[idx];
-        
-        const int offset = idx * BOOK_DEPTH;
-        
-        // Copy L5 bid levels
-        q.bidPrice1 = bidPrices_[offset + 0]; q.bidQty1 = bidQtys_[offset + 0];
-        q.bidPrice2 = bidPrices_[offset + 1]; q.bidQty2 = bidQtys_[offset + 1];
-        q.bidPrice3 = bidPrices_[offset + 2]; q.bidQty3 = bidQtys_[offset + 2];
-        q.bidPrice4 = bidPrices_[offset + 3]; q.bidQty4 = bidQtys_[offset + 3];
-        q.bidPrice5 = bidPrices_[offset + 4]; q.bidQty5 = bidQtys_[offset + 4];
-        
-        // Copy L5 ask levels
-        q.askPrice1 = askPrices_[offset + 0]; q.askQty1 = askQtys_[offset + 0];
-        q.askPrice2 = askPrices_[offset + 1]; q.askQty2 = askQtys_[offset + 1];
-        q.askPrice3 = askPrices_[offset + 2]; q.askQty3 = askQtys_[offset + 2];
-        q.askPrice4 = askPrices_[offset + 3]; q.askQty4 = askQtys_[offset + 3];
-        q.askPrice5 = askPrices_[offset + 4]; q.askQty5 = askQtys_[offset + 4];
-        
-        q.isValid = (states_[idx] == BookState::VALID);
+        q.isValid = (states_[idx] == BookState::VALID) && !depthExhausted(idx);
         q.exchEventTimeMs = exchEventTimeMs_[idx];
         q.fhRecvTimeUtcNs = fhRecvTimeUtcNs;
         q.fhSeqNo = fhSeqNo;
-        
+
+        if (states_[idx] != BookState::VALID && states_[idx] != BookState::SYNCING) return q;
+        if (states_[idx] == BookState::VALID && !q.isValid) return q;
+
+        double* bp[BOOK_DEPTH] = {&q.bidPrice1, &q.bidPrice2, &q.bidPrice3, &q.bidPrice4, &q.bidPrice5};
+        double* bq[BOOK_DEPTH] = {&q.bidQty1, &q.bidQty2, &q.bidQty3, &q.bidQty4, &q.bidQty5};
+        double* ap[BOOK_DEPTH] = {&q.askPrice1, &q.askPrice2, &q.askPrice3, &q.askPrice4, &q.askPrice5};
+        double* aq[BOOK_DEPTH] = {&q.askQty1, &q.askQty2, &q.askQty3, &q.askQty4, &q.askQty5};
+
+        const auto& bl = books_[idx].bid.levels;
+        const auto& al = books_[idx].ask.levels;
+        for (int i = 0; i < BOOK_DEPTH; ++i) {
+            if (static_cast<std::size_t>(i) < bl.size()) {
+                const PriceLevel& l = bl[bl.size() - 1 - i];   // best is at the back
+                *bp[i] = l.price; *bq[i] = l.qty;
+            }
+            if (static_cast<std::size_t>(i) < al.size()) {
+                const PriceLevel& l = al[al.size() - 1 - i];
+                *ap[i] = l.price; *aq[i] = l.qty;
+            }
+        }
         return q;
     }
-    
+
     // ========================================================================
     // PUBLISHER LOGIC
     // ========================================================================
-    
-    /**
-     * @brief Check if should publish L5 for a symbol
-     * @param idx Symbol index
-     * @param current Current L5 quote
-     * @return true if should publish
-     */
+
+    /// Should the current quote be published? (first, validity change, change, heartbeat)
     bool shouldPublish(int idx, const L5Quote& current) {
         auto now = std::chrono::steady_clock::now();
-        
-        // First publish ever
-        if (!hasPublished_[idx]) {
-            return true;
-        }
-        
-        // Validity changed
-        if (current.isValid != lastPublished_[idx].isValid) {
-            return true;
-        }
-        
-        // If invalid, don't spam
-        if (!current.isValid) {
-            return false;
-        }
-        
-        // Price/qty changed
-        if (!current.samePricesAs(lastPublished_[idx])) {
-            return true;
-        }
-        
-        // Timeout (publish heartbeat even if unchanged)
+
+        if (!hasPublished_[idx]) return true;
+        if (current.isValid != lastPublished_[idx].isValid) return true;
+        if (!current.isValid) return false;                         // don't spam invalid rows
+        if (!current.samePricesAs(lastPublished_[idx])) return true;
+
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             now - lastPublishTimes_[idx]).count();
-        if (elapsed >= PUBLISH_TIMEOUT_MS) {
-            return true;
-        }
-        
-        return false;
+        return elapsed >= PUBLISH_TIMEOUT_MS;
     }
-    
-    /**
-     * @brief Record that a quote was published
-     */
+
     void recordPublish(int idx, const L5Quote& quote) {
         lastPublished_[idx] = quote;
         lastPublishTimes_[idx] = std::chrono::steady_clock::now();
         hasPublished_[idx] = true;
     }
-    
-    /**
-     * @brief Check if any symbol needs timeout publish
-     * @return Vector of symbol indices that need timeout publish
-     */
+
+    /// Symbols whose last publish is older than the heartbeat timeout
     std::vector<int> getTimeoutPublishNeeded() {
         std::vector<int> result;
         auto now = std::chrono::steady_clock::now();
-        
         for (int i = 0; i < numSymbols_; ++i) {
             if (states_[i] == BookState::VALID && hasPublished_[i]) {
                 auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                     now - lastPublishTimes_[i]).count();
-                if (elapsed >= PUBLISH_TIMEOUT_MS) {
-                    result.push_back(i);
-                }
+                if (elapsed >= PUBLISH_TIMEOUT_MS) result.push_back(i);
             }
         }
-        
         return result;
     }
 
 private:
     // ========================================================================
-    // SYMBOL MAPPING
+    // ONE SIDE OF ONE BOOK
     // ========================================================================
-    
+
+    /// true if price a is strictly better than price b on this side
+    static bool better(bool isBid, double a, double b) { return isBid ? a > b : a < b; }
+
+    struct Side {
+        std::vector<PriceLevel> levels;   ///< sorted worst -> best (best at the back)
+        bool bounded = false;             ///< deeper levels exist that we do not know
+        double horizon = 0.0;             ///< worst known price (meaningful if bounded)
+
+        /// fewer than n known levels while more may exist beyond the horizon
+        bool below(std::size_t n) const { return bounded && levels.size() < n; }
+
+        bool inHorizon(bool isBid, double price) const {
+            return !bounded || !better(isBid, horizon, price);
+        }
+
+        void trim(std::size_t maxLevels) {
+            if (levels.size() <= maxLevels) return;
+            levels.erase(levels.begin(), levels.begin() + (levels.size() - maxLevels));
+            bounded = true;
+            horizon = levels.front().price;
+        }
+
+        void load(bool isBid, const std::vector<PriceLevel>& snapshot,
+                  std::size_t snapshotLimit, std::size_t maxLevels) {
+            levels.clear();
+            levels.reserve(snapshot.size() + 64);
+            for (const auto& l : snapshot) {
+                if (l.qty > 0.0) levels.push_back(l);
+            }
+            std::sort(levels.begin(), levels.end(),
+                      [isBid](const PriceLevel& a, const PriceLevel& b) {
+                          return better(isBid, b.price, a.price);
+                      });
+            bounded = snapshot.size() >= snapshotLimit;
+            horizon = (bounded && !levels.empty()) ? levels.front().price : 0.0;
+            if (levels.empty()) bounded = false;
+            trim(maxLevels);
+        }
+
+        /// Binance semantics: qty is absolute; qty 0 removes the level.
+        void update(bool isBid, const PriceLevel& u, std::size_t maxLevels) {
+            auto it = std::lower_bound(levels.begin(), levels.end(), u.price,
+                [isBid](const PriceLevel& l, double p) { return better(isBid, p, l.price); });
+            bool found = (it != levels.end() && it->price == u.price);
+
+            if (u.qty == 0.0) {
+                if (found) levels.erase(it);     // deleting an unknown level is normal
+                return;
+            }
+            if (found) { it->qty = u.qty; return; }
+            if (!inHorizon(isBid, u.price)) return;   // beyond the horizon: not tracked
+            levels.insert(it, u);
+            trim(maxLevels);
+        }
+    };
+
+    struct Book { Side bid; Side ask; };
+
+    void applyLevels(Book& b, const std::vector<PriceLevel>& bidUpdates,
+                     const std::vector<PriceLevel>& askUpdates) const {
+        for (const auto& u : bidUpdates) b.bid.update(true, u, cfg_.maxLevels);
+        for (const auto& u : askUpdates) b.ask.update(false, u, cfg_.maxLevels);
+    }
+
+    // ========================================================================
+    // SEQUENCING
+    // ========================================================================
+
+    /// Update-id bookkeeping of one book (live or shadow).
+    struct Seq {
+        bool needBridge = false;      ///< snapshot loaded, first event not yet seen
+        long long snapshotId = 0;     ///< lastUpdateId of that snapshot
+        long long lastId = 0;         ///< update id the book is at
+    };
+
+    enum class Verdict { SKIP, APPLY, FAIL };
+
+    /**
+     * Binance spot rule ("How to manage a local order book correctly"):
+     *   first event after a snapshot:  U <= lastUpdateId+1 <= u
+     *   afterwards:  u < lastId -> stale, skip;  U > lastId+1 -> gap;
+     *                otherwise apply (payload quantities are absolute, so
+     *                an overlapping event is safe to re-apply).
+     */
+    static Verdict checkSequence(Seq& s, long long U, long long u) {
+        if (s.needBridge) {
+            if (u < s.snapshotId + 1) return Verdict::SKIP;      // older than the snapshot
+            if (U > s.snapshotId + 1) return Verdict::FAIL;      // snapshot too old
+            s.needBridge = false;
+            return Verdict::APPLY;
+        }
+        if (u < s.lastId) return Verdict::SKIP;
+        if (U > s.lastId + 1) return Verdict::FAIL;
+        return Verdict::APPLY;
+    }
+
+    SnapshotOutcome finishRefresh(int idx, long long lastUpdateId,
+                                  const std::vector<PriceLevel>& bids,
+                                  const std::vector<PriceLevel>& asks) {
+        refreshPending_[idx] = false;
+
+        Book shadow;
+        shadow.bid.load(true, bids, cfg_.snapshotLimit, cfg_.maxLevels);
+        shadow.ask.load(false, asks, cfg_.snapshotLimit, cfg_.maxLevels);
+        Seq sseq{true, lastUpdateId, lastUpdateId};
+
+        auto& buf = deltaBuffers_[idx];
+        bool failed = false;
+        for (const auto& d : buf) {
+            Verdict v = checkSequence(sseq, d.firstUpdateId, d.finalUpdateId);
+            if (v == Verdict::FAIL) { failed = true; break; }
+            if (v == Verdict::APPLY) {
+                applyLevels(shadow, d.bids, d.asks);
+                sseq.lastId = d.finalUpdateId;
+            }
+        }
+        buf.clear();
+
+        if (failed) {                 // hole between snapshot and buffered deltas
+            ++refreshFailures_;
+            return SnapshotOutcome::REFRESH_FAILED;
+        }
+
+        // If no buffered delta bridged, the snapshot is ahead of the stream:
+        // sseq.needBridge stays set and the next live delta must bridge it.
+        books_[idx] = std::move(shadow);
+        seq_[idx] = sseq;
+        wasExhausted_[idx] = depthExhausted(idx);
+        ++depthRefreshes_;
+        return SnapshotOutcome::REFRESHED;
+    }
+
+    // ========================================================================
+    // MEMBERS
+    // ========================================================================
+
+    BookConfig cfg_;
     int numSymbols_;
     std::unordered_map<std::string, int> symToIdx_;
     std::vector<std::string> idxToSym_;
-    
-    // ========================================================================
-    // BOOK DATA (flat arrays)
-    // ========================================================================
-    
-    // Price and qty arrays: [numSymbols * BOOK_DEPTH]
-    // Access: bidPrices_[symIdx * BOOK_DEPTH + level]
-    std::vector<double> bidPrices_;     // Bids sorted high→low (index 0 = best bid)
-    std::vector<double> bidQtys_;
-    std::vector<double> askPrices_;     // Asks sorted low→high (index 0 = best ask)
-    std::vector<double> askQtys_;
-    
-    // ========================================================================
-    // STATE (per symbol)
-    // ========================================================================
-    
+
+    std::vector<Book> books_;
+    std::vector<Seq> seq_;
     std::vector<BookState> states_;
-    std::vector<long long> lastUpdateIds_;
-    std::vector<long long> snapshotUpdateIds_;
     std::vector<long long> exchEventTimeMs_;
     std::vector<std::deque<BufferedDelta>> deltaBuffers_;
     std::vector<bool> snapshotRequested_;
+    std::vector<bool> refreshPending_;
+    std::vector<bool> wasExhausted_;
+
     long long bufferOverflows_ = 0;
-    
-    // ========================================================================
-    // PUBLISHER STATE (per symbol)
-    // ========================================================================
-    
+    long long depthRefreshes_ = 0;
+    long long refreshFailures_ = 0;
+    long long depthExhaustedEvents_ = 0;
+
     std::vector<L5Quote> lastPublished_;
     std::vector<std::chrono::steady_clock::time_point> lastPublishTimes_;
     std::vector<bool> hasPublished_;
-    
-    // ========================================================================
-    // PRIVATE HELPERS
-    // ========================================================================
-    
-    /**
-     * @brief Clear a symbol's book to zeros
-     */
-    void clearBook(int idx) {
-        const int offset = idx * BOOK_DEPTH;
-        for (int i = 0; i < BOOK_DEPTH; ++i) {
-            bidPrices_[offset + i] = 0.0;
-            bidQtys_[offset + i] = 0.0;
-            askPrices_[offset + i] = 0.0;
-            askQtys_[offset + i] = 0.0;
-        }
-    }
-    
-    /**
-     * @brief Apply a single level update to the book
-     * 
-     * Binance delta semantics:
-     *   - qty > 0: update or insert at this price
-     *   - qty = 0: delete this price level
-     * 
-     * @param idx Symbol index
-     * @param isBid true for bid side, false for ask side
-     * @param update Price level update
-     */
-    void applyLevelUpdate(int idx, bool isBid, const PriceLevel& update) {
-        const int offset = idx * BOOK_DEPTH;
-        double* prices = isBid ? &bidPrices_[offset] : &askPrices_[offset];
-        double* qtys = isBid ? &bidQtys_[offset] : &askQtys_[offset];
-        
-        // Find existing price or insertion point
-        int existingIdx = -1;
-        int insertIdx = BOOK_DEPTH;  // Default: beyond end
-        
-        for (int i = 0; i < BOOK_DEPTH; ++i) {
-            if (prices[i] == update.price && qtys[i] > 0.0) {
-                existingIdx = i;
-                break;
-            }
-            
-            // Find insertion point (maintain sort order)
-            if (prices[i] == 0.0 || (isBid ? update.price > prices[i] : update.price < prices[i])) {
-                if (insertIdx == BOOK_DEPTH) {
-                    insertIdx = i;
-                }
-            }
-        }
-        
-        if (update.qty == 0.0) {
-            // DELETE: remove this price level
-            if (existingIdx >= 0) {
-                // Shift remaining levels up
-                for (int i = existingIdx; i < BOOK_DEPTH - 1; ++i) {
-                    prices[i] = prices[i + 1];
-                    qtys[i] = qtys[i + 1];
-                }
-                // Clear last level
-                prices[BOOK_DEPTH - 1] = 0.0;
-                qtys[BOOK_DEPTH - 1] = 0.0;
-            }
-        } else {
-            // UPDATE or INSERT
-            if (existingIdx >= 0) {
-                // Update existing level
-                qtys[existingIdx] = update.qty;
-            } else if (insertIdx < BOOK_DEPTH) {
-                // Insert new level: shift levels down
-                for (int i = BOOK_DEPTH - 1; i > insertIdx; --i) {
-                    prices[i] = prices[i - 1];
-                    qtys[i] = qtys[i - 1];
-                }
-                prices[insertIdx] = update.price;
-                qtys[insertIdx] = update.qty;
-            }
-            // else: price would be beyond L5, ignore
-        }
-    }
 };
 
 #endif // ORDER_BOOK_MANAGER_HPP

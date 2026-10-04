@@ -115,6 +115,7 @@ void QuoteFeedHandler::run() {
     }
     
     // Cleanup
+    logStats();
     spdlog::info("Cleaning up...");
     snapshotWorker_->stop();
     spdlog::info("Snapshot worker stopped");
@@ -291,6 +292,7 @@ void QuoteFeedHandler::runWebSocketLoop() {
     
     // Health publish timer
     auto lastHealthPub = std::chrono::steady_clock::now();
+    auto lastStatsLog = lastHealthPub;
     
     // Message loop
     while (running_) {
@@ -332,6 +334,10 @@ void QuoteFeedHandler::runWebSocketLoop() {
         if (std::chrono::duration_cast<std::chrono::seconds>(now - lastHealthPub).count() >= HEALTH_INTERVAL_SEC) {
             publishHealth();
             lastHealthPub = now;
+        }
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - lastStatsLog).count() >= STATS_INTERVAL_SEC) {
+            logStats();
+            lastStatsLog = now;
         }
     }
     
@@ -435,10 +441,10 @@ void QuoteFeedHandler::processMessage(const std::string& msg, long long fhRecvTi
 
 void QuoteFeedHandler::handleDelta(int symIdx, const BufferedDelta& delta, long long fhRecvTimeUtcNs) {
     BookState state = bookMgr_->getState(symIdx);
-    
+
     switch (state) {
         case BookState::INIT:
-            // Buffer delta and request snapshot
+            // Buffer the delta (capped) until the snapshot arrives
             if (!bookMgr_->bufferDelta(symIdx, delta)) {
                 long long n = bookMgr_->bufferOverflows();
                 if (n == 1 || n % 1000 == 0) {
@@ -455,47 +461,51 @@ void QuoteFeedHandler::handleDelta(int symIdx, const BufferedDelta& delta, long 
                 requestSnapshot(symIdx);
             }
             break;
-            
+
         case BookState::SYNCING:
-            // Apply delta (may transition to VALID)
-            if (!bookMgr_->applyDelta(symIdx, delta.firstUpdateId, delta.finalUpdateId,
-                                      delta.bids, delta.asks, delta.eventTimeMs)) {
-                spdlog::warn("{} failed to apply delta in SYNCING state", 
-                    bookMgr_->getSymbol(symIdx));
-                snapshotScheduler_->onFailure(symIdx, steadyNowMs());
-                publishInvalid(symIdx, fhRecvTimeUtcNs);
-                bookMgr_->reset(symIdx);
-            } else {
-                if (bookMgr_->isValid(symIdx)) {
-                    snapshotScheduler_->onSynced(symIdx);
-                    spdlog::info("{} is now VALID", bookMgr_->getSymbol(symIdx));
-                    maybePublish(symIdx, fhRecvTimeUtcNs);
-                }
-            }
-            break;
-            
         case BookState::VALID:
-            // Apply delta directly
             if (!bookMgr_->applyDelta(symIdx, delta.firstUpdateId, delta.finalUpdateId,
                                       delta.bids, delta.asks, delta.eventTimeMs)) {
-                spdlog::warn("{} sequence gap detected", bookMgr_->getSymbol(symIdx));
+                // Sequence gap (or a snapshot too old to bridge): the book
+                // can no longer be trusted. Publish one invalid row so the
+                // hole is visible downstream, then rebuild from a snapshot.
+                if (state == BookState::VALID) {
+                    ++ctrSequenceGaps_;
+                    spdlog::warn("{} sequence gap detected (U={} u={})", bookMgr_->getSymbol(symIdx),
+                                 delta.firstUpdateId, delta.finalUpdateId);
+                } else {
+                    spdlog::warn("{} snapshot does not bridge to the stream (U={} u={})",
+                                 bookMgr_->getSymbol(symIdx), delta.firstUpdateId, delta.finalUpdateId);
+                    snapshotScheduler_->onFailure(symIdx, steadyNowMs());
+                }
+                ++ctrResyncs_;
                 publishInvalid(symIdx, fhRecvTimeUtcNs);
                 bookMgr_->reset(symIdx);
-            } else {
-                maybePublish(symIdx, fhRecvTimeUtcNs);
+                break;
+            }
+            if (!bookMgr_->isValid(symIdx)) break;       // still waiting for the bridging delta
+
+            if (state == BookState::SYNCING) {
+                snapshotScheduler_->onSynced(symIdx);
+                spdlog::info("{} is now VALID", bookMgr_->getSymbol(symIdx));
+            }
+            maybePublish(symIdx, fhRecvTimeUtcNs);
+
+            // Known depth running low (the market moved toward the snapshot
+            // horizon): fetch a fresh snapshot in the background. The book
+            // stays VALID and keeps publishing meanwhile.
+            if (bookMgr_->wantsRefresh(symIdx) &&
+                snapshotScheduler_->tryAcquire(symIdx, steadyNowMs())) {
+                bookMgr_->beginRefresh(symIdx);
+                requestSnapshot(symIdx);
             }
             break;
-            
+
         case BookState::INVALID:
-            // Reset and start over
             bookMgr_->reset(symIdx);
             break;
     }
 }
-
-// ============================================================================
-// SNAPSHOT HANDLING (async via SnapshotWorker)
-// ============================================================================
 
 void QuoteFeedHandler::requestSnapshot(int symIdx) {
     const std::string& sym = bookMgr_->getSymbol(symIdx);
@@ -535,8 +545,10 @@ void QuoteFeedHandler::applySnapshotResults() {
                           bookMgr_->getSymbol(symIdx), SNAPSHOT_TIMEOUT_MS);
             ++latestRequestId_[i];              // a late result is now stale
             snapshotRequestedAtMs_[i] = 0;
+            bookMgr_->cancelRefresh(symIdx);
             bookMgr_->setSnapshotRequested(symIdx, false);
             snapshotScheduler_->onFailure(symIdx, nowMs);
+            ++ctrSnapshotFailures_;
         }
     }
 
@@ -545,20 +557,19 @@ void QuoteFeedHandler::applySnapshotResults() {
         const std::string& sym = r.sym;
         int symIdx = r.symIdx;
 
-        // Stale-detection: drop results whose request id is older than the
-        // latest one we've issued for this symbol. Bumped on every reset
-        // path that re-enqueues, so we only ever apply the freshest result.
+        // Discard stale results - a newer request was submitted for this symbol
         if (r.requestId < latestRequestId_[symIdx]) {
             spdlog::debug("Discarding stale snapshot result for {} (id {} < {})",
                           sym, r.requestId, latestRequestId_[symIdx]);
             continue;
         }
-
         snapshotRequestedAtMs_[symIdx] = 0;
 
         if (!r.data.success) {
-            // Stay in INIT and keep buffering deltas. The scheduler decides
-            // when the next attempt may go out; nothing is re-requested here.
+            // Initial sync: stay in INIT and keep buffering. Refresh: the
+            // live book carries on. Either way the scheduler decides when
+            // the next attempt may go out; nothing is re-requested here.
+            ++ctrSnapshotFailures_;
             snapshotScheduler_->onFailure(symIdx, nowMs, r.data.httpStatus,
                                           r.data.retryAfterSec, r.data.usedWeight1m);
             spdlog::error("Snapshot fetch failed for {}: {} (failure #{} for this symbol, next attempt in {} ms)",
@@ -568,41 +579,49 @@ void QuoteFeedHandler::applySnapshotResults() {
                 spdlog::critical("Binance rate limit hit (HTTP {}): all snapshot requests paused for {} ms",
                                  r.data.httpStatus, snapshotScheduler_->pausedUntilMs() - nowMs);
             }
+            bookMgr_->cancelRefresh(symIdx);
             bookMgr_->setSnapshotRequested(symIdx, false);
             continue;
         }
         snapshotScheduler_->onFetchOk(symIdx, nowMs, r.data.usedWeight1m);
 
-        // Apply snapshot
-        bookMgr_->applySnapshot(symIdx, r.data.lastUpdateId, r.data.bids, r.data.asks);
-        bookMgr_->setSnapshotRequested(symIdx, false);
-        spdlog::debug("{} snapshot applied, lastUpdateId={}", sym, r.data.lastUpdateId);
-
-        // Apply buffered deltas that arrived during the fetch
-        auto& buffer = bookMgr_->getDeltaBuffer(symIdx);
-        spdlog::debug("Applying {} buffered deltas for {}", buffer.size(), sym);
-        while (!buffer.empty()) {
-            const auto& delta = buffer.front();
-            if (!bookMgr_->applyDelta(symIdx, delta.firstUpdateId, delta.finalUpdateId,
-                                      delta.bids, delta.asks, delta.eventTimeMs)) {
-                spdlog::warn("{} failed during buffered delta replay", sym);
-                snapshotScheduler_->onFailure(symIdx, nowMs);
+        SnapshotOutcome outcome = bookMgr_->onSnapshot(symIdx, r.data.lastUpdateId,
+                                                       r.data.bids, r.data.asks);
+        switch (outcome) {
+            case SnapshotOutcome::SYNCED:
+                snapshotScheduler_->onSynced(symIdx);
+                spdlog::info("{} is now VALID (snapshot lastUpdateId={}, {} bids, {} asks)",
+                             sym, r.data.lastUpdateId, r.data.bids.size(), r.data.asks.size());
                 break;
-            }
-            buffer.pop_front();
-        }
-        buffer.clear();
-
-        if (bookMgr_->isValid(symIdx)) {
-            snapshotScheduler_->onSynced(symIdx);
-            spdlog::info("{} is now VALID", sym);
+            case SnapshotOutcome::AWAITING_BRIDGE:
+                spdlog::debug("{} snapshot applied (lastUpdateId={}), waiting for the bridging delta",
+                              sym, r.data.lastUpdateId);
+                break;
+            case SnapshotOutcome::SYNC_FAILED:
+                // Book is INVALID; the next delta resets it and a new
+                // snapshot is requested under the scheduler's backoff.
+                ++ctrResyncs_;
+                snapshotScheduler_->onFailure(symIdx, nowMs);
+                spdlog::warn("{} snapshot (lastUpdateId={}) is older than the buffered deltas - resync",
+                             sym, r.data.lastUpdateId);
+                break;
+            case SnapshotOutcome::REFRESHED:
+                snapshotScheduler_->onSynced(symIdx);
+                spdlog::info("{} depth refreshed in the background (lastUpdateId={}, known levels {}/{})",
+                             sym, r.data.lastUpdateId,
+                             bookMgr_->knownLevels(symIdx, true), bookMgr_->knownLevels(symIdx, false));
+                break;
+            case SnapshotOutcome::REFRESH_FAILED:
+                snapshotScheduler_->onFailure(symIdx, nowMs);
+                spdlog::warn("{} depth refresh could not bridge (lastUpdateId={}); live book kept, will retry",
+                             sym, r.data.lastUpdateId);
+                break;
+            case SnapshotOutcome::IGNORED:
+                spdlog::debug("{} snapshot result ignored (book state changed meanwhile)", sym);
+                break;
         }
     }
 }
-
-// ============================================================================
-// PUBLISHING
-// ============================================================================
 
 void QuoteFeedHandler::maybePublish(int symIdx, long long fhRecvTimeUtcNs) {
     // Build a candidate quote with a tentative seq, then only commit
@@ -767,9 +786,22 @@ void QuoteFeedHandler::checkPublishTimeouts(long long fhRecvTimeUtcNs) {
     std::vector<int> needsPublish = bookMgr_->getTimeoutPublishNeeded();
     
     for (int symIdx : needsPublish) {
+        // Heartbeats are for valid quotes only. A book whose known depth
+        // is exhausted has already published its one invalid row.
+        L5Quote quote = bookMgr_->getL5(symIdx, fhRecvTimeUtcNs, fhSeqNo_ + 1);
+        if (!quote.isValid) continue;
         ++fhSeqNo_;
-        L5Quote quote = bookMgr_->getL5(symIdx, fhRecvTimeUtcNs, fhSeqNo_);
         publishL5(quote);
         bookMgr_->recordPublish(symIdx, quote);
     }
+}
+
+void QuoteFeedHandler::logStats() const {
+    spdlog::info("STATS msgs={} published={} gaps={} resyncs={} snapshotRequests={} snapshotFailures={} "
+                 "rateLimitPauses={} bufferOverflows={} depthRefreshes={} refreshFailures={} depthExhausted={}",
+                 msgsReceived_, msgsPublished_, ctrSequenceGaps_, ctrResyncs_,
+                 snapshotScheduler_->requests(), ctrSnapshotFailures_,
+                 snapshotScheduler_->rateLimitPauses(), bookMgr_->bufferOverflows(),
+                 bookMgr_->depthRefreshes(), bookMgr_->refreshFailures(),
+                 bookMgr_->depthExhaustedEvents());
 }
