@@ -141,7 +141,7 @@ t2s/
 ## Operating it day to day
 
 - `./start.sh --markets spot,futures` starts everything in the tmux session `t2s` and only returns once TP is healthy, WDB is connected with its replay complete, and every handler has registered with TP; `--headless` returns without attaching. `./stop.sh` stops handlers, then WDB (graceful flush and checkpoint), then TP, then tmux. `./status.sh` shows processes, health, rows today, the counters that matter, disk, pending tmp dirs and the clock, and exits non-zero when something needs attention. `./check_eod.sh [date]` confirms a closed day against its log.
-- What happens on sleep, `wsl --shutdown` and Windows restart, the three ways to restart the pipeline automatically (Task Scheduler at logon, a systemd unit inside WSL, or manual), and the clock fix are in [ops/RUNNING.md](ops/RUNNING.md). The daily cron checks write to `ops/cron/`.
+- The pipeline runs unattended as systemd user services, restarted on failure, with daily jobs on systemd timers and a Windows task that boots WSL at startup. Setup, what happens on a crash, `wsl --shutdown`, a Windows restart or laptop sleep, and the clock fix are in [ops/RUNNING.md](ops/RUNNING.md). `./start.sh --tmux` keeps the old tmux mode; the two never run together.
 - Rebuilding a day's partition from its TP log: `q kdb/utils/rebuild_day.q -date D` reports, `-build` writes and verifies `hdb/.rebuild/D`, `-swap` moves the old partition to `hdb/.rebuild/D.bak.<stamp>` and the rebuilt one in. Rebuilt rows carry a null `wdbRecvTimeUtcNs`: null means "rebuilt from the log, not received live"; live rows always have it set.
 - Resources: the pipeline uses well under 100 MB in steady state; the maintenance tools (retention scan, a day's rebuild, a long replay) need 1 to 7 GB one at a time. Measurements and a proposed `.wslconfig` are in [ops/RUNNING.md](ops/RUNNING.md).
 - Clock: WSL2's clock can fall behind after sleep, and partitions are dated by it. `./status.sh` warns on drift versus the Windows clock, TP's `.health[]` reports `clockSkewMs` against exchange time. Fix: `sudo hwclock -s`. Optional, via `sudo visudo`, to make the fix passwordless and limited to that one command: `philippe ALL=(root) NOPASSWD: /usr/sbin/hwclock -s` (not installed by the repo).
@@ -174,7 +174,7 @@ This produces four binaries, two per market: `trade_feed_handler` and `quote_fee
 
 ## Run
 
-Start everything via tmux:
+Start everything (through systemd once `ops/systemd/install.sh` has been run, otherwise in tmux):
 ```bash
 ./start.sh                          # spot: trade + quote handlers (default)
 ./start.sh --markets spot           # the same, explicit

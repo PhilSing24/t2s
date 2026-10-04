@@ -1,108 +1,177 @@
-# Running t2s day to day on this laptop (Windows + WSL2)
+# Running t2s unattended on this laptop (Windows + WSL2)
 
-This note covers what happens to the pipeline through the laptop's life and
-the three ways it can be restarted. Nothing here is installed by the repo;
-pick one and follow its section. Everything assumes the distro
-`Ubuntu-22.04`, the user `philippe`, and the checkout at `/home/philippe/t2s`.
+The pipeline runs as systemd **user** services inside WSL and comes back by
+itself after a crash, a WSL restart or a Windows restart. This note says how
+it is set up, what each event does, and what you have to do by hand (very
+little). Everything assumes the distro `Ubuntu-22.04`, the user `philippe`
+and the checkout at `/home/philippe/t2s`.
 
-## What happens today
-
-| Event | Effect | Recovery |
-|---|---|---|
-| Laptop sleeps / wakes | The WSL VM is paused. On wake the WebSocket idle timeout (30 s) and TCP keepalive make each feed handler reconnect to Binance within about a minute; TP and WDB carry on. The WSL clock may now be behind. | Automatic for the data path. Check the clock: `./status.sh` compares WSL to Windows and TP reports `clockSkewMs`; fix with `sudo hwclock -s`. |
-| `wsl --shutdown`, Windows restart | Every process dies without warning. Nothing is lost that TP had logged: WDB replays from its checkpoint on the next start, and TP's tpSeqNo continues from its reservation file. Rows a handler had sent in the instant TP died are counted as `missed`. | Nothing restarts the pipeline by itself. That is what the options below are for. |
-| Terminal closed | Nothing. The processes live in the tmux session `t2s`; `.wslconfig` has `vmIdleTimeout=-1`, so the VM stays up. | `tmux attach -t t2s` |
-| Crash of one process | TP crash: handlers reconnect and re-register when it is back, WDB reconnects and replays. WDB crash: replay on restart. Handler crash: its rows stop until it is relaunched. | Manual relaunch in its tmux window, or option B's restart-on-failure. |
-
-`./status.sh` shows all of this in a few lines and exits non-zero when
-anything needs attention.
-
-## Option A: Windows Task Scheduler starts the pipeline at logon
-
-The task runs `start.sh --headless` inside WSL when you log on. Simplest to
-reason about: one place to look (Task Scheduler), no systemd involvement,
-the tmux session is there to attach to.
-
-- Pros: one moving part; survives Windows restarts; you can run it by hand
-  from Task Scheduler at any time.
-- Cons: no restart if a process dies later in the day; `wsl --shutdown`
-  still kills everything without a graceful WDB flush; runs only after you
-  log on, not at boot.
-
-Install from an elevated PowerShell (text in `ops/windows-logon-task.ps1`):
-
-```powershell
-$action  = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d Ubuntu-22.04 -u philippe -- /home/philippe/t2s/start.sh --headless --markets spot,futures"
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERNAME"
-$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 20) -StartWhenAvailable
-Register-ScheduledTask -TaskName "t2s pipeline" -Action $action -Trigger $trigger -Settings $settings -Description "Start the t2s market data pipeline in WSL at logon"
-```
-
-Remove with `Unregister-ScheduledTask -TaskName "t2s pipeline"`.
-
-## Option B: systemd unit inside WSL, booted by a trivial logon task
-
-The unit (`ops/t2s.service`) runs `start.sh --headless` and `stop.sh`,
-restarts the pipeline if start.sh fails, and gives WDB a graceful flush when
-systemd stops the unit. systemd is already enabled in this WSL
-(`/etc/wsl.conf` has `systemd=true`), but nothing starts the distro after a
-Windows restart, so a logon task that merely runs `wsl.exe -d Ubuntu-22.04
--- true` is still needed to boot it.
-
-- Pros: `Restart=on-failure` relaunches the pipeline if start.sh fails;
-  `systemctl status t2s` and `journalctl -u t2s` give history; `wsl
-  --shutdown` asks systemd to stop units, so `stop.sh` gets a chance to
-  flush WDB before the VM goes away (not guaranteed: WSL gives a short
-  grace period).
-- Cons: two moving parts (Task Scheduler for the boot, systemd for the
-  service); the unit restarts the whole pipeline, not a single process;
-  tmux inside a service needs the user's environment, which the unit sets
-  up explicitly.
-
-Install:
+## Day to day
 
 ```bash
-sudo cp /home/philippe/t2s/ops/t2s.service /etc/systemd/system/t2s.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now t2s.service
-systemctl status t2s.service
+./status.sh                # the pipeline in a few lines; exit 1 if something needs attention
+./start.sh --markets spot,futures     # start (through systemd)
+./stop.sh                  # stop in order: handlers, WDB (flush + checkpoint), TP
+systemctl --user status 't2s-*'       # every unit
+journalctl --user -u t2s-tp -f        # follow one process (tp, wdb, trade-fh, quote-fh, trade-fh-fut, quote-fh-fut)
+systemctl --user list-timers 't2s-*'  # when the daily jobs run next
 ```
 
-And in an elevated PowerShell, the boot task:
+## What is installed
+
+| Piece | Where | Installed by |
+|---|---|---|
+| Six services and `t2s.target` | `~/.config/systemd/user/` (templates in `ops/systemd/`) | `ops/systemd/install.sh --enable` |
+| Four timers | same | same |
+| Environment of the processes (`PATH`, `QHOME`, `QPATH`, `T2S_HDB_DIR`, `T2S_TMP_DIR`) | `~/.config/t2s/t2s.env` | same; edit it there |
+| Lingering, so the user services start at WSL boot without a login | systemd | `sudo loginctl enable-linger philippe` (once) |
+| Permission to set the clock | `/etc/sudoers.d/t2s-hwclock` | you, see **Clock** |
+| Windows task that boots WSL at startup | Task Scheduler | you, `ops/windows-boot-task.ps1` |
+
+After changing a unit template: `ops/systemd/install.sh` again (it re-renders
+and reloads), then restart what changed. `ops/systemd/install.sh --uninstall`
+removes the units.
+
+## The services
+
+`t2s-tp`, `t2s-wdb`, `t2s-trade-fh`, `t2s-quote-fh`, `t2s-trade-fh-fut`,
+`t2s-quote-fh-fut`, grouped by `t2s.target`.
+
+- **Order.** WDB starts after TP; the handlers after TP and WDB. Stopping
+  goes in reverse: handlers, then WDB, then TP.
+- **Graceful stop.** WDB is asked over IPC to flush its buffers and write
+  its checkpoint (SIGTERM as fallback, on which it flushes too). TP saves
+  its session file on SIGTERM. The handlers close their sockets.
+- **Restart.** `Restart=on-failure` after 2 s: a crash, a `kill -9` or a
+  non-zero exit restarts the process. At most 10 restarts in 5 minutes,
+  then the unit is left `failed` and `./status.sh` says so. A handler that
+  exits with 1 (bad config) or 2 (TP rejected its row width) is not retried.
+- **A TP restart does not restart the handlers.** They reconnect and resend
+  what TP had not logged; WDB reconnects and replays.
+- **systemd or tmux, never both.** `./start.sh --tmux` runs the old way, each
+  process in a window of the tmux session `t2s`, with nothing restarting a
+  process that dies. `start.sh` refuses tmux mode while a unit is active,
+  and every unit refuses to start while the tmux session exists.
+
+## The timers
+
+| Timer | When | Runs | Log |
+|---|---|---|---|
+| `t2s-check-eod` | 00:30 UTC | `check_eod.sh`: yesterday's partition against its TP log | `ops/cron/check_eod.log` |
+| `t2s-retention` | 00:40 UTC | `logmgr.q -retention -apply`: deletes logs older than 7 days whose rows are all in the HDB | `ops/cron/retention.log` |
+| `t2s-status` | 07:00 UTC | `status.sh` | `ops/cron/status.log` |
+| `t2s-clock` | every 5 minutes | `ops/clock_check.sh` | `ops/cron/clock.log` |
+
+The three daily timers have `Persistent=true`: a run missed while the laptop
+was off or asleep happens as soon as the timer is active again. The times are
+written in UTC in the units themselves, so nothing depends on the system time
+zone (the crontab they replace needed a conversion to Singapore time).
+A daily job that fails leaves its unit `failed`; `./status.sh` reports it.
+
+## What happens when
+
+| Event | What happens | What you do |
+|---|---|---|
+| A process crashes or is killed | systemd restarts it within seconds. TP: handlers resend, WDB replays, `missed` stays 0. A trade handler: the trades it did not receive are recorded in `trade_gap` and backfilled. A quote handler: the hole is marked by the handler restart and the books resync. WDB: replays from its checkpoint. | Nothing. `./status.sh` shows the restart count. |
+| `wsl --shutdown`, WSL crash | Everything stops, possibly without a flush. Nothing logged by TP is lost. When the distro starts again, systemd starts the user manager (lingering) and `t2s.target`: TP continues its tpSeqNo, WDB replays the log, the trade handlers backfill what was traded meanwhile. | Nothing if the Windows boot task is installed (it restarts WSL within a minute). Otherwise open a WSL terminal. |
+| Windows restart | The boot task starts WSL at system startup, before logon; then as above. | Nothing. |
+| Laptop sleep | See the next section. | Nothing; check `./status.sh` if you are curious. |
+| Your Windows password changes | The boot task can no longer log on; WSL does not start at boot. | Update the task (below). |
+
+## Laptop sleep and wake
+
+While the laptop sleeps the WSL VM is frozen: no process runs, nothing is
+lost that was already received, and the exchange keeps trading.
+
+On wake, in order:
+
+1. **TP notices.** Its one-second timer finds a gap of more than 30 s between
+   two ticks and logs `RESUMED - no timer tick for N s`. `./status.sh` shows it
+   on the `SLEEP` line with the time, the duration and what has happened since.
+2. **The handlers find their WebSocket dead** (idle timeout 30 s, TCP
+   keepalive) and reconnect to Binance, usually within a minute. Each counts a
+   `wsReconnects`.
+3. **Quotes.** Each quote handler publishes one invalid row per symbol, which
+   marks the hole in the data, then rebuilds its books from fresh snapshots
+   (`resyncs`). `check_quote_seq.q` will list the hole as a *marked* break.
+4. **Trades.** The first trade after the reconnect jumps ahead in Binance's
+   trade id. The gap is recorded in `trade_gap` and backfilled over REST
+   within the rate limits: about 24,000 spot and 12,000 futures trades per
+   minute. A sleep longer than about two days leaves the futures part
+   `unrecoverable` (`tooOld`), and more than 500,000 missing ids per symbol
+   is `tooLarge`; both can be filled later from the Binance daily archive.
+5. **Timers.** A daily job whose time passed during the sleep runs now.
+6. **Clock.** WSL's clock normally jumps forward on wake. If it does not, it
+   stays behind by the length of the sleep, and since partitions are dated by
+   this clock that matters. Two things catch it: the `t2s-clock` timer, within
+   5 minutes, and `./status.sh` (`CLOCK` lines; TP's `clock skew` against the
+   exchange's event times). See **Clock**.
+
+Nothing in this sequence needs you. What to look at afterwards:
+
+```
+SLEEP: last resume 06:12:40Z after 7 h 31 min (4 min ago, 1 since TP started); since then: wsReconnects +4, resyncs +6, exchGaps +6, tradesBackfilled +58112, gapsRecovered +4
+GAPS : open 2 (oldest 221 s)  recovered 4 (58112 trades backfilled)  unrecoverable 0
+```
+
+`GAPS open` goes back to 0 when the backfill is done. Reconnects, resyncs and
+recovered gaps are shown but do not raise attention; an unrecoverable gap, an
+unmarked quote break or a clock drift does.
+
+## Clock
+
+`ops/clock_check.sh` compares the WSL clock with the VM's hardware clock,
+which follows the Windows clock and can be read without root
+(`/sys/class/rtc/rtc0/since_epoch`). Above 2 s of drift it runs
+`sudo -n /usr/sbin/hwclock -s`, which re-reads the hardware clock. That needs
+one sudoers line, limited to exactly that command:
+
+```bash
+sudo visudo -f /etc/sudoers.d/t2s-hwclock
+```
+
+and in the editor, this single line:
+
+```
+philippe ALL=(root) NOPASSWD: /usr/sbin/hwclock -s
+```
+
+Without the line the timer cannot fix the clock: it reports the drift in
+`ops/cron/clock.log`, its unit shows `failed`, and `./status.sh` raises it with
+the manual fix, `sudo hwclock -s`.
+
+## Windows: start WSL at boot
+
+systemd services do not keep a WSL distro alive, and nothing starts the distro
+after a Windows restart. `ops/windows-boot-task.ps1` registers a scheduled task
+that does both: it runs at system startup under your account, logged on or
+not, with a `wsl.exe` command that never exits.
+
+Install, from an **elevated** PowerShell:
 
 ```powershell
-$action  = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d Ubuntu-22.04 -- true"
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERNAME"
-Register-ScheduledTask -TaskName "WSL boot for t2s" -Action $action -Trigger $trigger -Description "Boot the Ubuntu-22.04 distro so systemd starts t2s"
+powershell -ExecutionPolicy Bypass -File \\wsl$\Ubuntu-22.04\home\philippe\t2s\ops\windows-boot-task.ps1
 ```
 
-Remove with `sudo systemctl disable --now t2s.service` and
-`Unregister-ScheduledTask -TaskName "WSL boot for t2s"`.
+It asks for your Windows password once and stores it with the task (in the
+Windows credential store, not in the repo).
 
-## Option C: manual
+**If your Windows password changes, update the task**, or it fails with
+"logon failure" (last result `0x8007052E`) and WSL no longer starts at boot.
+Elevated PowerShell:
 
-`./start.sh --markets spot,futures` after each logon or restart, `./stop.sh`
-before a planned shutdown, `./status.sh` whenever you want to know. Nothing
-to install; nothing happens while you are not looking.
+```powershell
+$c = Get-Credential -UserName "$env:USERDOMAIN\$env:USERNAME" -Message "New Windows password"
+Set-ScheduledTask -TaskName "t2s WSL boot" -User $c.UserName -Password $c.GetNetworkCredential().Password
+```
 
-## Daily checks (cron inside WSL)
+With a Microsoft account the password is the account's password, not the PIN.
+Check with `Get-ScheduledTask -TaskName "t2s WSL boot" | Get-ScheduledTaskInfo`
+(last result `0x41301` means it is running, which is right); remove with
+`Unregister-ScheduledTask -TaskName "t2s WSL boot" -Confirm:$false`.
 
-cron is running in this WSL. The entries added by the ops step:
-`check_eod.sh` at 00:30 UTC (confirms yesterday's UTC partition against its
-log), log retention with `-apply` at 00:40 UTC (deletes logs older than 7
-days whose rows are all in the HDB; switched from a dry run on 2026-10-03
-after the first real run removed 10.6 GB), and `status.sh` at 07:00 UTC
-for a summary. Each writes to `ops/cron/*.log` under the repo.
-
-The crontab is scheduled in local time. This WSL's zone is Asia/Singapore
-(UTC+8, no daylight saving) and Debian's cron 3.0pl1 ignores `CRON_TZ`
-(verified on 2026-10-03: an entry for 18:45 fired at 18:45 local), so the
-entries are written as 08:30, 08:40 and 15:00 local with the UTC time in
-their comments. If the system zone ever changes, shift them. The scripts
-themselves use UTC throughout: `check_eod.sh` takes yesterday with
-`date -u`, and logmgr's default date is q's `.z.d`, which is UTC. See the
-crontab itself (`crontab -l`) for the exact lines; they are appended after
-the existing entries of other projects.
+`.wslconfig` keeps `vmIdleTimeout=-1` (below), so the VM is not stopped for
+being idle.
 
 ## Resources and the WSL memory cap
 
@@ -135,21 +204,3 @@ it, and gives Windows back 4 GB. Keep `swap=8GB` as the safety net for a
 rebuild bigger than any day seen so far. If you expect to rebuild several
 days at once, raise `memory` to 10GB for that session; the tools run one
 day at a time either way.
-
-## Clock
-
-WSL2's clock can fall behind after the laptop sleeps. Partitions are dated
-by this clock (through the feed handlers' receive timestamps), so a drift
-matters. Two independent detectors: `./status.sh` compares the WSL clock
-to the Windows clock through interop and warns above 2 s; TP's `.health[]`
-reports `clockSkewMs`, the median of receive time minus exchange event
-time, and degrades above 5 s.
-
-Fix: `sudo hwclock -s` (re-reads the hardware clock, which Windows keeps
-right). Optional, so the fix needs no password: `sudo visudo` and add
-
-```
-philippe ALL=(root) NOPASSWD: /usr/sbin/hwclock -s
-```
-
-limited to exactly that command. Not installed by the repo.
