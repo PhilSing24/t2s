@@ -125,6 +125,12 @@ if command -v powershell.exe >/dev/null 2>&1; then
 else
     echo "CLOCK: no Windows interop (not WSL?) - drift check skipped"
 fi
+# The same check the t2s-clock timer runs: WSL clock vs the VM's hardware clock
+if [[ -x "$BASEDIR/ops/clock_check.sh" ]]; then
+    RTC_LINE=$("$BASEDIR/ops/clock_check.sh" --check 2>&1); RTC_RC=$?
+    echo "       hardware clock: ${RTC_LINE#* clock: }"
+    [[ $RTC_RC -eq 1 ]] && note "WSL clock differs from the hardware clock (${RTC_LINE#* clock: }) - run: sudo hwclock -s"
+fi
 
 # ---------------- verdict ----------------
 if [[ ${#ATTN[@]} -eq 0 ]]; then

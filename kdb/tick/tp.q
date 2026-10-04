@@ -347,6 +347,11 @@ pubsub.init[]
 / are cumulative since that handler process started.
 / Handler counters whose increase is a problem worth flagging
 .tp.fh.alertCounters:`bookGaps`rateLimitPauses`depthExhausted`bufferOverflows`rowsUnresendable`gapsUnrecoverable`nqMissing;
+/ Handler counters whose increase is worth SHOWING as recent activity (what
+/ a wake from sleep looks like) without being a problem
+.tp.fh.infoCounters:`wsReconnects`resyncs`exchGaps`gapsRecovered`tradesBackfilled`tpReconnects`rowsResent`depthRefreshes;
+/ Everything that raises attention when recent
+.tp.alertKinds:`missed`schemaMismatch`rejectedRegistration, .tp.fh.alertCounters;
 .tp.fh.stats:(`symbol$())!();
 .tp.fh.time:(`symbol$())!`timestamp$();
 .tp.fhStats:{[tbl; names; vals]
@@ -357,7 +362,7 @@ pubsub.init[]
   / the increase).
   before:$[tbl in key .tp.fh.stats; .tp.fhDict tbl; (`symbol$())!`long$()];
   {[tbl; before; k; v]
-    if[not k in .tp.fh.alertCounters; :()];
+    if[not k in .tp.fh.alertCounters, .tp.fh.infoCounters; :()];
     was:$[k in key before; before k; 0j];
     .inc.add[tbl; k; $[v >= was; v - was; v]];
    }[tbl; before]'[names; vals];
@@ -716,7 +721,7 @@ upd:{[tbl;data]
        .tp.disk.low[]; `degraded;
        .tp.skew.high[]; `degraded;
        `ok];
-  `process`port`uptime`status`memMB`msgsIn`msgsOut`tpSeqNo`gaps`missed`restarts`reconnects`outOfOrder`unregisteredRows`schemaMismatch`rejectedRegistrations`diskFreeMB`diskLow`clockSkewMs`clockSkewHigh`fhStats`alertWindowSec`recent`openGaps`oldestOpenGapSec!(
+  `process`port`uptime`status`memMB`msgsIn`msgsOut`tpSeqNo`gaps`missed`restarts`reconnects`outOfOrder`unregisteredRows`schemaMismatch`rejectedRegistrations`diskFreeMB`diskLow`clockSkewMs`clockSkewHigh`fhStats`alertWindowSec`recent`openGaps`oldestOpenGapSec`lastResume`lastSuspendSec`resumes`sinceResume!(
     `tp;
     .tp.cfg.port;
     `second$.z.p - .proc.startTime;
@@ -741,7 +746,11 @@ upd:{[tbl;data]
     .inc.windowSec;
     .inc.recentDict[];
     exec count i from .tp.gaps where status in .tp.openGapStatuses;
-    {[t] $[count t; `long$(.z.p - min t) % 1000000000; 0Nj]} exec time from .tp.gaps where status in .tp.openGapStatuses)
+    {[t] $[count t; `long$(.z.p - min t) % 1000000000; 0Nj]} exec time from .tp.gaps where status in .tp.openGapStatuses;
+    .tp.resume.time;
+    .tp.resume.durationSec;
+    .tp.resume.count;
+    .tp.sinceResume[])
   }
 
 / Problems of the last .inc.windowSec seconds: ([src; kind] n; lastTime)
@@ -828,8 +837,36 @@ upd:{[tbl;data]
 / SIGTERM / exit: leave the session file current
 .z.exit:{[x] .tp.session.save[]};
 
+/ Suspend detection. The timer ticks every second; a gap of more than
+/ .tp.cfg.suspendSec between two ticks means this process did not run for
+/ that long: the laptop slept (the WSL VM is frozen during sleep) or, far
+/ less likely, TP itself was blocked. Recorded so that status.sh can show
+/ when the machine last woke up and what happened since (reconnects, quote
+/ resyncs, trade gaps and their backfill).
+/ If WSL's clock does not jump forward on wake there is no gap to see here;
+/ that case shows up as clock drift instead (ops/clock_check.sh).
+.tp.cfg.suspendSec:$[count v:getenv `T2S_TP_SUSPEND_SEC; "J"$v; 30];
+.tp.lastTick:.z.p;
+.tp.resume.time:0Np;
+.tp.resume.durationSec:0Nj;
+.tp.resume.count:0j;
+.tp.checkSuspend:{[]
+  now:.z.p;
+  gap:`long$(now - .tp.lastTick) % 1000000000;
+  if[gap > .tp.cfg.suspendSec;
+    .tp.resume.time:now; .tp.resume.durationSec:gap; .tp.resume.count+:1;
+    .inc.add[`tp; `suspend; 1];
+    -1 raze ("TP: RESUMED - no timer tick for "; string gap; " s (machine suspended, or TP blocked). Handlers will reconnect to the exchange; expect quote resyncs and trade gaps to be backfilled.")];
+  .tp.lastTick:now;
+  };
+/ What happened since the last resume: kind ! n (empty if none was seen)
+.tp.sinceResume:{[]
+  if[null .tp.resume.time; :(`symbol$())!`long$()];
+  exec sum n by kind from .inc.log where time >= .tp.resume.time, not kind = `suspend};
+
 .tp.ticks:0j;
 .z.ts:{[]
+  .tp.checkSuspend[];
   .tp.checkEOD[];
   .tp.ticks+:1;
   if[0 = .tp.ticks mod 60; .tp.disk.check[]];

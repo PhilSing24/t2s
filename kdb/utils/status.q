@@ -23,7 +23,7 @@ if[null h;
   -1 "TP   : DOWN (port ",string[.st.tpPort],")";
   .st.note "TP is not reachable"];
 if[not null h;
-  hd:h ".health[]"; st:h ".tp.status[]"; fs:h ".tp.fhStatus[]"; inc:0!h ".tp.incidents[]"; gp:h ".tp.gapStatus[]"; hclose h;
+  hd:h ".health[]"; st:h ".tp.status[]"; fs:h ".tp.fhStatus[]"; inc:0!h ".tp.incidents[]"; gp:h ".tp.gapStatus[]"; alertKinds:h ".tp.alertKinds"; hclose h;
   win:hd `alertWindowSec;
   winTxt:{[w] $[w < 120; raze (string w; " s"); raze (string w div 60; " min")]};
   -1 "TP   : ",string[hd `status]," up ",string[hd `uptime],"  tpSeqNo ",string[hd `tpSeqNo],
@@ -54,7 +54,15 @@ if[not null h;
   / Problems within the alert window, TP's own and the handlers'
   fmtAge:{[t] raze (string `long$(.z.p - t) % 60000000000; " min ago")};
   -1 "RECENT (",winTxt[win],"): ",$[count inc; "; " sv {[fmtAge;r] raze (string r `src; " "; string r `kind; " +"; string r `n; " ("; fmtAge r `lastTime; ")")}[fmtAge] each inc; "nothing"];
-  {[win;winTxt;r] .st.note raze (string r `src; ": "; string r `kind; " +"; string r `n; " in the last "; winTxt win)}[win; winTxt] each inc where not inc[`kind] in `outOfOrder;
+  {[win;winTxt;r] .st.note raze (string r `src; ": "; string r `kind; " +"; string r `n; " in the last "; winTxt win)}[win; winTxt] each inc where inc[`kind] in alertKinds;
+  / Sleep: when TP last saw the machine resume, and what followed
+  dur:{[s] $[s < 120; raze (string s; " s"); s < 7200; raze (string s div 60; " min"); raze (string s div 3600; " h "; string (s mod 3600) div 60; " min")]};
+  sr:hd `sinceResume;
+  -1 "SLEEP: ",$[null hd `lastResume;
+      raze ("no suspend seen since TP started ("; dur `long$hd `uptime; " ago)");
+      raze ("last resume "; string `second$hd `lastResume; "Z after "; dur hd `lastSuspendSec; " (";
+            dur `long$(.z.p - hd `lastResume) % 1000000000; " ago, "; string hd `resumes; " since TP started); since then: ";
+            $[count sr; ", " sv {[k;v] raze (string k; " +"; string v)}'[key sr; value sr]; "nothing yet"])];
   if[not hd[`status] ~ `ok; .st.note "TP status is ",string hd `status];
   if[hd `diskLow; .st.note "disk free below threshold: ",string[hd `diskFreeMB]," MB"];
   if[hd `clockSkewHigh; .st.note "clock skew vs exchange ",string[hd `clockSkewMs]," ms - check the WSL clock (sudo hwclock -s)"];

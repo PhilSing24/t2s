@@ -9,6 +9,8 @@
 #      counter is an incident; a repeat of the same total is not; a counter
 #      that went down (handler restart) counts its new value
 #   3. WDB: a problem within the window degrades its health, then clears
+#   4. a suspend (TP frozen with SIGSTOP, as the VM is during laptop sleep)
+#      is measured by TP and shown by status.q with what followed
 #
 # Exit code 0 on success.
 
@@ -84,7 +86,8 @@ qtp '.tp.fhStats[`quote_binance; `msgsReceived`rowsPublished`bookGaps`resyncs`ra
 [[ "$(qtp 'count .tp.incidents[]')" == "0" ]] && pass "zeros: no incident" || fail "incident from zeros"
 qtp '.tp.fhStats[`quote_binance; `msgsReceived`rowsPublished`bookGaps`resyncs`rateLimitPauses; 20 20 2 5 0]' > /dev/null
 [[ "$(qtp '.health[][`recent]`quote_binance.bookGaps')" == "2" ]] && pass "bookGaps 0 -> 2: incident +2" || fail "recent $(qtp '.health[]`recent')"
-[[ "$(qtp '`quote_binance.resyncs in key .health[]`recent')" == "0b" ]] && pass "resyncs is a total, not an alert counter" || fail "resyncs flagged"
+[[ "$(qtp '.health[][`recent]`quote_binance.resyncs')" == "5" ]] && pass "resyncs +5 is recorded as recent activity" || fail "resyncs not recorded"
+status | grep -q "resyncs +5 in the last" && fail "resyncs raised as attention" || pass "but resyncs do not raise attention (not an alert counter)"
 qtp '.tp.fhStats[`quote_binance; `msgsReceived`rowsPublished`bookGaps`resyncs`rateLimitPauses; 30 30 2 5 0]' > /dev/null
 [[ "$(qtp '.health[][`recent]`quote_binance.bookGaps')" == "2" ]] && pass "same total reported again: still +2" || fail "repeat counted"
 qtp '.tp.fhStats[`quote_binance; `msgsReceived`rowsPublished`bookGaps`resyncs`rateLimitPauses; 5 5 1 0 1]' > /dev/null
@@ -105,6 +108,31 @@ status | grep -q "2 late rows in the last 4 s (trade_binance)" && pass "status.q
 sleep 5
 [[ "$(qwdb '.health[]`status')" == '`ok' ]] && pass "after the window: ok" || fail "WDB status $(qwdb '.health[]`status')"
 status | grep -q "late rows in the last" && fail "late rows still flagged" || pass "no longer flagged"
+
+echo ""
+echo "=== 4. a suspend is seen by TP and shown with what followed ==="
+kill -TERM "$TP_PID" 2>/dev/null; sleep 0.5; t2s_kill_port "$T2S_PORT_TP"
+TP_PID=$(t2s_spawn_tp "$T2S_PORT_TP" "$T2S_SANDBOX/tp2.log" T2S_ALERT_WINDOW_SEC=60 T2S_TP_SUSPEND_SEC=2)
+t2s_wait_port "$T2S_PORT_TP" 6 || { fail "TP did not restart"; exit 1; }
+sleep 1.5
+status | grep -q "SLEEP: no suspend seen since TP started" && pass "status.q: no suspend seen yet" || { fail "SLEEP line before the suspend"; status | grep SLEEP; }
+kill -STOP "$TP_PID"; sleep 5; kill -CONT "$TP_PID"       # the process is frozen, like the VM during sleep
+sleep 2
+S=$(qtp '.health[]`lastSuspendSec')
+[[ "$S" -ge 4 && "$S" -le 8 ]] && pass "TP measured the suspend: $S s" || fail "lastSuspendSec = $S"
+[[ "$(qtp '.health[]`resumes')" == "1" ]] && pass "one resume counted" || fail "resumes $(qtp '.health[]`resumes')"
+grep -q "TP: RESUMED - no timer tick for" "$T2S_SANDBOX/tp2.log" && pass "TP log says so" || fail "no RESUMED line in the TP log"
+[[ "$(qtp '.health[]`status')" == '`ok' ]] && pass "a resume alone does not degrade TP" || fail "status $(qtp '.health[]`status')"
+# what a wake looks like to the handlers, as they would report it afterwards
+qtp '.tp.fhStats[`trade_binance; `msgsReceived`rowsPublished`wsReconnects`exchGaps`gapsRecovered`tradesBackfilled; 100 100 0 0 0 0]' > /dev/null
+qtp '.tp.fhStats[`trade_binance; `msgsReceived`rowsPublished`wsReconnects`exchGaps`gapsRecovered`tradesBackfilled; 900 900 1 3 3 740]' > /dev/null
+qtp '.tp.fhStats[`quote_binance; `msgsReceived`rowsPublished`wsReconnects`resyncs`bookGaps; 50 50 0 0 0]' > /dev/null
+qtp '.tp.fhStats[`quote_binance; `msgsReceived`rowsPublished`wsReconnects`resyncs`bookGaps; 80 80 1 3 0]' > /dev/null
+OUT=$(status)
+echo "$OUT" | grep -E "^SLEEP" | sed 's/^/    /' | cut -c1-200
+echo "$OUT" | grep -qE "^SLEEP: last resume [0-9:]+Z after [0-9]+ s \(.*1 since TP started\); since then: .*wsReconnects \+2" && pass "status.q SLEEP line: resume time, duration, reconnects since" || fail "SLEEP line after the suspend"
+echo "$OUT" | grep -E "^SLEEP" | grep -q "exchGaps +3" && echo "$OUT" | grep -E "^SLEEP" | grep -q "gapsRecovered +3" && echo "$OUT" | grep -E "^SLEEP" | grep -q "tradesBackfilled +740" && pass "trade gaps and their backfill since the resume are shown" || fail "gap activity missing from the SLEEP line"
+echo "$OUT" | grep -q "wsReconnects +.* in the last" && fail "a reconnect was raised as attention" || pass "reconnects, resyncs and recovered gaps are shown but do not raise attention"
 
 echo ""; echo "==========================================="
 if [[ $FAILURES -eq 0 ]]; then echo "Recent status: all checks passed"; echo "==========================================="; exit 0; fi
