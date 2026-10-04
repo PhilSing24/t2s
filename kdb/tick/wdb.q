@@ -181,6 +181,7 @@ system "g 0";
 .wdb.replay.tmpFile:`$":",.wdb.tmpDir,"wdb.replay.seg";
 
 \l logreader.q
+\l incidents.q
 .wdb.parseTmpDate:{[entryStr]
   if[14 <> count entryStr; :0Nd];
   if[not "tmp." ~ 4#entryStr; :0Nd];
@@ -327,6 +328,7 @@ trade_gap:.schema.extend[.schema.tradeGap; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeU
   seq:row .wdb.idx.tpSeqNo[tbl];
   if[seq <= .wdb.floor tbl;
     .wdb.stats.duplicatesDropped+:1;
+    .inc.add[tbl; `duplicatesDropped; 1];
     -1 raze ("WDB: DUPLICATE dropped - "; string tbl; " tpSeqNo="; string seq;
              " floor="; string .wdb.floor tbl; " (checkpoint "; string .wdb.lastTpSeqNo[tbl];
              ", buffer "; string .wdb.bufMaxSeq[tbl]; ") source="; string source);
@@ -356,11 +358,13 @@ trade_gap:.schema.extend[.schema.tradeGap; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeU
   kind:.wdb.classifyDate d;
   if[kind = `late;
     .wdb.stats.lateRows+:count rows;
+    .inc.add[t; `lateRows; count rows];
     -1 raze ("WDB: LATE rows - "; string count rows; " "; string t; " rows dated "; string d;
              " but that partition is already in the HDB; writing to "; string .wdb.tmpPath d;
              " for manual review")];
   if[kind = `unexpected;
     .wdb.stats.unexpectedDateRows+:count rows;
+    .inc.add[t; `unexpectedDateRows; count rows];
     -1 raze ("WDB: UNEXPECTED DATE - "; string count rows; " "; string t; " rows dated "; string d;
              " (today="; string .wdb.today[]; "); writing to "; string .wdb.tmpPath d;
              " for manual review")];
@@ -385,6 +389,7 @@ trade_gap:.schema.extend[.schema.tradeGap; `tpRecvTimeUtcNs`tpSeqNo`wdbRecvTimeU
   dupIdx:where tbl[`tpSeqNo] <= cp;
   if[count dupIdx;
     .wdb.stats.duplicatesDropped+:count dupIdx;
+    .inc.add[t; `duplicatesDropped; count dupIdx];
     -1 raze ("WDB: DUPLICATE dropped at flush - "; string count dupIdx; " "; string t;
              " rows with tpSeqNo <= "; string cp);
     tbl:tbl where tbl[`tpSeqNo] > cp];
@@ -703,6 +708,7 @@ endofday:{[]
   @[hdel; .wdb.replay.tmpFile; {}];
   if[(0h = type r) and (first r) ~ `error;
     .wdb.stats.replayFailures+:1;
+    .inc.add[`wdb; `replayFailure; 1];
     .wdb.lastReplayError:last r;
     -1 raze ("WDB: REPLAY FAILED - "; last r; " - nothing merged, checkpoint untouched, will retry");
     .wdb.stage:.wdb.tables ! .wdb.nTables#enlist ();
@@ -849,10 +855,10 @@ upd:{[tbl;data]
   st:$[.wdb.halted; `error;
        (.wdb.conn.state <> `connected) and 0 < count .wdb.lastReplayError; `error;
        .wdb.conn.state = `connected;
-         $[(.wdb.stats.lateRows > 0) or .wdb.stats.unexpectedDateRows > 0; `degraded; `ok];
+         $[0 < .inc.count `lateRows`unexpectedDateRows`replayFailure; `degraded; `ok];
        .wdb.conn.state = `connecting; `degraded;
        `disconnected];
-  `process`port`uptime`status`connState`memMB`tradesRecv`aggTradesRecv`quotesRecv`flushes`rowsWritten`bufferTrades`bufferAggTrades`bufferQuotes`duplicatesDropped`lateRows`unexpectedDateRows`replayFailures`halted`haltedRowsDropped`lastRollDate`quotesFutRecv`bufferQuotesFut`gapEventsRecv`bufferGapEvents!(
+  `process`port`uptime`status`connState`memMB`tradesRecv`aggTradesRecv`quotesRecv`flushes`rowsWritten`bufferTrades`bufferAggTrades`bufferQuotes`duplicatesDropped`lateRows`unexpectedDateRows`replayFailures`halted`haltedRowsDropped`lastRollDate`quotesFutRecv`bufferQuotesFut`gapEventsRecv`bufferGapEvents`alertWindowSec`recent!(
     `wdb;
     .wdb.cfg.port;
     `second$.z.p - .proc.startTime;
@@ -877,7 +883,9 @@ upd:{[tbl;data]
     .wdb.stats.quotesFutReceived;
     count quote_binance_fut;
     .wdb.stats.gapEventsReceived;
-    count trade_gap
+    count trade_gap;
+    .inc.windowSec;
+    .inc.recentDict[]
   )
   };
 

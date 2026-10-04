@@ -102,6 +102,7 @@ if[not null .tp.clock.fixed;
 / -------------------------------------------------------
 
 \l ../schemas.q
+\l incidents.q
 
 / Refuse to start if existing partitions / tmp dirs hold a live table whose
 / layout differs from the schema: another quote depth, or columns the
@@ -344,10 +345,22 @@ pubsub.init[]
 / snapshot requests and failures for the quote handlers; trade-id gaps for
 / the trade handlers). TP keeps the latest report per table. The counters
 / are cumulative since that handler process started.
+/ Handler counters whose increase is a problem worth flagging
+.tp.fh.alertCounters:`bookGaps`rateLimitPauses`depthExhausted`bufferOverflows`rowsUnresendable`gapsUnrecoverable`nqMissing;
 .tp.fh.stats:(`symbol$())!();
 .tp.fh.time:(`symbol$())!`timestamp$();
 .tp.fhStats:{[tbl; names; vals]
   if[not tbl in .tp.tables; :(::)];
+  / Handler counters are cumulative since the handler started. The increase
+  / of each problem counter since the previous report becomes an incident
+  / (a counter that went DOWN means the handler restarted: its new value is
+  / the increase).
+  before:$[tbl in key .tp.fh.stats; .tp.fhDict tbl; (`symbol$())!`long$()];
+  {[tbl; before; k; v]
+    if[not k in .tp.fh.alertCounters; :()];
+    was:$[k in key before; before k; 0j];
+    .inc.add[tbl; k; $[v >= was; v - was; v]];
+   }[tbl; before]'[names; vals];
   .tp.fh.stats[tbl]:(names; vals);   / kept as a pair: dicts with different keys do not share a list
   .tp.fh.time[tbl]:.z.p;
   };
@@ -432,10 +445,12 @@ pubsub.init[]
   h:.z.w;
   if[not tbl in .tp.tables;
     .tp.ctr.rejectedRegistrations+:1;
+    .inc.add[tbl; `rejectedRegistration; 1];
     -1 raze ("TP: REJECTED registration from handle "; string h; " for unknown table "; string tbl);
     '"unknown table: ", string tbl];
   if[width <> .tp.fhWidth tbl;
     .tp.ctr.rejectedRegistrations+:1;
+    .inc.add[tbl; `rejectedRegistration; 1];
     -1 raze ("TP: REJECTED registration from handle "; string h; " for "; string tbl;
              ": row width "; string width; " but schema expects "; string .tp.fhWidth tbl);
     '"schema width mismatch for ", string[tbl], ": handler sends ", string[width],
@@ -489,12 +504,14 @@ pubsub.init[]
     missed:(seq - lastSeq) - 1;   / parenthesised: q evaluates right to left
     .tp.ctr.gaps[tbl]+:1;
     .tp.ctr.missed[tbl]+:missed;
+    .inc.add[tbl; `missed; missed];
     -1 raze ("TP: "; string tbl; " gap - expected "; string lastSeq+1; " got "; string seq; " (missed "; string missed; ")");
     .tp.seq.last[tbl]:seq;
     :()];
   / seq <= last inside the session: cannot happen over one TCP stream unless
   / the handler misbehaves; accept, count, keep the high-water mark.
   .tp.ctr.outOfOrder[tbl]+:1;
+  .inc.add[tbl; `outOfOrder; 1];
   -1 raze ("TP: "; string tbl; " OUT OF ORDER fhSeqNo "; string seq; " (last "; string lastSeq; ") - accepted and counted");
  };
 
@@ -553,6 +570,7 @@ upd:{[tbl;data]
   / nor published safely. Reject, log (rate-limited), count.
   if[(count data) <> .tp.fhWidth tbl;
     .tp.ctr.schemaMismatch[tbl]+:1;
+    .inc.add[tbl; `schemaMismatch; 1];
     .tp.mismatchLogCount+:1;
     if[(.tp.mismatchLogCount <= 10) or 0 = .tp.mismatchLogCount mod 1000;
       -1 raze ("TP: SCHEMA MISMATCH - rejected "; string tbl; " row with "; string count data;
@@ -692,12 +710,13 @@ upd:{[tbl;data]
 
 / Standardized health check (consistent across all processes)
 .health:{[]
-  st:$[((sum .tp.ctr.schemaMismatch) + .tp.ctr.rejectedRegistrations) > 0; `degraded;
-       (sum .tp.ctr.gaps) > 0; `degraded;
+  / Degraded on what is wrong NOW (disk, clock) or went wrong within the
+  / alert window - not on totals since start, which never clear.
+  st:$[0 < .inc.count `schemaMismatch`rejectedRegistration`missed; `degraded;
        .tp.disk.low[]; `degraded;
        .tp.skew.high[]; `degraded;
        `ok];
-  `process`port`uptime`status`memMB`msgsIn`msgsOut`tpSeqNo`gaps`missed`restarts`reconnects`outOfOrder`unregisteredRows`schemaMismatch`rejectedRegistrations`diskFreeMB`diskLow`clockSkewMs`clockSkewHigh`fhStats!(
+  `process`port`uptime`status`memMB`msgsIn`msgsOut`tpSeqNo`gaps`missed`restarts`reconnects`outOfOrder`unregisteredRows`schemaMismatch`rejectedRegistrations`diskFreeMB`diskLow`clockSkewMs`clockSkewHigh`fhStats`alertWindowSec`recent`openGaps`oldestOpenGapSec!(
     `tp;
     .tp.cfg.port;
     `second$.z.p - .proc.startTime;
@@ -718,8 +737,15 @@ upd:{[tbl;data]
     .tp.disk.low[];
     .tp.skew.median[];
     .tp.skew.high[];
-    (key .tp.fh.stats)!.tp.fhDict each key .tp.fh.stats)
+    (key .tp.fh.stats)!.tp.fhDict each key .tp.fh.stats;
+    .inc.windowSec;
+    .inc.recentDict[];
+    exec count i from .tp.gaps where status in .tp.openGapStatuses;
+    {[t] $[count t; `long$(.z.p - min t) % 1000000000; 0Nj]} exec time from .tp.gaps where status in .tp.openGapStatuses)
   }
+
+/ Problems of the last .inc.windowSec seconds: ([src; kind] n; lastTime)
+.tp.incidents:{[] .inc.recent[]};
 
 / Per-table detail table
 .tp.status:{[]

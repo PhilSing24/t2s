@@ -23,7 +23,9 @@ if[null h;
   -1 "TP   : DOWN (port ",string[.st.tpPort],")";
   .st.note "TP is not reachable"];
 if[not null h;
-  hd:h ".health[]"; st:h ".tp.status[]"; fs:h ".tp.fhStatus[]"; hclose h;
+  hd:h ".health[]"; st:h ".tp.status[]"; fs:h ".tp.fhStatus[]"; inc:0!h ".tp.incidents[]"; gp:h ".tp.gapStatus[]"; hclose h;
+  win:hd `alertWindowSec;
+  winTxt:{[w] $[w < 120; raze (string w; " s"); raze (string w div 60; " min")]};
   -1 "TP   : ",string[hd `status]," up ",string[hd `uptime],"  tpSeqNo ",string[hd `tpSeqNo],
      "  msgs ",string[hd `msgsIn],"  disk free ",.st.fmtInt[hd `diskFreeMB]," MB",
      "  clock skew ",.st.fmtInt[hd `clockSkewMs]," ms";
@@ -32,20 +34,28 @@ if[not null h;
      "  reconnects ",string[hd `reconnects],"  outOfOrder ",string[hd `outOfOrder],
      "  schemaMismatch ",string[hd `schemaMismatch],"  rejectedReg ",string[hd `rejectedRegistrations],
      "  unregistered ",string[hd `unregisteredRows];
-  / Feed-handler counters per table (exchange hop; cumulative since each handler started)
+  / Feed-handler counters per table: totals since each handler started.
+  / They are shown, not flagged; what is flagged is what happened recently.
   {[d]
     k:(key d) except `table`reportedAt`msgsReceived`rowsPublished;
+    k:k where (0 < d k) or k in `wsReconnects`bookGaps`resyncs`exchGaps`exchMissed`gapsOpen;
     age:`long$(.z.p - d `reportedAt) % 1000000000;
     -1 "FH   : ",string[d `table],"  msgs ",string[d `msgsReceived],"  rows ",string[d `rowsPublished],"  ",
        ("  " sv {[d;k] string[k]," ",string d k}[d] each k),"  (",string[age]," s ago)";
-    bad:k where (k in `bookGaps`exchMissed`rateLimitPauses`depthExhausted`bufferOverflows) and 0 < d k;
-    if[count bad; .st.note string[d `table]," handler since its start: ",", " sv {[d;k] string[k]," ",string d k}[d] each bad];
     if[age > 60; .st.note string[d `table]," handler has not reported counters for ",string[age]," s"];
    } each fs;
+  / Trade-id gaps (trade_gap): today's, plus any still open
+  nOpen:exec count i from gp where status in `detected`partial;
+  -1 "GAPS : open ",string[nOpen],$[nOpen > 0; raze (" (oldest "; string hd `oldestOpenGapSec; " s)"); ""],
+     "  recovered ",string[exec count i from gp where status = `recovered],
+     " (",string[exec sum recovered from gp where status = `recovered]," trades backfilled)",
+     "  unrecoverable ",string exec count i from gp where status = `unrecoverable;
+  if[(nOpen > 0) and 600 < 0 ^ hd `oldestOpenGapSec; .st.note string[nOpen]," trade gap(s) open for more than 10 minutes (oldest ",string[hd `oldestOpenGapSec]," s)"];
+  / Problems within the alert window, TP's own and the handlers'
+  fmtAge:{[t] raze (string `long$(.z.p - t) % 60000000000; " min ago")};
+  -1 "RECENT (",winTxt[win],"): ",$[count inc; "; " sv {[fmtAge;r] raze (string r `src; " "; string r `kind; " +"; string r `n; " ("; fmtAge r `lastTime; ")")}[fmtAge] each inc; "nothing"];
+  {[win;winTxt;r] .st.note raze (string r `src; ": "; string r `kind; " +"; string r `n; " in the last "; winTxt win)}[win; winTxt] each inc where not inc[`kind] in `outOfOrder;
   if[not hd[`status] ~ `ok; .st.note "TP status is ",string hd `status];
-  if[hd[`missed] > 0; .st.note string[hd `missed]," rows missed at TP (gaps ",string[hd `gaps],")"];
-  if[hd[`schemaMismatch] > 0; .st.note string[hd `schemaMismatch]," rows rejected for schema mismatch"];
-  if[hd[`rejectedRegistrations] > 0; .st.note string[hd `rejectedRegistrations]," handler registration(s) rejected"];
   if[hd `diskLow; .st.note "disk free below threshold: ",string[hd `diskFreeMB]," MB"];
   if[hd `clockSkewHigh; .st.note "clock skew vs exchange ",string[hd `clockSkewMs]," ms - check the WSL clock (sudo hwclock -s)"];
   / Only the tables of the markets start.sh launched are expected to have a
@@ -80,11 +90,19 @@ if[not null w;
      "  replayFailures ",string[wh `replayFailures],"  halted ",string[wh `halted],
      "  last replay ",string[rs `lastReplayRows]," rows/",string[rs `lastReplayMs]," ms",
      "  last roll ",$[null rs `lastRollDate; "-"; string rs `lastRollDate];
+  / Totals above; flagged below is the state now (status, halted) and what
+  / happened within the alert window.
+  wr:wh `recent; wwin:wh `alertWindowSec;
+  wTxt:$[wwin < 120; raze (string wwin; " s"); raze (string wwin div 60; " min")];
+  -1 "       recent (",wTxt,"): ",$[count wr; ", " sv {[k;v] raze (string k; " +"; string v)}'[key wr; value wr]; "nothing"];
   if[not wh[`status] ~ `ok; .st.note "WDB status is ",string wh `status];
   if[wh `halted; .st.note "WDB is HALTED: ",rs `haltReason];
-  if[wh[`replayFailures] > 0; .st.note string[wh `replayFailures]," replay failure(s): ",rs `lastReplayError];
-  if[wh[`lateRows] > 0; .st.note string[wh `lateRows]," late rows kept in a tmp dir for manual review"];
-  if[wh[`unexpectedDateRows] > 0; .st.note string[wh `unexpectedDateRows]," rows with an unexpected date kept in a tmp dir"];
+  {[wTxt;k;v]
+    kind:last ` vs k;
+    if[kind = `replayFailure; .st.note raze (string v; " replay failure(s) in the last "; wTxt)];
+    if[kind = `lateRows; .st.note raze (string v; " late rows in the last "; wTxt; " ("; string first ` vs k; "), kept in a tmp dir for manual review")];
+    if[kind = `unexpectedDateRows; .st.note raze (string v; " rows with an unexpected date in the last "; wTxt; " ("; string first ` vs k; ")")];
+   }[wTxt]'[key wr; value wr];
   if[not wh[`connState] ~ `connected; .st.note "WDB is ",string[wh `connState]," from TP"]];
 
 / ---------------- verdict ----------------
