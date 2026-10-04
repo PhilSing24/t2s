@@ -113,7 +113,7 @@ Measured on 2026-10-03 over a 10-minute live run with spot and futures
 |---|---|---|
 | TP | 8 MB | 1 % average, 3 % peak |
 | WDB (buffers flush at 50,000 rows per table) | 14 MB average, 22 MB peak | under 1 % |
-| each feed handler (3) | 10 to 11 MB | under 1 % |
+| each feed handler (3 at the time; there are now 4, the quote handlers keep up to 4000 levels per side per symbol) | 10 to 11 MB | under 1 % |
 | retention scan of 10.6 GB of logs | 1.0 GB peak, 88 s | one core |
 | rebuild report of the heaviest day (2.4 GB log, 13 M rows) | 6.5 GB peak, 2 m 51 s | one core |
 | WDB replay after a long outage | roughly the gap's rows in memory; a whole 13 M-row day would be in the same range as the rebuild | one core |

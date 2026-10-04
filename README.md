@@ -16,7 +16,8 @@ Each downstream process auto-reconnects with exponential backoff. The TP writes 
 |--------------|-------|---------------|--------------------------------------------------------|
 | Trade FH     | —     | Binance WS    | Spot trade feed handler (C++)                          |
 | Trade FH Fut | —     | Binance WS    | USD-M futures aggTrade feed handler (C++)              |
-| Quote FH     | —     | Binance WS    | L5 order book feed handler (C++) with REST snapshots   |
+| Quote FH     | —     | Binance WS    | Spot order book feed handler (C++) with REST snapshots |
+| Quote FH Fut | —     | Binance WS    | USD-M futures order book feed handler (same class)     |
 | TP           | 5010  | FHs           | Tickerplant — pub/sub hub with daily durability log    |
 | WDB          | 5011  | TP            | Write-only DB — buffers and writes to HDB at EOD       |
 
@@ -55,16 +56,21 @@ t2s/
 │   │   ├── k_object.hpp              # RAII wrappers for kdb+ K objects (KOwned/KBorrowed)
 │   │   ├── logger.hpp                # spdlog setup helper
 │   │   ├── market_config.hpp         # Market shape (host, port, stream suffix, schema) shared by spot + futures trade FH
-│   │   ├── order_book_manager.hpp    # L5 book reconstruction + state machine
+│   │   ├── fh_stats.hpp              # Sends a handler's counters to TP (.tp.fhStats)
+│   │   ├── order_book_manager.hpp    # Full-depth book, spot/futures sync rules, horizon + refresh, top-N quote
+│   │   ├── quote_fh_main_common.hpp  # main() shared by the two quote binaries
+│   │   ├── quote_row.hpp             # Quote row for TP, generated from the configured depth
 │   │   ├── quote_feed_handler.hpp    # Quote FH class declaration
 │   │   ├── rest_client.hpp           # HTTPS client for Binance REST (snapshots)
+│   │   ├── snapshot_scheduler.hpp    # When a snapshot may be requested: backoff, weight budget, 429/418 pauses
 │   │   ├── snapshot_worker.hpp       # Async snapshot fetcher (worker thread + bounded queue)
 │   │   ├── socket_utils.hpp          # TCP keepalive helper
 │   │   ├── trade_feed_handler.hpp    # Trade FH class declaration (schema-branched: spot trade / futures aggTrade)
 │   │   └── trade_row.hpp             # buildTradeRow helper (schema-driven K-object construction)
 │   ├── src/                  # Implementations + main entry points
 │   │   ├── quote_feed_handler.cpp    # Quote FH class implementation
-│   │   ├── quote_fh_main.cpp         # Quote FH binary entry point
+│   │   ├── quote_fh_main.cpp         # Spot quote FH binary entry point
+│   │   ├── quote_fh_fut_main.cpp     # USD-M futures quote FH binary entry point
 │   │   ├── trade_feed_handler.cpp    # Trade FH class implementation (both schemas)
 │   │   ├── trade_fh_main.cpp         # Spot trade FH binary entry point
 │   │   └── trade_fh_fut_main.cpp     # Futures aggTrade FH binary entry point
@@ -117,7 +123,9 @@ t2s/
 ├── config/                   # Feed handler JSON configs
 │   ├── trade_feed_handler.json       # Spot trade FH
 │   ├── trade_feed_handler_fut.json   # USD-M futures aggTrade FH
-│   └── quote_feed_handler.json       # L5 quote FH
+│   ├── quote_feed_handler.json       # Spot quote FH
+│   ├── quote_feed_handler_fut.json   # USD-M futures quote FH
+│   └── shared.json                   # Symbols and quote depth for all four handlers and the q schemas
 ├── hdb/                      # Live HDB partitions (gitignored, populated at EOD)
 ├── tmp/                      # WDB intraday writedown directory (gitignored)
 ├── hdb_binancedata/          # Historical research HDB (gitignored)
@@ -162,16 +170,16 @@ cmake -S . -B build
 cmake --build build
 ```
 
-This produces three binaries: `trade_feed_handler` (spot), `trade_feed_handler_fut` (USD-M futures aggTrade), and `quote_feed_handler`.
+This produces four binaries, two per market: `trade_feed_handler` and `quote_feed_handler` (spot), `trade_feed_handler_fut` and `quote_feed_handler_fut` (USD-M futures).
 
 ## Run
 
 Start everything via tmux:
 ```bash
-./start.sh                          # spot only (backward-compat default)
-./start.sh --markets spot           # explicit spot only
-./start.sh --markets futures        # futures aggTrade only
-./start.sh --markets spot,futures   # both
+./start.sh                          # spot: trade + quote handlers (default)
+./start.sh --markets spot           # the same, explicit
+./start.sh --markets futures        # USD-M futures: trade + quote handlers only
+./start.sh --markets spot,futures   # all four handlers
 ```
 
 Stop everything:
@@ -179,7 +187,14 @@ Stop everything:
 ./stop.sh
 ```
 
-`start.sh` brings up TP and WDB plus the feed handlers selected by `--markets`. The futures FH is `trade_feed_handler_fut`; it loads `config/trade_feed_handler_fut.json` and ingests `@aggTrade` events into the `trade_binance_fut` table alongside spot trades.
+`start.sh` brings up TP and WDB plus the feed handlers selected by `--markets`. Each market has a trade handler and a quote handler, and each handler owns one table:
+
+| Handler | Stream | Table |
+|---|---|---|
+| `trade_feed_handler` | spot `@trade` | `trade_binance` |
+| `quote_feed_handler` | spot `@depth@100ms` | `quote_binance` |
+| `trade_feed_handler_fut` | futures `@aggTrade` on `/market` | `trade_binance_fut` |
+| `quote_feed_handler_fut` | futures `@depth@100ms` on `/public` | `quote_binance_fut` |
 
 Individual processes can also be started manually. From the project root:
 ```bash
@@ -188,6 +203,7 @@ q kdb/tick/wdb.q
 ./build/trade_feed_handler config/trade_feed_handler.json
 ./build/trade_feed_handler_fut config/trade_feed_handler_fut.json
 ./build/quote_feed_handler config/quote_feed_handler.json
+./build/quote_feed_handler_fut config/quote_feed_handler_fut.json
 ```
 
 The feed handler binaries take a config file path as their only argument. If invoked with no argument (as `start.sh` does), each falls back to `config/<binary_name>.json` relative to the working directory, which is why `start.sh` runs them without an explicit path after `cd $BASEDIR`. To run from elsewhere, pass the config explicitly as shown above.
@@ -196,9 +212,11 @@ The feed handler binaries take a config file path as their only argument. If inv
 
 Feed handler runtime config lives in `config/`:
 
-- `trade_feed_handler.json` — spot trade FH: symbols, TP host/port, reconnect backoff, log level/file
+- `shared.json` — the symbols and the quote depth, read by all four handlers and by the q schemas (see **Symbols and quote depth** below)
+- `trade_feed_handler.json` — spot trade FH: TP host/port, reconnect backoff, log level/file
 - `trade_feed_handler_fut.json` — USD-M futures aggTrade FH: same shape, but with `host=fstream.binance.com`, `port=443`, `stream_suffix=@aggTrade`, `tp_table=trade_binance_fut`, `schema=futures_agg_trade`
-- `quote_feed_handler.json` — same fields, used by the L5 quote handler
+- `quote_feed_handler.json` — spot quote FH. Its `market` block is required and states the WebSocket host/port/path prefix/stream suffix, the REST snapshot host and path, the snapshot limit with its request weight and the exchange's weight limit per minute, the TP table and `schema=spot_depth`
+- `quote_feed_handler_fut.json` — USD-M futures quote FH: `fstream.binance.com` with `path_prefix=/public`, snapshots from `fapi.binance.com/fapi/v1/depth` (weight 20 of 2400/min), `tp_table=quote_binance_fut`, `schema=futures_depth`. Each quote binary refuses the other market's config
 
 Each q process has its own config block at the top of its file (e.g. `.tp.cfg`, `.wdb.cfg`). Edit and reload to change ports, retention, batch intervals, etc.
 
@@ -215,8 +233,33 @@ Paths and ports can also be set per process through environment variables, which
 | `T2S_WDB_CHECKPOINT` | WDB     | `$T2S_TMP_DIR/wdb.lastTpSeqNo` | Replay checkpoint file                |
 | `T2S_TP_SEQ_FILE`    | TP      | `$T2S_TP_LOG_DIR/tp.tpSeqNo` | tpSeqNo reservation file (see below)     |
 | `T2S_TP_MIN_FREE_MB` | TP      | `5120`                      | `.health[]` degrades when the log dir's filesystem has less free space |
+| `T2S_SHARED_CONFIG`  | all     | `config/shared.json`        | Symbols and quote depth. Handlers look next to their own config file; q walks up from the script (or current) directory |
 | `T2S_LOG_RETENTION_DAYS`, `T2S_LOG_PROTECTED` | logmgr | `7`, unset (no protected dates) | Retention policy inputs (see below) |
 | `T2S_WDB_MAXROWS`, `T2S_WDB_ROLL_GRACE_SEC`, `T2S_WDB_ROLL_FALLBACK_SEC`, `T2S_WDB_REPLAY_DELAY_MS`, `T2S_TP_INDEX_EVERY`, `T2S_TP_FAKE_DATE`, `T2S_WDB_FAKE_DATE` | both | unset | Test hooks only. The fake dates fix the process clock; `start.sh` refuses to run with either set, and the test guard only allows them inside `tests/sandbox`. |
+
+**Symbols and quote depth.** `config/shared.json` holds two values for the whole pipeline:
+
+```json
+{ "symbols": ["btcusdt", "ethusdt", "solusdt"], "quote_depth": 5 }
+```
+
+- `symbols` is the one list all four handlers subscribe to. A handler config with its own `symbols` list is refused. Changing the list needs a restart of the handlers only.
+- `quote_depth` (1 to 50) is the number of book levels per side that the quote handlers publish. It drives the published row (`cpp/include/quote_row.hpp`), the width each quote handler announces to TP, and the generated schemas `.schema.quote` and `.schema.quoteFut` in `kdb/schemas.q`.
+
+**A different depth is a different table layout.** `quote_binance` has `8 + 4*depth` feed-handler columns (`bidPrice1..N`, `bidQty1..N`, `askPrice1..N`, `askQty1..N`), `quote_binance_fut` one more. Two layouts cannot share one table in a partitioned HDB, so the change is guarded rather than applied silently:
+
+- TP refuses a quote handler whose row width differs from its schema; the handler exits with code 2 before it connects to the exchange.
+- TP and WDB refuse to start if any HDB date partition or any `tmp.<date>` directory holds a quote table of another depth. They name the directories and modify nothing.
+
+To change the depth: stop the pipeline, let the day roll or move `tmp.<date>` away, move the existing HDB partitions that contain `quote_binance` or `quote_binance_fut` to another directory (or accept starting a new HDB), edit `quote_depth`, and start again. Past quote data stays at its old depth where you moved it. `tests/test_depth_config.sh` exercises all of this at depth 3.
+
+**Quote handlers.** Both quote handlers run the same class and keep a local order book per symbol from the diff depth stream plus REST snapshots.
+
+- *Sync rule.* Spot: update ids are consecutive; the first event after a snapshot must satisfy `U <= lastUpdateId+1 <= u`. USD-M futures: ids are not consecutive; events with `u < lastUpdateId` are dropped, the first processed event has `U <= lastUpdateId <= u`, and afterwards each event's `pu` must equal the previous event's `u`. A break is a gap: one invalid row is published (`isValid=0b`, no levels) so the hole is visible downstream, and the book is rebuilt from a new snapshot. The doc pages are cited in `order_book_manager.hpp`.
+- *Snapshots can never storm.* Every snapshot request goes through `SnapshotScheduler`: exponential backoff per symbol after a failure (1 s doubling to 60 s, with jitter), a budget of 10% of the exchange's request-weight limit shared by all symbols (twelve depth-1000 snapshots a minute on either market), and a pause of all requests on HTTP 429 or 418 for the server's `Retry-After` (at least 60 s and 300 s), or for 60 s when the used-weight header reaches half the limit.
+- *Bounded buffer.* While a book waits for its snapshot, deltas are buffered up to 1000 per symbol; on overflow the oldest is dropped and counted. A snapshot that then cannot bridge to the remaining deltas is rejected by the sync rule and retried under backoff.
+- *Full-depth book.* The book keeps every level it knows, so deleting a top level promotes the next real one instead of leaving an empty slot. A snapshot returns at most 1000 levels per side; its worst price is the side's *horizon*, and levels beyond it are unknown until they change. When fewer than 100 known levels remain on a side, the handler fetches a new snapshot in the background and swaps it in without publishing an invalid row. If a side ever has fewer known levels than the published depth, the quote is invalid rather than possibly wrong.
+- *Counters.* Each handler reports its counters to TP every 5 s (`.tp.fhStatus[]`, `fhStats` in `.health[]`, one `FH` line per table in `./status.sh`): `bookGaps`, `resyncs`, `snapshotRequests`, `snapshotFailures`, `rateLimitPauses`, `bufferOverflows`, `depthRefreshes`, `refreshFailures`, `depthExhausted`, `wsReconnects` for the quote handlers; `exchGaps`, `exchMissed`, `exchOutOfOrder`, `exchDuplicates`, `wsReconnects` for the trade handlers. They are cumulative since the handler started. `quote_binance_fut` also stores `exchTransactTimeMs`, the futures event's transaction time `T`.
 
 **Replay seeks and never runs inside TP.** TP writes a seek index next to each daily log (`<date>.idx`, one entry per 10,000 rows: tpSeqNo, byte offset, chunk). On reconnect WDB asks TP only for `.tp.replayInfo[]`, the log directory, today's committed length and the cutoff, then reads the logs itself: it starts in the log that holds its checkpoint, seeks via the index, reads every later log in date order, and reads today's log only up to the committed length, so a disconnect spanning midnight is replayed across both days' logs. TP's live path is never involved. Replayed rows are staged and merged only after every segment has been read and validated; a corrupt or short segment fails the replay explicitly, counts it (`replayFailures`), shows `status=error` in `.health[]` while WDB is disconnected, leaves the checkpoint untouched, and WDB retries on its timer. The startup roll of past-date tmp dirs waits for the first successful replay, so yesterday's rows arriving by replay land in yesterday's partition rather than being counted late.
 
@@ -242,9 +285,12 @@ The runner discovers `tests/test_*.q`, `tests/test_*.sh`, and any compiled binar
 - **`test_schemas.q`** — schemas.q column counts, types, and derived index positions. Catches accidental schema changes that would break the rest of the pipeline.
 - **`test_afml.q`** — Q tests for AFML primitives in `kdb/ml/afml.q`.
 - **`test_labels.q`** — Q tests for labeling primitives in `kdb/ml/labels.q`.
+- **`test_depth_config.sh`** — the shared symbols/depth config: depth 3 end to end (schema, widths, registration, the real quote handler refused with exit code 2), TP and WDB refusing to start over partitions or tmp dirs of another depth, bad shared configs, each quote binary refusing the other market's config.
 - **`test_smoke.sh`** — starts each q process (tp, wdb) in isolation against test ports, asserts `.health[]` returns a sane response. Catches load-time errors and missing `.health[]` interface.
 - **`test_wdb_eod.sh`** — full TP→WDB integration test: publishes synthetic data, forces EOD, verifies a partition lands in the sandbox HDB with correct row counts. Validates the EOD persistence path end-to-end.
-- **`build/test_order_book`** — C++ unit tests (Catch2) for `OrderBookManager`: state machine (INIT→SYNCING→VALID→INVALID), snapshot truncation/padding, delta semantics (insert/update/delete via qty=0), sequence-gap detection, multi-symbol independence, and Binance-spec compliance for overlapping deltas, boundary cases, and entirely-stale events.
+- **`build/test_order_book`** — C++ unit tests (Catch2) for `OrderBookManager`: state machine (INIT→SYNCING→VALID→INVALID), full-depth storage, horizon and background refresh, spot and USD-M futures sync rules, configurable depth, delta semantics (insert/update/delete via qty=0), sequence-gap detection, multi-symbol independence, and Binance-spec compliance for overlapping deltas, boundary cases, and entirely-stale events.
+- **`build/test_snapshot_scheduler`** — C++ unit tests (Catch2) for `SnapshotScheduler`: backoff schedule and cap, jitter, weight budget for both markets, 429/418 and used-weight pauses, and an hour-long simulated REST outage that must stay under the request bound.
+- **`build/test_quote_row`** — C++ unit tests (Catch2) for the quote row sent to TP: width and column positions for several depths, with and without the futures transaction time.
 - **`build/test_snapshot_worker`** — C++ unit tests (Catch2) for `SnapshotWorker`: bounded-queue semantics, drop-oldest on overflow, worker thread lifecycle, request-id stale-result discard, shutdown signalling.
 - **`build/test_json_reader`** — C++ unit tests (Catch2) for `JsonReader` and `parseLevelPair`: missing keys, wrong types, malformed numeric strings, nested-object error propagation, first-error-wins semantics, and level-array edge cases (wrong shape, non-string elements, unparseable content, future-compat with extra elements).
 - **`build/test_trade_fh_row_construction`** — C++ unit tests (Catch2) for `buildTradeRow`: schema-driven K-object construction for both spot trade and futures aggTrade payloads, FH observation-stamp population, type correctness across all columns.
@@ -383,11 +429,15 @@ Range mode skips dates whose partition already exists (so backfills are idempote
 
 The ML pipeline (`kdb/ml/`) is actively developed and APIs may change. The live tick pipeline is the stable, primary deliverable.
 
-C++ unit tests currently cover `OrderBookManager` (23 cases, 98 assertions), `SnapshotWorker` (13 cases, 51 assertions), `JsonReader` (17 cases, 51 assertions), plus narrower units of the trade FH path: `buildTradeRow` (both schemas), `buildStreamPath`, and futures aggTrade parsing. The end-to-end FH classes themselves are still exercised via the live pipeline rather than in isolated tests. Trade output was end-to-end validated against the Binance Vision archive on 2026-05-09 (1,002,373 BTCUSDT trades, byte-identical modulo µs/ms timestamp resolution — Binance Vision archives carry microsecond precision, the WebSocket stream publishes milliseconds). Futures aggTrade output was validated against the Binance Vision archive on 2026-06-06 (2,274,464 BTCUSDT aggTrades, full UTC day span).
+C++ unit tests cover `OrderBookManager` (both sync rules, depth, horizon, refresh, a randomised market), `SnapshotScheduler`, `SnapshotWorker`, `JsonReader`, the quote row, plus narrower units of the trade FH path: `buildTradeRow` (both schemas), `buildStreamPath`, and futures aggTrade parsing. The end-to-end FH classes themselves are still exercised via the live pipeline rather than in isolated tests. Trade output was end-to-end validated against the Binance Vision archive on 2026-05-09 (1,002,373 BTCUSDT trades, byte-identical modulo µs/ms timestamp resolution — Binance Vision archives carry microsecond precision, the WebSocket stream publishes milliseconds). Futures aggTrade output was validated against the Binance Vision archive on 2026-06-06 (2,274,464 BTCUSDT aggTrades, full UTC day span).
 
 WDB replay reads across daily logs, so a disconnect spanning midnight UTC is caught up in full. A TP restart still loses, per feed handler, the row that was in flight when TP died; TP counts it as `missed` and the fix (handlers resending from a small buffer after registration) is a planned step.
 
-HDB partitions written before ADR-013 step 6 do not contain a `trade_binance_fut/` splay. HDB-wide queries on the futures table will fail until those older partitions are backfilled with empty splays (pending follow-up); direct splay queries by date already work.
+The quote book is exact inside the snapshot horizon only (1000 levels per side, the futures maximum). A fast move through all known levels on one side makes that side's quotes invalid until the background refresh lands; this is counted as `depthExhausted`, never published as a valid row.
+
+The futures aggTrade event carries two fields the `trade_binance_fut` table does not store: `nq` (the quantity excluding retail-price-improvement orders) and `st`. The futures depth event's `ps` and `st` are not stored either.
+
+HDB partitions written before `quote_binance_fut` existed do not contain that table, and HDB partitions written before ADR-013 step 6 do not contain a `trade_binance_fut/` splay. HDB-wide queries on the futures table will fail until those older partitions are backfilled with empty splays (pending follow-up); direct splay queries by date already work.
 
 ## License
 
