@@ -22,6 +22,9 @@
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
 
+#include <sys/socket.h>
+#include <sys/time.h>
+
 #include <string>
 #include <vector>
 #include <iostream>
@@ -45,6 +48,10 @@ struct SnapshotData {
     std::vector<PriceLevel> asks;
     bool success = false;
     std::string error;
+    // Rate-limit inputs for SnapshotScheduler (0 / -1 when not available)
+    int httpStatus = 0;        ///< HTTP status, 0 if the request never got a response
+    int retryAfterSec = 0;     ///< Retry-After header (sent with 429 and 418)
+    int usedWeight1m = -1;     ///< X-MBX-USED-WEIGHT-1M header
 };
 
 /**
@@ -104,6 +111,15 @@ public:
             auto const results = resolver.resolve(host, port);
             beast::get_lowest_layer(stream).connect(results);
 
+            // Synchronous I/O has no deadline of its own: without these a
+            // stalled server would block the snapshot worker forever.
+            {
+                struct timeval tv{IO_TIMEOUT_SEC, 0};
+                int fd = beast::get_lowest_layer(stream).socket().native_handle();
+                ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+            }
+
             // TLS handshake
             stream.handshake(ssl::stream_base::client);
 
@@ -121,6 +137,10 @@ public:
             http::read(stream, buffer, res);
 
             // Check status
+            result.httpStatus = static_cast<int>(res.result_int());
+            result.retryAfterSec = headerInt(res, "Retry-After", 0);
+            result.usedWeight1m = headerInt(res, "X-MBX-USED-WEIGHT-1M", -1);
+
             if (res.result() != http::status::ok) {
                 result.error = "HTTP " + std::to_string(static_cast<int>(res.result()));
                 std::cerr << "[REST] Error: " << result.error << std::endl;
@@ -147,8 +167,19 @@ public:
         return result;
     }
 
+    /// Send/receive timeout on the REST socket, seconds.
+    static constexpr int IO_TIMEOUT_SEC = 10;
+
 private:
     ssl::context ctx_;
+
+    /// Integer value of a response header, or dflt if absent / not a number.
+    static int headerInt(const http::response<http::string_body>& res,
+                         const char* name, int dflt) {
+        auto it = res.find(name);
+        if (it == res.end()) return dflt;
+        try { return std::stoi(std::string(it->value())); } catch (...) { return dflt; }
+    }
 
     /**
      * @brief Parse JSON snapshot response

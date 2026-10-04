@@ -55,6 +55,15 @@ QuoteFeedHandler::QuoteFeedHandler(const std::vector<std::string>& symbols,
     // an internal queue and calls restClient_.fetchSnapshot. Constructed
     // here so it's available immediately; thread is started in run().
     snapshotWorker_ = std::make_unique<t2s::SnapshotWorker<RestClient>>(restClient_);
+
+    // Spot: depth limit 1000 costs weight 50 of 6000/min. The scheduler
+    // keeps us at a tenth of that (see snapshot_scheduler.hpp).
+    t2s::SnapshotSchedulerConfig schedCfg;
+    schedCfg.weightPerRequest = 50;
+    schedCfg.weightLimitPerMin = 6000;
+    snapshotScheduler_ = std::make_unique<t2s::SnapshotScheduler>(
+        static_cast<int>(symbolsUpper_.size()), schedCfg);
+    snapshotRequestedAtMs_.assign(symbolsUpper_.size(), 0);
 }
 
 QuoteFeedHandler::~QuoteFeedHandler() {
@@ -219,6 +228,14 @@ void QuoteFeedHandler::runWebSocketLoop() {
     
     // Reset all books on reconnect
     bookMgr_->resetAll();
+    // Snapshots still in flight belong to the previous connection's update
+    // id sequence: mark them stale so their results are discarded.
+    for (std::size_t i = 0; i < latestRequestId_.size(); ++i) {
+        if (snapshotRequestedAtMs_[i] != 0) {
+            ++latestRequestId_[i];
+            snapshotRequestedAtMs_[i] = 0;
+        }
+    }
     
     // Initialize ASIO and SSL
     net::io_context ioc;
@@ -423,8 +440,12 @@ void QuoteFeedHandler::handleDelta(int symIdx, const BufferedDelta& delta, long 
         case BookState::INIT:
             // Buffer delta and request snapshot
             bookMgr_->getDeltaBuffer(symIdx).push_back(delta);
-            
-            if (bookMgr_->needsSnapshot(symIdx)) {
+
+            // Ask the scheduler first: after a failure it makes us wait
+            // (exponential backoff), and it enforces the weight budget.
+            // Deltas arrive every 100 ms, so this is retried soon enough.
+            if (bookMgr_->needsSnapshot(symIdx) &&
+                snapshotScheduler_->tryAcquire(symIdx, steadyNowMs())) {
                 requestSnapshot(symIdx);
             }
             break;
@@ -435,10 +456,13 @@ void QuoteFeedHandler::handleDelta(int symIdx, const BufferedDelta& delta, long 
                                       delta.bids, delta.asks, delta.eventTimeMs)) {
                 spdlog::warn("{} failed to apply delta in SYNCING state", 
                     bookMgr_->getSymbol(symIdx));
+                snapshotScheduler_->onFailure(symIdx, steadyNowMs());
                 publishInvalid(symIdx, fhRecvTimeUtcNs);
                 bookMgr_->reset(symIdx);
             } else {
                 if (bookMgr_->isValid(symIdx)) {
+                    snapshotScheduler_->onSynced(symIdx);
+                    spdlog::info("{} is now VALID", bookMgr_->getSymbol(symIdx));
                     maybePublish(symIdx, fhRecvTimeUtcNs);
                 }
             }
@@ -474,6 +498,7 @@ void QuoteFeedHandler::requestSnapshot(int symIdx) {
     // (needsSnapshot returns false while one is in flight) prevents us
     // from spamming requests for the same symbol.
     bookMgr_->setSnapshotRequested(symIdx, true);
+    snapshotRequestedAtMs_[symIdx] = steadyNowMs();
 
     // Enqueue and remember the request id. When the result eventually
     // arrives, applySnapshotResults compares its id against this one and
@@ -486,7 +511,29 @@ void QuoteFeedHandler::requestSnapshot(int symIdx) {
                  sym, id, snapshotWorker_->pendingRequests());
 }
 
+std::int64_t QuoteFeedHandler::steadyNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 void QuoteFeedHandler::applySnapshotResults() {
+    const std::int64_t nowMs = steadyNowMs();
+
+    // A request whose result never came back (dropped from the worker's
+    // queue, or a REST call stuck in connect) must not block the symbol.
+    for (std::size_t i = 0; i < snapshotRequestedAtMs_.size(); ++i) {
+        if (snapshotRequestedAtMs_[i] != 0 &&
+            nowMs - snapshotRequestedAtMs_[i] > SNAPSHOT_TIMEOUT_MS) {
+            int symIdx = static_cast<int>(i);
+            spdlog::error("Snapshot for {} timed out after {} ms",
+                          bookMgr_->getSymbol(symIdx), SNAPSHOT_TIMEOUT_MS);
+            ++latestRequestId_[i];              // a late result is now stale
+            snapshotRequestedAtMs_[i] = 0;
+            bookMgr_->setSnapshotRequested(symIdx, false);
+            snapshotScheduler_->onFailure(symIdx, nowMs);
+        }
+    }
+
     auto results = snapshotWorker_->drainResults();
     for (auto& r : results) {
         const std::string& sym = r.sym;
@@ -501,12 +548,24 @@ void QuoteFeedHandler::applySnapshotResults() {
             continue;
         }
 
+        snapshotRequestedAtMs_[symIdx] = 0;
+
         if (!r.data.success) {
-            spdlog::error("Snapshot fetch failed for {}: {}", sym, r.data.error);
+            // Stay in INIT and keep buffering deltas. The scheduler decides
+            // when the next attempt may go out; nothing is re-requested here.
+            snapshotScheduler_->onFailure(symIdx, nowMs, r.data.httpStatus,
+                                          r.data.retryAfterSec, r.data.usedWeight1m);
+            spdlog::error("Snapshot fetch failed for {}: {} (failure #{} for this symbol, next attempt in {} ms)",
+                          sym, r.data.error, snapshotScheduler_->consecutiveFailures(symIdx),
+                          snapshotScheduler_->nextAllowedMs(symIdx) - nowMs);
+            if (r.data.httpStatus == 429 || r.data.httpStatus == 418) {
+                spdlog::critical("Binance rate limit hit (HTTP {}): all snapshot requests paused for {} ms",
+                                 r.data.httpStatus, snapshotScheduler_->pausedUntilMs() - nowMs);
+            }
             bookMgr_->setSnapshotRequested(symIdx, false);
-            bookMgr_->invalidate(symIdx, "Snapshot fetch failed");
             continue;
         }
+        snapshotScheduler_->onFetchOk(symIdx, nowMs, r.data.usedWeight1m);
 
         // Apply snapshot
         bookMgr_->applySnapshot(symIdx, r.data.lastUpdateId, r.data.bids, r.data.asks);
@@ -521,6 +580,7 @@ void QuoteFeedHandler::applySnapshotResults() {
             if (!bookMgr_->applyDelta(symIdx, delta.firstUpdateId, delta.finalUpdateId,
                                       delta.bids, delta.asks, delta.eventTimeMs)) {
                 spdlog::warn("{} failed during buffered delta replay", sym);
+                snapshotScheduler_->onFailure(symIdx, nowMs);
                 break;
             }
             buffer.pop_front();
@@ -528,6 +588,7 @@ void QuoteFeedHandler::applySnapshotResults() {
         buffer.clear();
 
         if (bookMgr_->isValid(symIdx)) {
+            snapshotScheduler_->onSynced(symIdx);
             spdlog::info("{} is now VALID", sym);
         }
     }

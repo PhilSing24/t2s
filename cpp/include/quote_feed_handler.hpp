@@ -41,6 +41,7 @@
 #include "order_book_manager.hpp"
 #include "rest_client.hpp"
 #include "snapshot_worker.hpp"
+#include "snapshot_scheduler.hpp"
 
 extern "C" {
 #include "k.h"
@@ -191,6 +192,20 @@ private:
     /// (e.g. if the symbol was reset and re-requested while a previous
     /// snapshot was still in flight).
     std::vector<std::uint64_t> latestRequestId_;
+
+    /// Decides when a snapshot may be requested: per-symbol backoff after
+    /// failures, a shared request-weight budget, and pauses on HTTP 429/418.
+    /// See snapshot_scheduler.hpp.
+    std::unique_ptr<t2s::SnapshotScheduler> snapshotScheduler_;
+
+    /// When the in-flight snapshot for each symbol was requested (steady
+    /// ms, 0 = none). A request with no result after SNAPSHOT_TIMEOUT_MS
+    /// is treated as failed so the symbol cannot wait forever.
+    std::vector<std::int64_t> snapshotRequestedAtMs_;
+    static constexpr std::int64_t SNAPSHOT_TIMEOUT_MS = 30000;
+
+    /// Monotonic milliseconds for the scheduler.
+    static std::int64_t steadyNowMs();
     
     // ========================================================================
     // HEALTH TRACKING

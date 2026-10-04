@@ -112,6 +112,15 @@ if(EXISTS ${CATCH2_DIR}/catch_amalgamated.cpp)
     # JsonReader is a header-only, rapidjson-only utility, so this test
     # doesn't need any of the FH/network/kdb link surface - just Catch2
     # and the standard library (rapidjson is header-only).
+    add_executable(test_snapshot_scheduler
+        tests/test_snapshot_scheduler.cpp
+        ${CATCH2_DIR}/catch_amalgamated.cpp
+    )
+    target_include_directories(test_snapshot_scheduler PRIVATE
+        ${INCLUDE_DIR}
+        ${CATCH2_DIR}
+    )
+
     add_executable(test_json_reader
         tests/test_json_reader.cpp
         ${CATCH2_DIR}/catch_amalgamated.cpp
