@@ -172,6 +172,7 @@ begin_scenario 1 "schemas.q loaded; wrong row width refused at registration and 
     sleep 1
     tp -step tp_status -key logChunks -value 35
     tp -step tp_status -key unregisteredRows -value 0
+    tp -step fh_stats
     wdb -step assert_status -key tradesRecv -value 20
     wdb -step assert_status -key quotesRecv -value 10
     wdb -step assert_status -key aggTradesRecv -value 5

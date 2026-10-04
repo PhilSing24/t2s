@@ -4,6 +4,7 @@
  */
 
 #include "trade_feed_handler.hpp"
+#include "fh_stats.hpp"
 #include "socket_utils.hpp"
 #include "k_object.hpp"
 #include "json_reader.hpp"
@@ -73,6 +74,7 @@ void TradeFeedHandler::run() {
                 spdlog::info("Connection closed during shutdown");
             } else {
                 spdlog::error("Binance error: {}", e.what());
+                ++ctrWsReconnects_;
                 spdlog::info("Will reconnect...");
                 if (!sleepWithBackoff(binanceReconnectAttempt_++)) {
                     break;  // Shutdown requested during backoff
@@ -198,11 +200,15 @@ void TradeFeedHandler::validateTradeId(const std::string& sym, long long tradeId
         long long last = it->second;
 
         if (tradeId < last) {
+            ++ctrExchOutOfOrder_;
             spdlog::warn("OUT OF ORDER: {} last={} got={}", sym, last, tradeId);
         } else if (tradeId == last) {
+            ++ctrExchDuplicates_;
             spdlog::warn("DUPLICATE: {} tradeId={}", sym, tradeId);
         } else if (tradeId > last + 1) {
             long long missed = tradeId - last - 1;
+            ++ctrExchGaps_;
+            ctrExchMissed_ += missed;
             spdlog::warn("Gap: {} missed={} (last={} got={})", sym, missed, last, tradeId);
         }
     }
@@ -524,6 +530,19 @@ void TradeFeedHandler::publishHealth() {
 
     // Publish to TP (fire and forget)
     k(-tpHandle_, (S)".u.upd", ks((S)"health_feed_handler"), row.release(), (K)0);
+
+    // Exchange-hop counters, shown per table by TP's .health[] and status.sh.
+    // exchGaps/exchMissed count jumps in the exchange's own trade ids, i.e.
+    // trades Binance sent (or we failed to receive) between two messages.
+    t2s::sendFhStats(tpHandle_, cfg_.tpTable, {
+        {"msgsReceived",   msgsReceived_},
+        {"rowsPublished",  msgsPublished_},
+        {"wsReconnects",   ctrWsReconnects_},
+        {"exchGaps",       ctrExchGaps_},
+        {"exchMissed",     ctrExchMissed_},
+        {"exchOutOfOrder", ctrExchOutOfOrder_},
+        {"exchDuplicates", ctrExchDuplicates_},
+    });
 
     spdlog::debug("Health published: uptime={}s msgs={}/{} state={}",
         uptimeSec, msgsReceived_, msgsPublished_, connState_);

@@ -23,7 +23,7 @@ if[null h;
   -1 "TP   : DOWN (port ",string[.st.tpPort],")";
   .st.note "TP is not reachable"];
 if[not null h;
-  hd:h ".health[]"; st:h ".tp.status[]"; hclose h;
+  hd:h ".health[]"; st:h ".tp.status[]"; fs:h ".tp.fhStatus[]"; hclose h;
   -1 "TP   : ",string[hd `status]," up ",string[hd `uptime],"  tpSeqNo ",string[hd `tpSeqNo],
      "  msgs ",string[hd `msgsIn],"  disk free ",.st.fmtInt[hd `diskFreeMB]," MB",
      "  clock skew ",.st.fmtInt[hd `clockSkewMs]," ms";
@@ -32,6 +32,16 @@ if[not null h;
      "  reconnects ",string[hd `reconnects],"  outOfOrder ",string[hd `outOfOrder],
      "  schemaMismatch ",string[hd `schemaMismatch],"  rejectedReg ",string[hd `rejectedRegistrations],
      "  unregistered ",string[hd `unregisteredRows];
+  / Feed-handler counters per table (exchange hop; cumulative since each handler started)
+  {[d]
+    k:(key d) except `table`reportedAt`msgsReceived`rowsPublished;
+    age:`long$(.z.p - d `reportedAt) % 1000000000;
+    -1 "FH   : ",string[d `table],"  msgs ",string[d `msgsReceived],"  rows ",string[d `rowsPublished],"  ",
+       ("  " sv {[d;k] string[k]," ",string d k}[d] each k),"  (",string[age]," s ago)";
+    bad:k where (k in `bookGaps`exchMissed`rateLimitPauses`depthExhausted`bufferOverflows) and 0 < d k;
+    if[count bad; .st.note string[d `table]," handler since its start: ",", " sv {[d;k] string[k]," ",string d k}[d] each bad];
+    if[age > 60; .st.note string[d `table]," handler has not reported counters for ",string[age]," s"];
+   } each fs;
   if[not hd[`status] ~ `ok; .st.note "TP status is ",string hd `status];
   if[hd[`missed] > 0; .st.note string[hd `missed]," rows missed at TP (gaps ",string[hd `gaps],")"];
   if[hd[`schemaMismatch] > 0; .st.note string[hd `schemaMismatch]," rows rejected for schema mismatch"];

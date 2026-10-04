@@ -212,6 +212,7 @@ private:
     long long ctrSequenceGaps_{0};      ///< gaps in the exchange's update ids while VALID
     long long ctrResyncs_{0};           ///< books rebuilt from scratch (gap or failed sync)
     long long ctrSnapshotFailures_{0};  ///< snapshot fetches that failed or timed out
+    long long ctrWsReconnects_{0};      ///< Binance WebSocket connections lost and re-opened
 
     /// One STATS line with every counter, every STATS_INTERVAL_SEC and at exit.
     void logStats() const;

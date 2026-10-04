@@ -317,6 +317,23 @@ pubsub.init[]
 .tp.ctr.rejectedRegistrations:0j;             / registrations refused (wrong width / unknown table)
 .tp.ctr.unknownTableRows:0j;                  / rows for tables we don't know (passed through)
 
+/ Feed-handler counters. Each handler reports its own counters every few
+/ seconds with an async .tp.fhStats[table; names; values]: what happened on
+/ the exchange hop, which TP cannot see (book sequence gaps, resyncs,
+/ snapshot requests and failures for the quote handlers; trade-id gaps for
+/ the trade handlers). TP keeps the latest report per table. The counters
+/ are cumulative since that handler process started.
+.tp.fh.stats:(`symbol$())!();
+.tp.fh.time:(`symbol$())!`timestamp$();
+.tp.fhStats:{[tbl; names; vals]
+  if[not tbl in .tp.tables; :(::)];
+  .tp.fh.stats[tbl]:(names; vals);   / kept as a pair: dicts with different keys do not share a list
+  .tp.fh.time[tbl]:.z.p;
+  };
+/ One dictionary per reporting table: table, reportedAt, then its counters
+.tp.fhDict:{[t] nv:.tp.fh.stats t; nv[0]!nv 1};
+.tp.fhStatus:{[] {[t] (`table`reportedAt!(t; .tp.fh.time t)), .tp.fhDict t} each key .tp.fh.stats};
+
 / Registration. Called synchronously by every feed handler right after it
 / connects (and after every reconnect). Throws on a wrong width or unknown
 / table so the handler sees an error and exits at its own startup.
@@ -560,7 +577,7 @@ upd:{[tbl;data]
        .tp.disk.low[]; `degraded;
        .tp.skew.high[]; `degraded;
        `ok];
-  `process`port`uptime`status`memMB`msgsIn`msgsOut`tpSeqNo`gaps`missed`restarts`reconnects`outOfOrder`unregisteredRows`schemaMismatch`rejectedRegistrations`diskFreeMB`diskLow`clockSkewMs`clockSkewHigh!(
+  `process`port`uptime`status`memMB`msgsIn`msgsOut`tpSeqNo`gaps`missed`restarts`reconnects`outOfOrder`unregisteredRows`schemaMismatch`rejectedRegistrations`diskFreeMB`diskLow`clockSkewMs`clockSkewHigh`fhStats!(
     `tp;
     .tp.cfg.port;
     `second$.z.p - .proc.startTime;
@@ -580,7 +597,8 @@ upd:{[tbl;data]
     .tp.disk.freeMB;
     .tp.disk.low[];
     .tp.skew.median[];
-    .tp.skew.high[])
+    .tp.skew.high[];
+    (key .tp.fh.stats)!.tp.fhDict each key .tp.fh.stats)
   }
 
 / Per-table detail table

@@ -10,6 +10,7 @@
 #include "socket_utils.hpp"
 #include "k_object.hpp"
 #include "json_reader.hpp"
+#include "fh_stats.hpp"
 
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
@@ -106,6 +107,7 @@ void QuoteFeedHandler::run() {
                 spdlog::info("Connection closed during shutdown");
             } else {
                 spdlog::error("Binance error: {}", e.what());
+                ++ctrWsReconnects_;
                 spdlog::info("Will reconnect...");
                 if (!sleepWithBackoff(binanceReconnectAttempt_++)) {
                     break;
@@ -776,6 +778,22 @@ void QuoteFeedHandler::publishHealth() {
     
     // Publish to TP (fire and forget)
     k(-tpHandle_, (S)".u.upd", ks((S)"health_feed_handler"), row.release(), (K)0);
+
+    // Book-level counters, shown per table by TP's .health[] and status.sh
+    t2s::sendFhStats(tpHandle_, "quote_binance", {
+        {"msgsReceived",     msgsReceived_},
+        {"rowsPublished",    msgsPublished_},
+        {"wsReconnects",     ctrWsReconnects_},
+        {"bookGaps",         ctrSequenceGaps_},
+        {"resyncs",          ctrResyncs_},
+        {"snapshotRequests", snapshotScheduler_->requests()},
+        {"snapshotFailures", ctrSnapshotFailures_},
+        {"rateLimitPauses",  snapshotScheduler_->rateLimitPauses()},
+        {"bufferOverflows",  bookMgr_->bufferOverflows()},
+        {"depthRefreshes",   bookMgr_->depthRefreshes()},
+        {"refreshFailures",  bookMgr_->refreshFailures()},
+        {"depthExhausted",   bookMgr_->depthExhaustedEvents()},
+    });
     
     spdlog::debug("Health published: uptime={}s msgs={}/{} state={}", 
         uptimeSec, msgsReceived_, msgsPublished_, connState_);
@@ -797,9 +815,9 @@ void QuoteFeedHandler::checkPublishTimeouts(long long fhRecvTimeUtcNs) {
 }
 
 void QuoteFeedHandler::logStats() const {
-    spdlog::info("STATS msgs={} published={} gaps={} resyncs={} snapshotRequests={} snapshotFailures={} "
+    spdlog::info("STATS msgs={} published={} wsReconnects={} gaps={} resyncs={} snapshotRequests={} snapshotFailures={} "
                  "rateLimitPauses={} bufferOverflows={} depthRefreshes={} refreshFailures={} depthExhausted={}",
-                 msgsReceived_, msgsPublished_, ctrSequenceGaps_, ctrResyncs_,
+                 msgsReceived_, msgsPublished_, ctrWsReconnects_, ctrSequenceGaps_, ctrResyncs_,
                  snapshotScheduler_->requests(), ctrSnapshotFailures_,
                  snapshotScheduler_->rateLimitPauses(), bookMgr_->bufferOverflows(),
                  bookMgr_->depthRefreshes(), bookMgr_->refreshFailures(),

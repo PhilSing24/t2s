@@ -88,6 +88,21 @@ if[.d.step ~ "tp_status";
   if[not got ~ want; .d.fail raze ("TP "; string k; " = "; got; ", expected "; want)];
   .d.pass raze ("TP "; string k; " = "; got); .d.done[]];
 
+if[.d.step ~ "fh_stats";
+  / A handler's counter report is kept per table and shown by .tp.fhStatus[] and .health[]
+  h:.d.open .d.tpPort;
+  neg[h] (".tp.fhStats"; `quote_binance; `bookGaps`resyncs`snapshotRequests; 1 2 7);
+  neg[h] (".tp.fhStats"; `trade_binance; `exchGaps`exchMissed; 0 0);
+  neg[h] (".tp.fhStats"; `no_such_table; enlist `x; enlist 1);
+  neg[h] (".tp.fhStats"; `quote_binance; `bookGaps`resyncs`snapshotRequests; 1 3 8);   / latest wins
+  fs:h ".tp.fhStatus[]"; hd:h ".health[]"; hclose h;
+  if[not (asc fs[;`table]) ~ asc `quote_binance`trade_binance; .d.fail raze ("fhStatus tables: "; .Q.s1 fs[;`table])];
+  q:first fs where fs[;`table] = `quote_binance;
+  if[not (q `bookGaps`resyncs`snapshotRequests) ~ 1 3 8; .d.fail raze ("quote counters: "; .Q.s1 q)];
+  if[null q `reportedAt; .d.fail "reportedAt missing"];
+  if[not 8 = hd[`fhStats][`quote_binance] `snapshotRequests; .d.fail ".health[] lacks fhStats"];
+  .d.pass "handler counters kept per table, latest report wins, unknown table ignored"; .d.done[]];
+
 .d.seqSaveFile:{[name] hsym `$ .d.sbTmp, "../tpseq_", name};
 
 if[.d.step ~ "tp_seq_save";

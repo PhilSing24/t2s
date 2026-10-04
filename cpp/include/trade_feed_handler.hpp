@@ -202,6 +202,13 @@ private:
     /// Total messages published to TP
     long long msgsPublished_{0};
 
+    // Exchange-hop counters, reported to TP with the health row
+    long long ctrWsReconnects_{0};     ///< Binance WebSocket connections lost and re-opened
+    long long ctrExchGaps_{0};         ///< forward jumps in the exchange's trade id
+    long long ctrExchMissed_{0};       ///< trade ids skipped in those jumps
+    long long ctrExchOutOfOrder_{0};   ///< trade id lower than the last one seen
+    long long ctrExchDuplicates_{0};   ///< trade id equal to the last one seen
+
     /// Time of last message received
     std::chrono::system_clock::time_point lastMsgTime_;
 
