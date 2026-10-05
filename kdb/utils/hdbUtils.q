@@ -112,3 +112,45 @@
 // myTrade: .hdb.load[`trade; 2026.01.20; 2026.01.22]
 // myTradeBySym: .hdb.loadBySym[`trade; `BTCUSDT; 2026.01.20; 2026.01.22]
 // infoCount: .hdb.rowCountsBySym[`trade; `BTCUSDT; 2026.01.20; 2026.01.22]
+
+// ---------------------------------------------------------------------------
+// Clock-corrected rows
+//
+// A row's `time` is the handler's receive time, the same instant as
+// fhRecvTimeUtcNs. While the system clock is behind the exchange (the first
+// seconds after a wake from sleep), the handlers take `time` from the
+// exchange event time instead and leave the raw clock reading in
+// fhRecvTimeUtcNs (cpp/include/row_clock.hpp). So a clock-corrected row is a
+// row whose `time` differs from fhRecvTimeUtcNs. These helpers find them, so
+// the epoch offset between the two columns never has to be typed by hand.
+// ---------------------------------------------------------------------------
+
+// Nanoseconds between the Unix epoch (fhRecvTimeUtcNs) and the kdb+ epoch (time)
+.hdb.epochOffsetNs: 946684800000000000j;
+
+// qsql condition: time differs from the receive time
+.hdb.clockCorrectedWhere: (<>; `fhRecvTimeUtcNs; (+; .hdb.epochOffsetNs; ($; enlist `long; `time)));
+
+// Add what a corrected row was corrected from and by how much:
+//   fhRecvTime   the original receive time (the stale clock reading) as a timestamp
+//   clockLagMs   how far the clock was behind: time minus fhRecvTime, in ms
+.hdb.withClockLag: {[t]
+  update fhRecvTime: `timestamp$fhRecvTimeUtcNs - .hdb.epochOffsetNs,
+         clockLagMs: ((`long$time) - fhRecvTimeUtcNs - .hdb.epochOffsetNs) div 1000000
+    from t
+ };
+
+// Clock-corrected rows of an in-memory table (any table with time and fhRecvTimeUtcNs)
+.hdb.clockCorrectedRows: {[t] .hdb.withClockLag ?[t; enlist .hdb.clockCorrectedWhere; 0b; ()]};
+
+// Clock-corrected rows of an HDB table for one date
+.hdb.clockCorrected: {[tab; dt]
+  if[not .hdb.loaded; -1 "ERROR: No HDB loaded"; :()];
+  if[not tab in .hdb.tables[]; -1 "ERROR: Table not found: ", string tab; :()];
+  .hdb.withClockLag ?[tab; ((=; `date; dt); .hdb.clockCorrectedWhere); 0b; ()]
+ };
+
+// Example usage:
+// .hdb.clockCorrected[`quote_binance; 2026.10.06]
+// select rows: count i, maxLagMs: max clockLagMs, first time, last time by sym from .hdb.clockCorrected[`trade_binance; 2026.10.06]
+// .hdb.clockCorrectedRows select from trade_binance      / on an in-memory table, e.g. in the WDB

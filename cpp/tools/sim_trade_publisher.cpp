@@ -13,6 +13,7 @@
  *                       [--backfill 1] [--backfill-page P] [--backfill-fail N]
  *                       [--backfill-served-from ID] [--backfill-max-gap M]
  *                       [--die-after-backfilled N]
+ *                       [--lag-ms L --lag-at K --lag-rows N] [--lag-threshold-ms T]
  *
  * Publishes N rows at R rows/second (default 1000) with tradeId I, I+1, ...
  * and fhSeqNo 1..N. With --gap-at K, the ids jump by G before row K (0-based),
@@ -27,6 +28,11 @@
  * requests if asked; backfilled rows are published like the handler does
  * (null exchEventTimeMs). --die-after-backfilled N kills the process, without
  * any clean-up, right after the Nth backfilled row: a crash mid-backfill.
+ * --lag-ms L makes the publisher's clock read L ms behind from row K for N
+ * rows (the stale clock of the first seconds after a wake) while the
+ * "exchange" event times stay true. Rows go through the handlers' RowClock
+ * (threshold T, default 2000 ms), and the count of corrected rows is
+ * reported to TP as clockLagRows, as a handler does.
  * Prints:
  *   SIM done rows=N reconnects=A resent=B unresendable=C gaps=D gapEventsAcked=E gapEventsPending=F
  * Exit code 0, or 2 if TP rejected the session.
@@ -38,6 +44,8 @@
 #include "tp_publisher.hpp"
 #include "trade_row.hpp"
 #include "trade_gap.hpp"
+#include "fh_stats.hpp"
+#include "row_clock_log.hpp"
 
 #include <spdlog/spdlog.h>
 
@@ -59,6 +67,9 @@ long long nowNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
+// The publisher's own clock: behind the true time while a lag is simulated
+std::atomic<long long> g_clockLagNs{0};
+long long clockNs() { return nowNs() - g_clockLagNs.load(); }
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -67,6 +78,7 @@ int main(int argc, char* argv[]) {
     long long gapAt = -1, gapSize = 0, pendFirst = 0, pendLast = 0;
     bool seedFromTp = false, doBackfill = false;
     long long bfPage = 1000, bfFail = 0, bfServedFrom = 1, bfMaxGap = 500000, dieAfter = -1;
+    long long lagMs = 0, lagAt = 0, lagRows = 0, lagThresholdMs = t2s::DEFAULT_CLOCK_LAG_MS;
     for (int i = 1; i + 1 < argc; i += 2) {
         std::string a = argv[i]; const char* v = argv[i + 1];
         if (a == "--port") port = std::atoi(v);
@@ -83,6 +95,10 @@ int main(int argc, char* argv[]) {
         else if (a == "--backfill-served-from") bfServedFrom = std::atoll(v);
         else if (a == "--backfill-max-gap") bfMaxGap = std::atoll(v);
         else if (a == "--die-after-backfilled") dieAfter = std::atoll(v);
+        else if (a == "--lag-ms") lagMs = std::atoll(v);
+        else if (a == "--lag-at") lagAt = std::atoll(v);
+        else if (a == "--lag-rows") lagRows = std::atoll(v);
+        else if (a == "--lag-threshold-ms") lagThresholdMs = std::atoll(v);
         else if (a == "--gap-at") gapAt = std::atoll(v);
         else if (a == "--gap-size") gapSize = std::atoll(v);
         else if (a == "--pending-gap") {
@@ -132,12 +148,12 @@ int main(int argc, char* argv[]) {
         t2s::BackfillPage fetch(const std::string&, long long fromId, int limit) {
             std::this_thread::sleep_for(std::chrono::milliseconds(3));
             t2s::BackfillPage p;
-            p.recvTimeUtcNs = nowNs();
+            p.recvTimeUtcNs = clockNs();        // the reply is timed with the publisher's clock
             if (failFirst > 0) { --failFirst; p.error = "simulated REST failure"; return p; }
             p.ok = true; p.httpStatus = 200;
             for (long long id = std::max(fromId, servedFrom); static_cast<int>(p.trades.size()) < limit; ++id) {
                 t2s::BackfillTrade t; t.id = id; t.price = 100.0 + 0.01 * (id % 100); t.qty = 0.25;
-                t.tradeTimeMs = p.recvTimeUtcNs / 1000000 - 5000; t.buyerIsMaker = (id % 2) == 0;
+                t.tradeTimeMs = nowNs() / 1000000 - 5000; t.buyerIsMaker = (id % 2) == 0;
                 p.trades.push_back(t);
             }
             return p;
@@ -153,13 +169,16 @@ int main(int argc, char* argv[]) {
     t2s::TradeBackfill<FakeExchange> backfill(exchange, bfCfg);
     backfill.start();
     long long seq = 0, backfilled = 0;
+    t2s::RowClock rowClock(lagThresholdMs);
     auto steadyMs = [] { return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count(); };
     auto pump = [&] {
         backfill.pump(steadyMs(),
             [&](const std::string& s2, const t2s::BackfillTrade& t, long long recvNs) {
                 ++seq;
-                t2s::KOwned row = t2s::buildTradeRow(recvNs, recvNs, s2, t.id, t.price, t.qty, t.buyerIsMaker,
+                const t2s::RowStamp stamp = rowClock.stamp(recvNs, 0);     // as publishBackfilled does
+                t2s::logClockEdge(stamp, rowClock);
+                t2s::KOwned row = t2s::buildTradeRow(stamp.timeUtcNs, recvNs, s2, t.id, t.price, t.qty, t.buyerIsMaker,
                                                      t2s::GAP_NULL_LONG, t.tradeTimeMs, 0, 0, seq, KDB_EPOCH_OFFSET_NS);
                 tp.publish(row.release(), seq);
                 if (++backfilled == dieAfter) {
@@ -191,7 +210,9 @@ int main(int argc, char* argv[]) {
     long long sent = 0;
     long long idShift = 0;
     for (long long i = 0; i < rows && g_running; ++i) {
-        long long recv = nowNs();
+        g_clockLagNs = (lagMs > 0 && i >= lagAt && i < lagAt + lagRows) ? lagMs * 1000000LL : 0LL;
+        const long long recv = clockNs();              // the handler's clock reading
+        const long long eventMs = nowNs() / 1000000;   // the exchange's time
         if (i == gapAt) idShift = gapSize;
         const long long id = firstId + i + idShift;
         auto res = tracker.onId(sym, id);
@@ -204,14 +225,17 @@ int main(int argc, char* argv[]) {
         }
         firstAfterSeed = false;
         ++seq;
-        t2s::KOwned row = t2s::buildTradeRow(recv, recv, sym, id, 100.0 + 0.01 * (i % 100), 0.5, (i % 2) == 0,
-                                             recv / 1000000, recv / 1000000, 1, 1, seq, KDB_EPOCH_OFFSET_NS);
+        const t2s::RowStamp stamp = rowClock.stamp(recv, eventMs);     // as processMessage does
+        t2s::logClockEdge(stamp, rowClock);
+        t2s::KOwned row = t2s::buildTradeRow(stamp.timeUtcNs, recv, sym, id, 100.0 + 0.01 * (i % 100), 0.5, (i % 2) == 0,
+                                             eventMs, eventMs, 1, 1, seq, KDB_EPOCH_OFFSET_NS);
         if (!tp.publish(row.release(), seq)) break;
         ++sent;
         if (gapEvents.size() > 0) gapEvents.flush(tp);
         pump();
         std::this_thread::sleep_for(gap);
     }
+    g_clockLagNs = 0;
     // Finish the backfill that is still running (bounded wait)
     for (auto t0 = steadyMs(); backfill.openGaps() > 0 && steadyMs() - t0 < 15000 && g_running;) {
         pump();
@@ -219,8 +243,10 @@ int main(int argc, char* argv[]) {
     }
     backfill.stop();
     if (gapEvents.size() > 0) gapEvents.flush(tp);
-    // Let TP read what is still in the socket before we close it
+    // Report the corrected rows as a handler does with its counters, then
+    // let TP read what is still in the socket before we close it
     if (tp.connected()) {
+        t2s::sendFhStats(tp.handle(), cfg.table, {{"clockLagRows", rowClock.correctedRows()}});
         K r = k(tp.handle(), const_cast<S>("1"), (K)0);
         if (r) r0(r);
     }
@@ -231,7 +257,8 @@ int main(int argc, char* argv[]) {
               << " seeded=" << seeded << " openGaps=" << openGaps
               << " backfilled=" << backfilled << " gapsRecovered=" << backfill.gapsRecovered()
               << " gapsUnrecoverable=" << backfill.gapsUnrecoverable()
-              << " gapsStillOpen=" << backfill.openGaps() << std::endl;
+              << " gapsStillOpen=" << backfill.openGaps()
+              << " clockCorrected=" << rowClock.correctedRows() << std::endl;
     if (!tp.fatalError().empty()) return 2;
     return sent == rows ? 0 : 1;
 }
