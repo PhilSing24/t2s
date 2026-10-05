@@ -69,6 +69,7 @@ inline bool buildMarketConfig(const FeedHandlerConfig& config, t2s::QuoteMarketC
     m.tpTable           = config.marketTpTable;
     m.healthName        = (m.sync == t2s::DepthSync::Futures) ? "quote_fh_fut" : "quote_fh";
     m.depth             = config.quoteDepth;
+    m.clockLagMs        = config.clockLagMs;
     // Futures depth events carry a transaction time T and a previous
     // update id pu, stored in quote_binance_fut (exchTransactTimeMs,
     // exchPrevUpdateId); spot events have neither.

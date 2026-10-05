@@ -60,6 +60,7 @@ t2s::MarketConfig buildMarketConfig(const FeedHandlerConfig& config) {
     m.schema       = (config.marketSchema == "futures_agg_trade")
                      ? t2s::TradeSchema::FuturesAggTrade
                      : t2s::TradeSchema::SpotTrade;
+    m.clockLagMs   = config.clockLagMs;
     m.backfillEnabled = config.backfillEnabled;
     if (config.backfillEnabled) {
         m.backfillRestHost    = config.backfillRestHost;

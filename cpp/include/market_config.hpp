@@ -52,6 +52,9 @@ struct MarketConfig {
     int         backfillWeight         = 25;       ///< request weight of one page
     int         backfillWeightLimit    = 6000;     ///< the exchange's IP weight limit per minute
     long long   backfillMaxGapIds      = 500000;   ///< a larger gap is unrecoverable (tooLarge)
+
+    /// clock_lag_ms in config/shared.json (see row_clock.hpp)
+    long long   clockLagMs             = 2000;
 };
 
 /// Which exchange rule keeps the local book in step with the diff stream.
@@ -85,6 +88,8 @@ struct QuoteMarketConfig {
     // Published row layout
     int  depth               = 5;                  ///< levels per side (quote_depth in config/shared.json)
     bool publishTransactTime = false;              ///< futures row layout: adds exchTransactTimeMs (`T`) and exchPrevUpdateId (`pu`)
+    /// clock_lag_ms in config/shared.json (see row_clock.hpp)
+    long long clockLagMs     = 2000;
 };
 
 /**

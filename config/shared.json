@@ -4,5 +4,6 @@
         "ethusdt",
         "solusdt"
     ],
-    "quote_depth": 5
+    "quote_depth": 5,
+    "clock_lag_ms": 2000
 }

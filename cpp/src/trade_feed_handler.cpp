@@ -11,6 +11,7 @@
 #include "k_object.hpp"
 #include "json_reader.hpp"
 #include "trade_row.hpp"
+#include "row_clock_log.hpp"
 
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
@@ -36,6 +37,7 @@ TradeFeedHandler::TradeFeedHandler(const std::vector<std::string>& symbols,
     // cfg_, not `market`: the parameter was moved into cfg_ two lines up
     , backfillHttp_(cfg_.backfillRestHost, cfg_.backfillRestPort, cfg_.backfillRestPath)
     , startTime_(std::chrono::system_clock::now())
+    , rowClock_(cfg_.clockLagMs)
 {
     sessionId_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
         startTime_.time_since_epoch()).count();
@@ -255,13 +257,17 @@ void TradeFeedHandler::publishBackfilled(const std::string& sym, const t2s::Back
     // event time, so exchEventTimeMs is null. That null is what marks the row
     // as backfilled. `time` is when the REST reply arrived; the trade's own
     // time is exchTradeTimeMs.
+    // No event time of its own: while the clock lags, `time` comes from the
+    // most recent live event (row_clock.hpp).
+    const t2s::RowStamp stamp = rowClock_.stamp(recvTimeUtcNs, 0);
+    t2s::logClockEdge(stamp, rowClock_);
     ++fhSeqNo_;
     t2s::KOwned row;
     if (cfg_.schema == t2s::TradeSchema::SpotTrade) {
-        row = t2s::buildTradeRow(recvTimeUtcNs, recvTimeUtcNs, sym, t.id, t.price, t.qty, t.buyerIsMaker,
+        row = t2s::buildTradeRow(stamp.timeUtcNs, recvTimeUtcNs, sym, t.id, t.price, t.qty, t.buyerIsMaker,
                                  t2s::GAP_NULL_LONG, t.tradeTimeMs, 0LL, 0LL, fhSeqNo_, KDB_EPOCH_OFFSET_NS);
     } else {
-        row = t2s::buildAggTradeRow(recvTimeUtcNs, recvTimeUtcNs, sym, t.id, t.firstTradeId, t.lastTradeId,
+        row = t2s::buildAggTradeRow(stamp.timeUtcNs, recvTimeUtcNs, sym, t.id, t.firstTradeId, t.lastTradeId,
                                     t.price, t.qty, t.qtyExRpi, t.buyerIsMaker,
                                     t2s::GAP_NULL_LONG, t.tradeTimeMs, 0LL, 0LL, fhSeqNo_, KDB_EPOCH_OFFSET_NS);
     }
@@ -384,6 +390,12 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
     long long fhParseUs = std::chrono::duration_cast<std::chrono::microseconds>(
         parseEnd - parseStart).count();
 
+    // `time` is the receive time, unless the system clock is behind the
+    // exchange (the first seconds after a wake): then it is the exchange
+    // event time. fhRecvTimeUtcNs keeps the raw clock reading either way.
+    const t2s::RowStamp stamp = rowClock_.stamp(fhRecvTimeUtcNs, exchEventTimeMs);
+    t2s::logClockEdge(stamp, rowClock_);
+
     // Increment sequence number
     ++fhSeqNo_;
 
@@ -394,13 +406,13 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
     int fhSendSlotIdx;
     if (cfg_.schema == t2s::TradeSchema::SpotTrade) {
         row = t2s::buildTradeRow(
-            fhRecvTimeUtcNs, fhRecvTimeUtcNs, symStr, primaryId, priceV, qtyV, buyerIsMaker,
+            stamp.timeUtcNs, fhRecvTimeUtcNs, symStr, primaryId, priceV, qtyV, buyerIsMaker,
             exchEventTimeMs, exchTradeTimeMs, fhParseUs, /*fhSendUs=*/0LL, fhSeqNo_,
             KDB_EPOCH_OFFSET_NS);
         fhSendSlotIdx = t2s::TRADE_ROW_SEND_US_IDX;
     } else {  // FuturesAggTrade
         row = t2s::buildAggTradeRow(
-            fhRecvTimeUtcNs, fhRecvTimeUtcNs, symStr, primaryId, firstAggId, lastAggId,
+            stamp.timeUtcNs, fhRecvTimeUtcNs, symStr, primaryId, firstAggId, lastAggId,
             priceV, qtyV, qtyExRpi, buyerIsMaker,
             exchEventTimeMs, exchTradeTimeMs, fhParseUs, /*fhSendUs=*/0LL, fhSeqNo_,
             KDB_EPOCH_OFFSET_NS);
@@ -602,6 +614,7 @@ void TradeFeedHandler::publishHealth() {
         {"tpReconnects",   tp_->reconnects()},
         {"rowsResent",     tp_->rowsResent()},
         {"rowsUnresendable", tp_->rowsUnresendable()},
+        {"clockLagRows",   rowClock_.correctedRows()},   // rows whose time came from the exchange
     });
 
     spdlog::debug("Health published: uptime={}s msgs={}/{} state={}",

@@ -58,6 +58,11 @@ struct FeedHandlerConfig {
     // From the shared file (symbols above come from it too)
     int         quoteDepth = 5;          // levels per side published by the quote handlers
     std::string sharedConfigPath;        // where symbols and quoteDepth were read from
+    /// Optional clock_lag_ms: an exchange event time ahead of the receive time
+    /// by more than this means the system clock is behind (row_clock.hpp).
+    long long   clockLagMs = 2000;
+    static constexpr long long MIN_CLOCK_LAG_MS = 100;       // below this, network jitter would trigger it
+    static constexpr long long MAX_CLOCK_LAG_MS = 3600000;
 
     /// Smallest / largest quote depth accepted. The upper bound keeps the
     /// depth well under the book's refresh low-water mark (100 levels).
@@ -112,6 +117,18 @@ struct FeedHandlerConfig {
             std::cerr << "[Config] " << sharedConfigPath << ": quote_depth " << quoteDepth
                       << " is outside " << MIN_QUOTE_DEPTH << ".." << MAX_QUOTE_DEPTH << std::endl;
             return false;
+        }
+        if (doc.HasMember("clock_lag_ms")) {
+            if (!doc["clock_lag_ms"].IsInt64()) {
+                std::cerr << "[Config] " << sharedConfigPath << ": \"clock_lag_ms\" must be an integer" << std::endl;
+                return false;
+            }
+            clockLagMs = doc["clock_lag_ms"].GetInt64();
+            if (clockLagMs < MIN_CLOCK_LAG_MS || clockLagMs > MAX_CLOCK_LAG_MS) {
+                std::cerr << "[Config] " << sharedConfigPath << ": clock_lag_ms " << clockLagMs
+                          << " is outside " << MIN_CLOCK_LAG_MS << ".." << MAX_CLOCK_LAG_MS << std::endl;
+                return false;
+            }
         }
         return true;
     }
@@ -249,7 +266,7 @@ struct FeedHandlerConfig {
         }
 
         std::cout << "[Config] Loaded from: " << filepath << std::endl;
-        std::cout << "[Config] Shared:  " << sharedConfigPath << " (quote_depth=" << quoteDepth << ")" << std::endl;
+        std::cout << "[Config] Shared:  " << sharedConfigPath << " (quote_depth=" << quoteDepth << ", clock_lag_ms=" << clockLagMs << ")" << std::endl;
         std::cout << "[Config] Symbols: ";
         for (const auto& s : symbols) std::cout << s << " ";
         std::cout << std::endl;

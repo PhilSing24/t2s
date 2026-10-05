@@ -346,7 +346,10 @@ pubsub.init[]
 / the trade handlers). TP keeps the latest report per table. The counters
 / are cumulative since that handler process started.
 / Handler counters whose increase is a problem worth flagging
-.tp.fh.alertCounters:`bookGaps`rateLimitPauses`depthExhausted`bufferOverflows`rowsUnresendable`gapsUnrecoverable`nqMissing;
+/ clockLagRows: rows a handler stamped from the exchange event time because
+/ its clock was behind (the first seconds after a wake); such a row's time
+/ differs from its fhRecvTimeUtcNs (see cpp/include/row_clock.hpp)
+.tp.fh.alertCounters:`bookGaps`rateLimitPauses`depthExhausted`bufferOverflows`rowsUnresendable`gapsUnrecoverable`nqMissing`clockLagRows;
 / Handler counters whose increase is worth SHOWING as recent activity (what
 / a wake from sleep looks like) without being a problem
 .tp.fh.infoCounters:`wsReconnects`resyncs`exchGaps`gapsRecovered`tradesBackfilled`tpReconnects`rowsResent`depthRefreshes;

@@ -43,6 +43,7 @@
 #include "trade_gap.hpp"
 #include "trade_backfill.hpp"
 #include "rest_client.hpp"
+#include "row_clock.hpp"
 
 // kdb+ C API
 extern "C" {
@@ -235,6 +236,11 @@ private:
     long long ctrExchOutOfOrder_{0};   ///< trade id lower than the last one seen
     long long ctrExchDuplicates_{0};   ///< trade id equal to the last one seen
     long long ctrNqMissing_{0};        ///< futures aggTrade events without a usable `nq`
+
+    /// Decides each row's `time`: the receive time, or the exchange event
+    /// time while the system clock lags it (after a wake). Counts the
+    /// corrected rows, reported to TP as clockLagRows.
+    t2s::RowClock rowClock_;
 
     /// Time of last message received
     std::chrono::system_clock::time_point lastMsgTime_;

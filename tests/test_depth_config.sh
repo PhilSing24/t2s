@@ -165,6 +165,17 @@ if [[ -x build/quote_feed_handler && -x build/trade_feed_handler ]]; then
     shared "$BAD" 5 '[]'
     T2S_SHARED_CONFIG="$BAD" ./build/trade_feed_handler config/trade_feed_handler.json > "$T2S_SANDBOX/h.log" 2>&1 < /dev/null; rc=$?
     [[ $rc -eq 1 ]] && grep -q "non-empty array" "$T2S_SANDBOX/h.log" && pass "trade handler refuses an empty symbol list" || fail "trade handler rc=$rc"
+    # clock_lag_ms is optional; when present it must be a sane integer
+    for lag in 0 50 '"2s"' 2.5; do
+        printf '{"symbols": ["btcusdt"], "quote_depth": 5, "clock_lag_ms": %s}\n' "$lag" > "$BAD"
+        T2S_SHARED_CONFIG="$BAD" ./build/trade_feed_handler config/trade_feed_handler.json > "$T2S_SANDBOX/h.log" 2>&1 < /dev/null; rc=$?
+        [[ $rc -eq 1 ]] && grep -q "clock_lag_ms" "$T2S_SANDBOX/h.log" && pass "trade handler refuses clock_lag_ms $lag" || fail "clock_lag_ms $lag rc=$rc"
+    done
+    printf '{"symbols": ["btcusdt"], "quote_depth": 5, "clock_lag_ms": 50}\n' > "$BAD"
+    T2S_SHARED_CONFIG="$BAD" ./build/quote_feed_handler config/quote_feed_handler.json > "$T2S_SANDBOX/h.log" 2>&1 < /dev/null; rc=$?
+    [[ $rc -eq 1 ]] && grep -q "clock_lag_ms 50 is outside" "$T2S_SANDBOX/h.log" && pass "quote handler refuses clock_lag_ms 50" || fail "quote handler clock_lag_ms rc=$rc"
+    OUT=$(T2S_SHARED_CONFIG="$BAD" q kdb/schemas.q < /dev/null 2>&1); rc=$?
+    [[ $rc -eq 0 ]] && pass "q ignores clock_lag_ms (a handler setting)" || fail "q with clock_lag_ms rc=$rc: $OUT"
     printf '{"symbols": ["btcusdt"], "tickerplant": {"port": %s}}\n' "$T2S_PORT_UNREACHABLE" > "$T2S_SANDBOX/old.json"
     ./build/trade_feed_handler "$T2S_SANDBOX/old.json" > "$T2S_SANDBOX/h.log" 2>&1 < /dev/null; rc=$?
     [[ $rc -eq 1 ]] && grep -q "Symbols are now shared" "$T2S_SANDBOX/h.log" && pass "a handler config with its own symbols list is refused" || fail "old-style config rc=$rc"

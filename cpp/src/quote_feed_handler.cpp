@@ -12,6 +12,7 @@
 #include "json_reader.hpp"
 #include "fh_stats.hpp"
 #include "quote_row.hpp"
+#include "row_clock_log.hpp"
 
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
@@ -35,6 +36,7 @@ QuoteFeedHandler::QuoteFeedHandler(const std::vector<std::string>& symbols,
     , tpHost_(tpHost)
     , tpPort_(tpPort)
     , restClient_(market.restHost, market.restPort, market.restPath)
+    , rowClock_(cfg_.clockLagMs)
     , startTime_(std::chrono::system_clock::now())
 {
     sessionId_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -392,6 +394,10 @@ void QuoteFeedHandler::processMessage(const std::string& msg, long long fhRecvTi
     int symIdx = bookMgr_->getSymbolIndex(sym);
     if (symIdx < 0) return;  // Unknown symbol (not a parse failure - configured subset)
 
+    // Every event tells the row clock what time the exchange is at, whether
+    // or not it leads to a published row.
+    rowClock_.noteEvent(*Ef);
+
     BufferedDelta delta;
     delta.firstUpdateId = *Uf;
     delta.finalUpdateId = *uf;
@@ -649,8 +655,14 @@ void QuoteFeedHandler::publishQuote(const BookQuote& quote) {
     // Row layout: see quote_row.hpp (generated from the configured depth,
     // matching kdb/schemas.q). fhSendUs is the time spent building the row.
     const bool withT = cfg_.publishTransactTime;
+    // `time` is the receive time, unless the system clock is behind the
+    // exchange (the first seconds after a wake): then it is the exchange
+    // event time - the quote's own, or for a row without one (an invalid
+    // row) the most recent event's. fhRecvTimeUtcNs keeps the clock reading.
+    const t2s::RowStamp stamp = rowClock_.stamp(quote.fhRecvTimeUtcNs, quote.exchEventTimeMs);
+    t2s::logClockEdge(stamp, rowClock_);
     auto sendStart = std::chrono::steady_clock::now();
-    t2s::KOwned row(t2s::buildQuoteRow(quote, quote.fhRecvTimeUtcNs, lastParseUs_, 0LL, withT));
+    t2s::KOwned row(t2s::buildQuoteRow(quote, stamp.timeUtcNs, lastParseUs_, 0LL, withT));
     auto sendEnd = std::chrono::steady_clock::now();
     long long fhSendUs = std::chrono::duration_cast<std::chrono::microseconds>(
         sendEnd - sendStart).count();
@@ -715,6 +727,7 @@ void QuoteFeedHandler::publishHealth() {
         {"tpReconnects",     tp_->reconnects()},
         {"rowsResent",       tp_->rowsResent()},
         {"rowsUnresendable", tp_->rowsUnresendable()},
+        {"clockLagRows",     rowClock_.correctedRows()},   // rows whose time came from the exchange
     });
     
     spdlog::debug("Health published: uptime={}s msgs={}/{} state={}", 

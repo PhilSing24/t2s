@@ -44,6 +44,7 @@
 #include "snapshot_scheduler.hpp"
 #include "market_config.hpp"
 #include "tp_publisher.hpp"
+#include "row_clock.hpp"
 
 extern "C" {
 #include "k.h"
@@ -209,6 +210,11 @@ private:
     long long ctrResyncs_{0};           ///< books rebuilt from scratch (gap or failed sync)
     long long ctrSnapshotFailures_{0};  ///< snapshot fetches that failed or timed out
     long long ctrWsReconnects_{0};      ///< Binance WebSocket connections lost and re-opened
+
+    /// Decides each row's `time`: the receive time, or the exchange event
+    /// time while the system clock lags it (after a wake). Counts the
+    /// corrected rows, reported to TP as clockLagRows.
+    t2s::RowClock rowClock_;
 
     /// One STATS line with every counter, every STATS_INTERVAL_SEC and at exit.
     void logStats() const;
