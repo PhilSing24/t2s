@@ -73,7 +73,7 @@ A daily job that fails leaves its unit `failed`; `./status.sh` reports it.
 | Event | What happens | What you do |
 |---|---|---|
 | A process crashes or is killed | systemd restarts it within seconds. TP: handlers resend, WDB replays, `missed` stays 0. A trade handler: the trades it did not receive are recorded in `trade_gap` and backfilled. A quote handler: the hole is marked by the handler restart and the books resync. WDB: replays from its checkpoint. | Nothing. `./status.sh` shows the restart count. |
-| `wsl --shutdown`, WSL crash | Everything stops, possibly without a flush. Nothing logged by TP is lost. When the distro starts again, systemd starts the user manager (lingering) and `t2s.target`: TP continues its tpSeqNo, WDB replays the log, the trade handlers backfill what was traded meanwhile. | Nothing if the Windows boot task is installed (it restarts WSL within a minute). Otherwise open a WSL terminal. |
+| `wsl --shutdown`, WSL crash | Everything stops at once, without a flush. Nothing logged by TP is lost. When the distro starts again, systemd starts the user manager (lingering) and `t2s.target` within seconds: TP continues its tpSeqNo, WDB replays the log, the trade handlers backfill what was traded meanwhile. | Nothing if the Windows boot task is installed (it restarts WSL within a minute and keeps it alive). Otherwise open a WSL terminal and keep one open. |
 | Windows restart | The boot task starts WSL at system startup, before logon; then as above. | Nothing. |
 | Laptop sleep | See the next section. | Nothing; check `./status.sh` if you are curious. |
 | Your Windows password changes | The boot task can no longer log on; WSL does not start at boot. | Update the task (below). |
@@ -106,6 +106,21 @@ On wake, in order:
    this clock that matters. Two things catch it: the `t2s-clock` timer, within
    5 minutes, and `./status.sh` (`CLOCK` lines; TP's `clock skew` against the
    exchange's event times). See **Clock**.
+
+**Known limit: the first seconds after wake.** WSL corrects its clock a few
+seconds after resuming, not at once. Rows received in between carry the
+pre-sleep time in `time` and `fhRecvTimeUtcNs`. Measured on 2026-10-04 after a
+6-minute sleep: 377 spot quote rows stamped 23:39:09 to 23:39:13 whose exchange
+event times run up to 23:45:20. Their `exchEventTimeMs` is right. The window is
+too short for the clock timer; it is visible afterwards as rows whose receive
+time is earlier than their exchange event time:
+
+```q
+select from quote_binance where date = 2026.10.04, isValid, exchEventTimeMs > 5000 + (`long$time - 1970.01.01D0) div 1000000
+```
+
+A sleep that ends just after midnight UTC could therefore put a few rows in
+the previous day's partition.
 
 Nothing in this sequence needs you. What to look at afterwards:
 
@@ -146,6 +161,15 @@ systemd services do not keep a WSL distro alive, and nothing starts the distro
 after a Windows restart. `ops/windows-boot-task.ps1` registers a scheduled task
 that does both: it runs at system startup under your account, logged on or
 not, with a `wsl.exe` command that never exits.
+
+**Until this task is installed the pipeline only lives while a WSL window or
+VS Code is open.** This was seen in the live check on 2026-10-05: after
+`wsl --shutdown` the distro started at 00:53:06 UTC and the pipeline was up two
+seconds later, but 84 seconds on WSL terminated the distro again, abruptly,
+because no Windows process was attached to it any more; it came back when VS
+Code reconnected. Nothing was lost (WDB replayed, the trade handlers backfilled
+the two short holes), but the pipeline was down for 26 seconds for no reason
+other than the missing keep-alive.
 
 Install, from an **elevated** PowerShell:
 

@@ -209,6 +209,23 @@ TEST_CASE("Unrecoverable reasons: tooLarge, tooOld, notServed, backfillDisabled"
     }
 }
 
+TEST_CASE("A too-large gap behind another gap gets no request at all", "[backfill][unrecoverable]") {
+    // Regression (live check 2026-10-04): the size check ran only at the top
+    // of the loop, so a gap that became the head when its predecessor
+    // finished had pages requested before the cap was applied.
+    FakeFetcher f; Sink s; auto c = cfg(10); c.maxGapIds = 100;
+    t2s::TradeBackfill<FakeFetcher> bf(f, c);
+    bf.addGap(gap(1, 30, "SOLUSDT"));          // fine: 3 pages
+    bf.addGap(gap(1000, 1500, "BTCUSDT"));     // 501 ids: above the cap
+    bf.addGap(gap(5000, 5009, "ETHUSDT"));     // fine: 1 page
+    bf.pump(0, s.publish(), s.record());
+    std::vector<long long> want = range(1, 30); for (long long i = 5000; i <= 5009; ++i) want.push_back(i);
+    REQUIRE(s.ids == want);                                                   // no id of the large gap
+    REQUIRE(f.requests == std::vector<std::pair<long long, int>>{{1, 10}, {11, 10}, {21, 10}, {5000, 10}});
+    REQUIRE(s.events == std::vector<std::string>{"partial:10:10:", "partial:20:20:", "recovered:30:30:",
+                                                 "unrecoverable:0:0:tooLarge", "recovered:10:5009:"});
+}
+
 TEST_CASE("A resumed gap continues after what was already recovered", "[backfill][resume]") {
     FakeFetcher f; Sink s;
     t2s::TradeBackfill<FakeFetcher> bf(f, cfg());

@@ -203,15 +203,7 @@ public:
         for (int guard = 0; guard < 100000; ++guard) {
             bool progressed = false;
 
-            // Gaps that need no request: disabled, too large, already complete
-            while (!inFlight_ && !queue_.empty()) {
-                Job& job = queue_.front();
-                if (!cfg_.enabled) { finish(recordEvent, GapStatus::Unrecoverable, "backfillDisabled"); progressed = true; continue; }
-                if (job.gap.missing() > cfg_.maxGapIds) { finish(recordEvent, GapStatus::Unrecoverable, "tooLarge"); progressed = true; continue; }
-                if (job.gap.nextNeededId() > job.gap.lastId) { finish(recordEvent, GapStatus::Recovered, ""); progressed = true; continue; }
-                break;
-            }
-
+            // 1. A finished page, if any
             if (inFlight_) {
                 std::optional<BackfillPage> page = cfg_.inlineFetch ? std::move(inlinePage_) : results_.try_pop();
                 inlinePage_.reset();
@@ -222,6 +214,22 @@ public:
                 }
             }
 
+            // 2. Gaps that need no request: disabled, too large, already
+            //    complete. This must run BEFORE step 3 for whatever gap is now
+            //    at the head, including one that became the head in step 1 -
+            //    otherwise a gap above the cap gets pages fetched until the
+            //    rate budget happens to pause the requests (seen live: 16,000
+            //    trades of a 750,848-id gap were fetched before it was
+            //    declared tooLarge).
+            while (!inFlight_ && !queue_.empty()) {
+                Job& job = queue_.front();
+                if (!cfg_.enabled) { finish(recordEvent, GapStatus::Unrecoverable, "backfillDisabled"); progressed = true; continue; }
+                if (job.gap.missing() > cfg_.maxGapIds) { finish(recordEvent, GapStatus::Unrecoverable, "tooLarge"); progressed = true; continue; }
+                if (job.gap.nextNeededId() > job.gap.lastId) { finish(recordEvent, GapStatus::Recovered, ""); progressed = true; continue; }
+                break;
+            }
+
+            // 3. The next request, if the rate limits allow
             if (!inFlight_ && !queue_.empty() && sched_.tryAcquire(0, nowMs)) {
                 const TradeGap& g = queue_.front().gap;
                 long long from = g.nextNeededId();
