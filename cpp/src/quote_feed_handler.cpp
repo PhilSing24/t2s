@@ -650,7 +650,7 @@ void QuoteFeedHandler::publishQuote(const BookQuote& quote) {
     // matching kdb/schemas.q). fhSendUs is the time spent building the row.
     const bool withT = cfg_.publishTransactTime;
     auto sendStart = std::chrono::steady_clock::now();
-    t2s::KOwned row(t2s::buildQuoteRow(quote, lastParseUs_, 0LL, withT));
+    t2s::KOwned row(t2s::buildQuoteRow(quote, quote.fhRecvTimeUtcNs, lastParseUs_, 0LL, withT));
     auto sendEnd = std::chrono::steady_clock::now();
     long long fhSendUs = std::chrono::duration_cast<std::chrono::microseconds>(
         sendEnd - sendStart).count();

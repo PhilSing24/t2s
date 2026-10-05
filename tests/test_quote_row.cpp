@@ -38,7 +38,7 @@ TEST_CASE("Quote row columns are in schema order", "[quoterow]") {
     for (int depth : {1, 3, 5, 10}) {
         for (bool fut : {false, true}) {
             BookQuote q = sample(depth);
-            K row = t2s::buildQuoteRow(q, 7, 9, fut);
+            K row = t2s::buildQuoteRow(q, q.fhRecvTimeUtcNs, 7, 9, fut);
             REQUIRE(row->t == 0);
             REQUIRE(row->n == t2s::quoteRowWidth(depth, fut));
 
@@ -77,12 +77,24 @@ TEST_CASE("An invalid quote row has null update ids", "[quoterow]") {
         q.sym = "BTCUSDT";
         q.isValid = false;
         q.exchFirstUpdateId = 7; q.exchUpdateId = 8; q.exchPrevUpdateId = 6;   // must not leak out
-        K row = t2s::buildQuoteRow(q, 0, 0, fut);
+        K row = t2s::buildQuoteRow(q, q.fhRecvTimeUtcNs, 0, 0, fut);
         K* f = kK(row);
         int i = 2 + 4 * 5 + 2 + (fut ? 1 : 0);
         REQUIRE(f[i++]->j == t2s::QUOTE_NULL_LONG);
         REQUIRE(f[i++]->j == t2s::QUOTE_NULL_LONG);
         if (fut) REQUIRE(f[i++]->j == t2s::QUOTE_NULL_LONG);
+        r0(row);
+    }
+}
+
+TEST_CASE("A quote row carries time and the raw receive time separately", "[quoterow][clock]") {
+    for (bool fut : {false, true}) {
+        BookQuote q = sample(5);
+        const long long time = q.fhRecvTimeUtcNs + 371000000000LL;   // exchange time on a clock-corrected row
+        K row = t2s::buildQuoteRow(q, time, 0, 0, fut);
+        K* f = kK(row);
+        REQUIRE(f[0]->j == time - t2s::QUOTE_KDB_EPOCH_OFFSET_NS);
+        REQUIRE(f[t2s::quoteRowWidth(5, fut) - 4]->j == q.fhRecvTimeUtcNs);
         r0(row);
     }
 }

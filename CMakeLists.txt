@@ -140,6 +140,15 @@ if(EXISTS ${CATCH2_DIR}/catch_amalgamated.cpp)
         ${CATCH2_DIR}
     )
 
+    add_executable(test_row_clock
+        tests/test_row_clock.cpp
+        ${CATCH2_DIR}/catch_amalgamated.cpp
+    )
+    target_include_directories(test_row_clock PRIVATE
+        ${INCLUDE_DIR}
+        ${CATCH2_DIR}
+    )
+
     add_executable(test_quote_row
         tests/test_quote_row.cpp
         ${CATCH2_DIR}/catch_amalgamated.cpp

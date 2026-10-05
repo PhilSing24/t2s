@@ -159,7 +159,7 @@ int main(int argc, char* argv[]) {
         backfill.pump(steadyMs(),
             [&](const std::string& s2, const t2s::BackfillTrade& t, long long recvNs) {
                 ++seq;
-                t2s::KOwned row = t2s::buildTradeRow(recvNs, s2, t.id, t.price, t.qty, t.buyerIsMaker,
+                t2s::KOwned row = t2s::buildTradeRow(recvNs, recvNs, s2, t.id, t.price, t.qty, t.buyerIsMaker,
                                                      t2s::GAP_NULL_LONG, t.tradeTimeMs, 0, 0, seq, KDB_EPOCH_OFFSET_NS);
                 tp.publish(row.release(), seq);
                 if (++backfilled == dieAfter) {
@@ -204,7 +204,7 @@ int main(int argc, char* argv[]) {
         }
         firstAfterSeed = false;
         ++seq;
-        t2s::KOwned row = t2s::buildTradeRow(recv, sym, id, 100.0 + 0.01 * (i % 100), 0.5, (i % 2) == 0,
+        t2s::KOwned row = t2s::buildTradeRow(recv, recv, sym, id, 100.0 + 0.01 * (i % 100), 0.5, (i % 2) == 0,
                                              recv / 1000000, recv / 1000000, 1, 1, seq, KDB_EPOCH_OFFSET_NS);
         if (!tp.publish(row.release(), seq)) break;
         ++sent;

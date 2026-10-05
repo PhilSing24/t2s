@@ -258,10 +258,10 @@ void TradeFeedHandler::publishBackfilled(const std::string& sym, const t2s::Back
     ++fhSeqNo_;
     t2s::KOwned row;
     if (cfg_.schema == t2s::TradeSchema::SpotTrade) {
-        row = t2s::buildTradeRow(recvTimeUtcNs, sym, t.id, t.price, t.qty, t.buyerIsMaker,
+        row = t2s::buildTradeRow(recvTimeUtcNs, recvTimeUtcNs, sym, t.id, t.price, t.qty, t.buyerIsMaker,
                                  t2s::GAP_NULL_LONG, t.tradeTimeMs, 0LL, 0LL, fhSeqNo_, KDB_EPOCH_OFFSET_NS);
     } else {
-        row = t2s::buildAggTradeRow(recvTimeUtcNs, sym, t.id, t.firstTradeId, t.lastTradeId,
+        row = t2s::buildAggTradeRow(recvTimeUtcNs, recvTimeUtcNs, sym, t.id, t.firstTradeId, t.lastTradeId,
                                     t.price, t.qty, t.qtyExRpi, t.buyerIsMaker,
                                     t2s::GAP_NULL_LONG, t.tradeTimeMs, 0LL, 0LL, fhSeqNo_, KDB_EPOCH_OFFSET_NS);
     }
@@ -394,13 +394,13 @@ void TradeFeedHandler::processMessage(const std::string& msg) {
     int fhSendSlotIdx;
     if (cfg_.schema == t2s::TradeSchema::SpotTrade) {
         row = t2s::buildTradeRow(
-            fhRecvTimeUtcNs, symStr, primaryId, priceV, qtyV, buyerIsMaker,
+            fhRecvTimeUtcNs, fhRecvTimeUtcNs, symStr, primaryId, priceV, qtyV, buyerIsMaker,
             exchEventTimeMs, exchTradeTimeMs, fhParseUs, /*fhSendUs=*/0LL, fhSeqNo_,
             KDB_EPOCH_OFFSET_NS);
         fhSendSlotIdx = t2s::TRADE_ROW_SEND_US_IDX;
     } else {  // FuturesAggTrade
         row = t2s::buildAggTradeRow(
-            fhRecvTimeUtcNs, symStr, primaryId, firstAggId, lastAggId,
+            fhRecvTimeUtcNs, fhRecvTimeUtcNs, symStr, primaryId, firstAggId, lastAggId,
             priceV, qtyV, qtyExRpi, buyerIsMaker,
             exchEventTimeMs, exchTradeTimeMs, fhParseUs, /*fhSendUs=*/0LL, fhSeqNo_,
             KDB_EPOCH_OFFSET_NS);

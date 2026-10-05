@@ -48,13 +48,15 @@ inline int quoteSendUsIndex(int depth, bool futuresLayout) noexcept {
 }
 
 /// Build the row. Caller owns the returned K (or passes it to k()).
-inline K buildQuoteRow(const BookQuote& q, long long fhParseUs, long long fhSendUs,
+/// timeUtcNs is the row's `time`: q.fhRecvTimeUtcNs, except on a
+/// clock-corrected row (see row_clock.hpp).
+inline K buildQuoteRow(const BookQuote& q, long long timeUtcNs, long long fhParseUs, long long fhSendUs,
                        bool futuresLayout) {
     const int depth = q.depth();
     auto id = [&q](long long v) { return q.isValid ? v : QUOTE_NULL_LONG; };
     K row = ktn(0, quoteRowWidth(depth, futuresLayout));
     int i = 0;
-    kK(row)[i++] = ktj(-KP, q.fhRecvTimeUtcNs - QUOTE_KDB_EPOCH_OFFSET_NS);
+    kK(row)[i++] = ktj(-KP, timeUtcNs - QUOTE_KDB_EPOCH_OFFSET_NS);
     kK(row)[i++] = ks(const_cast<S>(q.sym.c_str()));
     for (double v : q.bidPrices) kK(row)[i++] = kf(v);
     for (double v : q.bidQtys)   kK(row)[i++] = kf(v);

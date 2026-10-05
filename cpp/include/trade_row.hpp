@@ -12,6 +12,11 @@
  *                        `firstTradeId` and `lastTradeId` describing the
  *                        constituent fills aggregated into this event.
  *
+ * `time` (timeUtcNs) is passed separately from fhRecvTimeUtcNs. They are
+ * the same instant except on a clock-corrected row, where `time` comes from
+ * the exchange and fhRecvTimeUtcNs keeps the raw clock reading (see
+ * row_clock.hpp).
+ *
  * Both functions take the KDB epoch offset as a parameter rather than
  * reading from a class constant, so tests can call them without linking
  * the FH library. Both return KOwned so the caller can either release()
@@ -24,7 +29,7 @@
  * correct index based on cfg_.schema. Tests below lock both layouts.
  *
  * Spot row layout (12 fields) - matches specs/trades-schema.md:
- *   [0]  time             KP timestamp (recvUtcNs - epochOffset)
+ *   [0]  time             KP timestamp (timeUtcNs - epochOffset)
  *   [1]  sym              symbol
  *   [2]  tradeId          long
  *   [3]  price            float
@@ -74,6 +79,7 @@ extern "C" {
 namespace t2s {
 
 inline KOwned buildTradeRow(
+    long long          timeUtcNs,
     long long          fhRecvTimeUtcNs,
     const std::string& sym,
     long long          tradeId,
@@ -88,7 +94,7 @@ inline KOwned buildTradeRow(
     long long          kdbEpochOffsetNs) noexcept
 {
     return KOwned(knk(12,
-        ktj(-KP, fhRecvTimeUtcNs - kdbEpochOffsetNs),
+        ktj(-KP, timeUtcNs - kdbEpochOffsetNs),
         ks((S)sym.c_str()),
         kj(tradeId),
         kf(price),
@@ -104,6 +110,7 @@ inline KOwned buildTradeRow(
 }
 
 inline KOwned buildAggTradeRow(
+    long long          timeUtcNs,
     long long          fhRecvTimeUtcNs,
     const std::string& sym,
     long long          aggTradeId,
@@ -121,7 +128,7 @@ inline KOwned buildAggTradeRow(
     long long          kdbEpochOffsetNs) noexcept
 {
     return KOwned(knk(15,
-        ktj(-KP, fhRecvTimeUtcNs - kdbEpochOffsetNs),
+        ktj(-KP, timeUtcNs - kdbEpochOffsetNs),
         ks((S)sym.c_str()),
         kj(aggTradeId),
         kj(firstTradeId),

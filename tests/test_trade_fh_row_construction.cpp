@@ -49,7 +49,7 @@ struct CanonicalSpotInputs {
 
 t2s::KOwned buildCanonicalSpot(const CanonicalSpotInputs& in = {}) {
     return t2s::buildTradeRow(
-        in.fhRecvTimeUtcNs, in.sym, in.tradeId,
+        in.fhRecvTimeUtcNs, in.fhRecvTimeUtcNs, in.sym, in.tradeId,
         in.price, in.qty, in.buyerIsMaker,
         in.exchEventTimeMs, in.exchTradeTimeMs,
         in.fhParseUs, in.fhSendUs, in.fhSeqNo,
@@ -77,7 +77,7 @@ struct CanonicalAggInputs {
 
 t2s::KOwned buildCanonicalAgg(const CanonicalAggInputs& in = {}) {
     return t2s::buildAggTradeRow(
-        in.fhRecvTimeUtcNs, in.sym, in.aggTradeId,
+        in.fhRecvTimeUtcNs, in.fhRecvTimeUtcNs, in.sym, in.aggTradeId,
         in.firstTradeId, in.lastTradeId,
         in.price, in.qty, in.qtyExRpi, in.buyerIsMaker,
         in.exchEventTimeMs, in.exchTradeTimeMs,
@@ -158,7 +158,7 @@ TEST_CASE("buildTradeRow time field uses the supplied epoch offset",
           "[trade_fh][row][regression][spot]") {
     const long long altOffset = 1000000000LL;
     t2s::KOwned row = t2s::buildTradeRow(
-        5000000000LL, "BTCUSDT", 1LL, 1.0, 1.0, true,
+        5000000000LL, 5000000000LL, "BTCUSDT", 1LL, 1.0, 1.0, true,
         0LL, 0LL, 0LL, 0LL, 1LL, altOffset);
 
     REQUIRE(kK(row.get())[0]->j == 5000000000LL - altOffset);
@@ -178,7 +178,7 @@ TEST_CASE("buildTradeRow fhSendUs slot is mutable in-place via KBorrowed",
 
 TEST_CASE("buildTradeRow handles zero-valued numeric fields", "[trade_fh][row][spot]") {
     t2s::KOwned row = t2s::buildTradeRow(
-        0LL, "BTCUSDT", 0LL, 0.0, 0.0, false,
+        0LL, 0LL, "BTCUSDT", 0LL, 0.0, 0.0, false,
         0LL, 0LL, 0LL, 0LL, 0LL, KDB_EPOCH_OFFSET_NS);
 
     K r = row.get();
@@ -303,7 +303,7 @@ TEST_CASE("buildAggTradeRow preserves arbitrary symbols", "[trade_fh][row][futur
 TEST_CASE("buildAggTradeRow handles zero-valued numeric fields",
           "[trade_fh][row][futures]") {
     t2s::KOwned row = t2s::buildAggTradeRow(
-        0LL, "BTCUSDT", 0LL, 0LL, 0LL, 0.0, 0.0, 0.0, false,
+        0LL, 0LL, "BTCUSDT", 0LL, 0LL, 0LL, 0.0, 0.0, 0.0, false,
         0LL, 0LL, 0LL, 0LL, 0LL, KDB_EPOCH_OFFSET_NS);
 
     K r = row.get();
@@ -339,8 +339,28 @@ TEST_CASE("Spot and futures rows are different sizes", "[trade_fh][row][regressi
 
 TEST_CASE("buildAggTradeRow stores a missing nq as a kdb+ null float", "[trade_fh][row][futures]") {
     t2s::KOwned row = t2s::buildAggTradeRow(
-        0LL, "BTCUSDT", 1LL, 1LL, 1LL, 100.0, 2.0, std::numeric_limits<double>::quiet_NaN(), false,
+        0LL, 0LL, "BTCUSDT", 1LL, 1LL, 1LL, 100.0, 2.0, std::numeric_limits<double>::quiet_NaN(), false,
         0LL, 0LL, 0LL, 0LL, 1LL, KDB_EPOCH_OFFSET_NS);
     REQUIRE(kK(row.get())[7]->f != kK(row.get())[7]->f);     // NaN, which q reads as 0n
     REQUIRE(approxEq(kK(row.get())[6]->f, 2.0));
+}
+
+// ============================================================================
+// CLOCK-CORRECTED ROWS: time is separate from the receive time
+// ============================================================================
+
+TEST_CASE("Trade rows carry time and the raw receive time separately", "[trade_fh][row][clock]") {
+    const long long recv = 1717459200000000000LL;          // stale clock reading
+    const long long time = recv + 371000000000LL;          // exchange time, 371 s later
+    t2s::KOwned spot = t2s::buildTradeRow(
+        time, recv, "BTCUSDT", 1LL, 1.0, 1.0, true,
+        0LL, 0LL, 0LL, 0LL, 1LL, KDB_EPOCH_OFFSET_NS);
+    REQUIRE(kK(spot.get())[0]->j == time - KDB_EPOCH_OFFSET_NS);
+    REQUIRE(kK(spot.get())[8]->j == recv);
+
+    t2s::KOwned agg = t2s::buildAggTradeRow(
+        time, recv, "BTCUSDT", 1LL, 1LL, 1LL, 100.0, 2.0, 2.0, false,
+        0LL, 0LL, 0LL, 0LL, 1LL, KDB_EPOCH_OFFSET_NS);
+    REQUIRE(kK(agg.get())[0]->j == time - KDB_EPOCH_OFFSET_NS);
+    REQUIRE(kK(agg.get())[11]->j == recv);
 }
