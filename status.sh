@@ -2,7 +2,11 @@
 # status.sh - the pipeline in a few lines: processes, TP and WDB health,
 # rows today, the counters that matter, disk, logs, clock, and an
 # "attention" list. Exit code 1 when anything needs attention (so it can
-# run from cron), 0 otherwise.
+# run from a timer), 0 otherwise.
+#
+# A pipeline that is fully stopped (ops/pipeline_state.sh: no process, no
+# active or failed unit) is the normal resting state when it is run on demand
+# with ./start.sh and ./stop.sh: it is reported as "stopped", not flagged.
 #
 # Paths and ports come from the environment the processes use
 # (T2S_TP_LOG_DIR, T2S_HDB_DIR, T2S_TMP_DIR, T2S_TP_PORT, T2S_WDB_PORT)
@@ -23,6 +27,7 @@ ATTN=()
 note() { ATTN+=("$1"); }
 
 echo "t2s status  $(date -u +%Y-%m-%dT%H:%M:%SZ)  ($BASEDIR)"
+STATE=$("$BASEDIR/ops/pipeline_state.sh" 2>/dev/null)
 
 # ---------------- processes ----------------
 listener() { lsof -ti TCP:"$1" -sTCP:LISTEN 2>/dev/null | head -1; }
@@ -32,7 +37,7 @@ fh_pid()   { pgrep -f "^(\./|$BASEDIR/)?build/$1( |$)" 2>/dev/null | head -1; }
 TP_PID=$(listener "$PORT_TP"); WDB_PID=$(listener "$PORT_WDB")
 SPOT=$(fh_pid trade_feed_handler); FUT=$(fh_pid trade_feed_handler_fut)
 QUOTE=$(fh_pid quote_feed_handler); QUOTE_FUT=$(fh_pid quote_feed_handler_fut)
-up() { if [[ -n "$2" ]]; then echo -n "$1 up(pid $2)  "; else echo -n "$1 DOWN  "; fi; }
+up() { if [[ -n "$2" ]]; then echo -n "$1 up(pid $2)  "; elif [[ "$STATE" == "stopped" ]]; then echo -n "$1 stopped  "; else echo -n "$1 DOWN  "; fi; }
 echo -n "PROC : "; up tp "$TP_PID"; up wdb "$WDB_PID"; up trade-fh "$SPOT"; up quote-fh "$QUOTE"; up trade-fh-fut "$FUT"; up quote-fh-fut "$QUOTE_FUT"
 if tmux has-session -t $SESSION 2>/dev/null; then echo "tmux:$SESSION"; else echo "tmux:none"; fi
 
@@ -67,7 +72,11 @@ if systemctl --user cat t2s-tp.service >/dev/null 2>&1; then
     echo "TIMER: $TL"
     en=$(systemctl --user is-enabled t2s.target 2>/dev/null)
     lg=$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)
-    echo "BOOT : t2s.target ${en:-not installed}; lingering ${lg:-unknown} (both needed to come back by itself after a WSL restart)"
+    case "$en" in
+        enabled) echo "BOOT : t2s.target enabled: the pipeline starts by itself when WSL starts; lingering ${lg:-unknown}" ;;
+        disabled) echo "BOOT : t2s.target disabled: the pipeline runs on demand (./start.sh, ./stop.sh); lingering ${lg:-unknown} (keeps the timers running)" ;;
+        *) echo "BOOT : t2s.target ${en:-not installed}; lingering ${lg:-unknown}" ;;
+    esac
     [[ "$en" == "enabled" && "$lg" != "yes" ]] && note "lingering is off: the pipeline will not start at WSL boot (sudo loginctl enable-linger $USER)"
     if [[ $SD_ACTIVE -gt 0 ]] && tmux has-session -t $SESSION 2>/dev/null; then
         note "systemd units AND a tmux session '$SESSION' exist at the same time - stop both with ./stop.sh"
@@ -75,8 +84,12 @@ if systemctl --user cat t2s-tp.service >/dev/null 2>&1; then
 else
     echo "UNITS: systemd units not installed (tmux mode; ops/systemd/install.sh installs them)"
 fi
-[[ -z "$TP_PID" ]]  && note "TP is down"
-[[ -z "$WDB_PID" ]] && note "WDB is down"
+if [[ "$STATE" == "stopped" ]]; then
+    echo "PIPELINE: stopped (not running, nothing failed). Start it with ./start.sh --markets spot,futures"
+else
+    [[ -z "$TP_PID" ]]  && note "TP is down"
+    [[ -z "$WDB_PID" ]] && note "WDB is down"
+fi
 MARKETS=$(cat "$BASEDIR/run/markets.active" 2>/dev/null || echo "")
 if [[ -n "$TP_PID" ]]; then
     [[ "$MARKETS" == *spot* && -z "$SPOT" ]] && note "spot trade handler is down (markets.active=$MARKETS)"
@@ -86,8 +99,12 @@ if [[ -n "$TP_PID" ]]; then
 fi
 
 # ---------------- TP / WDB internals ----------------
-T2S_STATUS_MARKETS="$MARKETS" T2S_TP_PORT=$PORT_TP T2S_WDB_PORT=$PORT_WDB T2S_TMP_DIR="$TMP_DIR" q "$BASEDIR/kdb/utils/status.q" < /dev/null 2>/dev/null
-QRC=$?
+# (nothing to ask when the pipeline is stopped)
+QRC=0
+if [[ "$STATE" != "stopped" ]]; then
+    T2S_STATUS_MARKETS="$MARKETS" T2S_TP_PORT=$PORT_TP T2S_WDB_PORT=$PORT_WDB T2S_TMP_DIR="$TMP_DIR" q "$BASEDIR/kdb/utils/status.q" < /dev/null 2>/dev/null
+    QRC=$?
+fi
 # status.q prints its own ATTN lines; fold its verdict into ours
 [[ $QRC -ne 0 ]] && note "see the items reported by TP/WDB above"
 
@@ -105,7 +122,14 @@ TODAY=$(date -u +%Y.%m.%d)
 OLD_TMP=""
 for t in $PENDING; do [[ "$t" != "tmp.$TODAY" ]] && OLD_TMP="$OLD_TMP $t"; done
 echo "TMP  : ${PENDING:-none}  (HDB partitions: $(ls -d "$HDB_DIR"/????.??.?? 2>/dev/null | wc -l), latest $(ls -d "$HDB_DIR"/????.??.?? 2>/dev/null | tail -1 | xargs -n1 basename 2>/dev/null))"
-[[ -n "$OLD_TMP" ]] && note "past-date tmp dir(s) not rolled:$OLD_TMP"
+if [[ -n "$OLD_TMP" ]]; then
+    # WDB rolls past days into the HDB when it starts; while the pipeline is
+    # stopped a past-date tmp dir is simply waiting for that.
+    if [[ "$STATE" == "stopped" ]]; then echo "       past day(s) waiting to be rolled into the HDB at the next start:$OLD_TMP"
+    else note "past-date tmp dir(s) not rolled:$OLD_TMP"; fi
+fi
+EOD_PENDING="${T2S_RUN_DIR:-$BASEDIR/run}/eod.pending"
+[[ -s "$EOD_PENDING" ]] && echo "EOD  : end-of-day check pending for: $(tr '\n' ' ' < "$EOD_PENDING")(done by the daily check once the day is rolled)"
 
 # ---------------- clock (WSL vs Windows host) ----------------
 if command -v powershell.exe >/dev/null 2>&1; then

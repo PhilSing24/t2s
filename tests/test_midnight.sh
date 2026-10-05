@@ -105,11 +105,11 @@ qtp ".health[]\`status" | grep -q "ok" && echo "  PASS: TP healthy after rollove
 
 # check_eod.sh against the sandbox: D0 complete, D1 (still open) not
 echo "  --- ./check_eod.sh $D0 (sandbox)"
-OUT=$(T2S_TP_LOG_DIR="$T2S_SB_TPLOGS" T2S_HDB_DIR="$T2S_SB_HDB" T2S_TMP_DIR="$T2S_SB_TMP" ./check_eod.sh "$D0" 2>&1); RC=$?
+OUT=$(T2S_TP_PORT="$T2S_PORT_TP" T2S_WDB_PORT="$T2S_PORT_WDB" T2S_TP_LOG_DIR="$T2S_SB_TPLOGS" T2S_HDB_DIR="$T2S_SB_HDB" T2S_TMP_DIR="$T2S_SB_TMP" ./check_eod.sh "$D0" 2>&1); RC=$?
 echo "$OUT" | sed 's/^/    /'
 [[ $RC -eq 0 ]] && echo "  PASS: check_eod.sh confirms $D0" || fail "check_eod.sh did not confirm $D0"
 echo "  --- ./check_eod.sh $D1 (sandbox, day still open: must report incomplete)"
-OUT=$(T2S_TP_LOG_DIR="$T2S_SB_TPLOGS" T2S_HDB_DIR="$T2S_SB_HDB" T2S_TMP_DIR="$T2S_SB_TMP" ./check_eod.sh "$D1" 2>&1); RC=$?
+OUT=$(T2S_TP_PORT="$T2S_PORT_TP" T2S_WDB_PORT="$T2S_PORT_WDB" T2S_TP_LOG_DIR="$T2S_SB_TPLOGS" T2S_HDB_DIR="$T2S_SB_HDB" T2S_TMP_DIR="$T2S_SB_TMP" ./check_eod.sh "$D1" 2>&1); RC=$?
 echo "$OUT" | sed 's/^/    /'
 [[ $RC -ne 0 ]] && echo "  PASS: check_eod.sh reports $D1 as needing attention" || fail "check_eod.sh wrongly confirmed the open day $D1"
 
@@ -139,7 +139,7 @@ sleep 1
 qtp ".tp.clock.set[$D1]" > /dev/null; sleep 2
 wdb -step assert_partition -table trade_binance -date "$D0" -rows 50
 wdb -step shutdown; sleep 2; WDB_PID=""
-OUT=$(T2S_TP_LOG_DIR="$T2S_SB_TPLOGS" T2S_HDB_DIR="$T2S_SB_HDB" T2S_TMP_DIR="$T2S_SB_TMP" ./check_eod.sh "$D0" 2>&1); RC=$?
+OUT=$(T2S_TP_PORT="$T2S_PORT_TP" T2S_WDB_PORT="$T2S_PORT_WDB" T2S_TP_LOG_DIR="$T2S_SB_TPLOGS" T2S_HDB_DIR="$T2S_SB_HDB" T2S_TMP_DIR="$T2S_SB_TMP" ./check_eod.sh "$D0" 2>&1); RC=$?
 echo "$OUT" | grep -E "check-eod|belong to|rows," | sed 's/^/    /' | cut -c1-230
 [[ $RC -eq 0 ]] && echo "  PASS: check_eod.sh confirms $D0 although its log holds rows of $D1" || fail "check_eod.sh rejected $D0 (rc=$RC)"
 echo "$OUT" | grep -q "5 row(s) in this log were received just after midnight and belong to $D1 (5 already on disk in tmp.$D1" && echo "  PASS: the five next-day rows are reported, and found on disk in tmp.$D1" || fail "next-day rows not reported"
@@ -148,7 +148,7 @@ SUM=$(T2S_TP_LOG_DIR="$T2S_SB_TPLOGS" T2S_HDB_DIR="$T2S_SB_HDB" T2S_TMP_DIR="$T2
 echo "$SUM" | grep "^$D0" | grep -q " keep " && echo "  PASS: retention stays strict: $D0's log is kept until those rows are in the HDB too" || { fail "retention would delete $D0's log"; echo "$SUM" | grep "^$D0"; }
 # a row of D0 that really is missing must still fail the check
 rm -rf "$T2S_SB_HDB/$D0/quote_binance"
-T2S_TP_LOG_DIR="$T2S_SB_TPLOGS" T2S_HDB_DIR="$T2S_SB_HDB" T2S_TMP_DIR="$T2S_SB_TMP" ./check_eod.sh "$D0" > /dev/null 2>&1 && fail "check_eod confirmed a day with a table missing" || echo "  PASS: rows of $D0 that are really missing still fail the check"
+T2S_TP_PORT="$T2S_PORT_TP" T2S_WDB_PORT="$T2S_PORT_WDB" T2S_TP_LOG_DIR="$T2S_SB_TPLOGS" T2S_HDB_DIR="$T2S_SB_HDB" T2S_TMP_DIR="$T2S_SB_TMP" ./check_eod.sh "$D0" > /dev/null 2>&1 && fail "check_eod confirmed a day with a table missing" || echo "  PASS: rows of $D0 that are really missing still fail the check"
 
 echo ""; echo "==========================================="
 if [[ $FAILURES -eq 0 ]]; then echo "Midnight roll: all checks passed"; echo "==========================================="; exit 0; fi

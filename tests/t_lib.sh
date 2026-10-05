@@ -34,6 +34,12 @@ T2S_SB_TMP="$T2S_SANDBOX/tmp/"            # trailing slash: wdb.q concatenates
 T2S_SB_CHECKPOINT="$T2S_SANDBOX/tmp/wdb.lastTpSeqNo"
 T2S_SB_TPSEQ="$T2S_SANDBOX/tplogs/tp.tpSeqNo"
 
+# ops/pipeline_state.sh (used by status.sh and check_eod.sh) must judge the
+# sandbox pipeline by its two ports, not this machine's real units, handlers
+# and tmux session; and check_eod.sh keeps its pending list in the sandbox.
+export T2S_STATE_PORTS_ONLY=1
+export T2S_RUN_DIR="$T2S_SANDBOX/run"
+
 t2s_sandbox_reset() {
     rm -rf "$T2S_SANDBOX"
     mkdir -p "$T2S_SB_TPLOGS" "$T2S_SB_HDB" "$T2S_SB_TMP"

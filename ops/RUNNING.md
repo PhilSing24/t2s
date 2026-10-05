@@ -1,32 +1,76 @@
-# Running t2s unattended on this laptop (Windows + WSL2)
+# Running t2s on this laptop (Windows + WSL2)
 
-The pipeline runs as systemd **user** services inside WSL and comes back by
-itself after a crash, a WSL restart or a Windows restart. This note says how
-it is set up, what each event does, and what you have to do by hand (very
-little). Everything assumes the distro `Ubuntu-22.04`, the user `philippe`
+The pipeline is run **on demand**: you start it with `./start.sh` when you
+want data and stop it with `./stop.sh`. While it runs, its processes are
+systemd **user** services inside WSL, so a process that crashes is restarted
+and the data path repairs itself. It does not start by itself when WSL or
+Windows starts. This note says how to run it, how it is set up, and what each
+event does. Everything assumes the distro `Ubuntu-22.04`, the user `philippe`
 and the checkout at `/home/philippe/t2s`.
+
+Running it always-on, started at Windows boot, is still possible; see
+**Optional: always on**.
 
 ## Day to day
 
 ```bash
+./start.sh --markets spot,futures     # start all four handlers (through systemd); returns when everything is up
 ./status.sh                # the pipeline in a few lines; exit 1 if something needs attention
-./start.sh --markets spot,futures     # start (through systemd)
 ./stop.sh                  # stop in order: handlers, WDB (flush + checkpoint), TP
 systemctl --user status 't2s-*'       # every unit
 journalctl --user -u t2s-tp -f        # follow one process (tp, wdb, trade-fh, quote-fh, trade-fh-fut, quote-fh-fut)
 systemctl --user list-timers 't2s-*'  # when the daily jobs run next
 ```
 
+**Keep a WSL window open while it runs.** WSL shuts the distro down, abruptly,
+about a minute after the last Windows process attached to it has gone (a
+terminal window, VS Code). Closing the last window therefore kills the
+pipeline without a flush. Nothing TP has logged is lost and the next start
+recovers (WDB replays, the trade handlers backfill), but the time in between
+is a hole. So: start, leave a terminal or VS Code open, and run `./stop.sh`
+before closing it.
+
+**What a stopped pipeline looks like.** After `./stop.sh`, `./status.sh` says
+so and exits 0:
+
+```
+PROC : tp stopped  wdb stopped  trade-fh stopped  quote-fh stopped  trade-fh-fut stopped  quote-fh-fut stopped  tmux:none
+BOOT : t2s.target disabled: the pipeline runs on demand (./start.sh, ./stop.sh); lingering yes (keeps the timers running)
+PIPELINE: stopped (not running, nothing failed). Start it with ./start.sh --markets spot,futures
+OK   : nothing needs attention
+```
+
+"Stopped" means nothing at all is running and no unit has failed
+(`ops/pipeline_state.sh`). A pipeline that is partly up, or a failed unit, is
+still flagged.
+
+**What each start does by itself.**
+- WDB replays what TP logged and it had not stored, then rolls any past day
+  still in a `tmp.<date>` directory into the HDB.
+- Each trade handler asks TP for the last trade id it logged and backfills
+  the trades since then over REST, within the limits: 500,000 ids per symbol,
+  and about two days back for futures. A longer stop leaves the gap recorded
+  as `unrecoverable` in `trade_gap`; that is expected in this mode and is
+  raised by `./status.sh` for the alert window only.
+- The quote handlers rebuild their books from fresh snapshots.
+
+**A day you stop before midnight UTC** stays in `tmp.<date>` until the next
+start. The daily end-of-day check reports it as `PENDING until the next
+start`, not as a failure, notes the date in `run/eod.pending`, and checks it
+for real on its first run after the day has been rolled. A day on which the
+pipeline did not run at all is reported as `NOT RUN`. `./status.sh` shows
+both the waiting day and the pending check without flagging them.
+
 ## What is installed
 
 | Piece | Where | Installed by |
 |---|---|---|
-| Six services and `t2s.target` | `~/.config/systemd/user/` (templates in `ops/systemd/`) | `ops/systemd/install.sh --enable` |
-| Four timers | same | same |
+| Six services and `t2s.target` | `~/.config/systemd/user/` (templates in `ops/systemd/`) | `ops/systemd/install.sh --enable`; the target was then disabled with `systemctl --user disable t2s.target`, so the pipeline starts only with `./start.sh` |
+| Four timers (enabled; they run whether or not the pipeline does) | same | same |
 | Environment of the processes (`PATH`, `QHOME`, `QPATH`, `T2S_HDB_DIR`, `T2S_TMP_DIR`) | `~/.config/t2s/t2s.env` | same; edit it there |
-| Lingering, so the user services start at WSL boot without a login | systemd | `sudo loginctl enable-linger philippe` (once) |
+| Lingering, so the timers run without a login | systemd | `sudo loginctl enable-linger philippe` (once) |
 | Permission to set the clock | `/etc/sudoers.d/t2s-hwclock` | you, see **Clock** |
-| Windows task that boots WSL at startup | Task Scheduler | you, `ops/windows-boot-task.ps1` |
+| Windows task that boots WSL at startup | Task Scheduler | not installed; optional, see **Optional: always on** |
 
 After changing a unit template: `ops/systemd/install.sh` again (it re-renders
 and reloads), then restart what changed. `ops/systemd/install.sh --uninstall`
@@ -62,6 +106,11 @@ removes the units.
 | `t2s-status` | 07:00 UTC | `status.sh` | `ops/cron/status.log` |
 | `t2s-clock` | every 5 minutes | `ops/clock_check.sh` | `ops/cron/clock.log` |
 
+The timers run whether or not the pipeline does, as long as WSL is up. With
+the pipeline stopped, the end-of-day check reports `NOT RUN` or `PENDING`
+(see **Day to day**), retention works on the logs as usual, and the status
+run records `PIPELINE: stopped`.
+
 The three daily timers have `Persistent=true`: a run missed while the laptop
 was off or asleep happens as soon as the timer is active again. The times are
 written in UTC in the units themselves, so nothing depends on the system time
@@ -73,10 +122,9 @@ A daily job that fails leaves its unit `failed`; `./status.sh` reports it.
 | Event | What happens | What you do |
 |---|---|---|
 | A process crashes or is killed | systemd restarts it within seconds. TP: handlers resend, WDB replays, `missed` stays 0. A trade handler: the trades it did not receive are recorded in `trade_gap` and backfilled. A quote handler: the hole is marked by the handler restart and the books resync. WDB: replays from its checkpoint. | Nothing. `./status.sh` shows the restart count. |
-| `wsl --shutdown`, WSL crash | Everything stops at once, without a flush. Nothing logged by TP is lost. When the distro starts again, systemd starts the user manager (lingering) and `t2s.target` within seconds: TP continues its tpSeqNo, WDB replays the log, the trade handlers backfill what was traded meanwhile. | Nothing if the Windows boot task is installed (it restarts WSL within a minute and keeps it alive). Otherwise open a WSL terminal and keep one open. |
-| Windows restart | The boot task starts WSL at system startup, before logon; then as above. | Nothing. |
+| `wsl --shutdown`, WSL crash, the last WSL window closed while it runs | Everything stops at once, without a flush. Nothing logged by TP is lost. The pipeline stays down. | `./start.sh --markets spot,futures` when you want it back: TP continues its tpSeqNo, WDB replays the log, the trade handlers backfill what was traded meanwhile. |
+| Windows restart | The pipeline is not started. | `./start.sh` when you want it. |
 | Laptop sleep | See the next section. | Nothing; check `./status.sh` if you are curious. |
-| Your Windows password changes | The boot task can no longer log on; WSL does not start at boot. | Update the task (below). |
 
 ## Laptop sleep and wake
 
@@ -200,15 +248,26 @@ Without the line the timer cannot fix the clock: it reports the drift in
 `ops/cron/clock.log`, its unit shows `failed`, and `./status.sh` raises it with
 the manual fix, `sudo hwclock -s`.
 
-## Windows: start WSL at boot
+## Optional: always on
+
+Not set up. This is what it takes to have the pipeline come back by itself
+after a WSL or Windows restart, with no window open, instead of running it on
+demand:
+
+1. `systemctl --user enable t2s.target`: the pipeline starts when WSL starts
+   (lingering is already on). The target brings up all four handlers.
+   `systemctl --user disable t2s.target` goes back to on demand.
+2. The Windows task below, which starts WSL at Windows startup and keeps the
+   distro alive.
 
 systemd services do not keep a WSL distro alive, and nothing starts the distro
 after a Windows restart. `ops/windows-boot-task.ps1` registers a scheduled task
 that does both: it runs at system startup under your account, logged on or
-not, with a `wsl.exe` command that never exits.
+not, with a `wsl.exe` command that never exits. The script has not been run on
+this machine, so it is untested.
 
-**Until this task is installed the pipeline only lives while a WSL window or
-VS Code is open.** This was seen in the live check on 2026-10-05: after
+**Without this task the pipeline only lives while a WSL window or VS Code is
+open.** This was seen in the live check on 2026-10-05: after
 `wsl --shutdown` the distro started at 00:53:06 UTC and the pipeline was up two
 seconds later, but 84 seconds on WSL terminated the distro again, abruptly,
 because no Windows process was attached to it any more; it came back when VS

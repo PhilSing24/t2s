@@ -48,7 +48,7 @@ fail() { echo "  FAIL: $*"; FAILURES=$((FAILURES + 1)); }
 tp()  { q "$SCRIPT_DIR/tp_dur_body.q"  "$@" -q < /dev/null; local rc=$?; [[ $rc -ne 0 ]] && FAILURES=$((FAILURES + 1)); return $rc; }
 wdb() { q "$SCRIPT_DIR/wdb_dur_body.q" "$@" -q < /dev/null; local rc=$?; [[ $rc -ne 0 ]] && FAILURES=$((FAILURES + 1)); return $rc; }
 rebuild() { T2S_TP_LOG_DIR="$T2S_SB_TPLOGS" T2S_HDB_DIR="$T2S_SB_HDB" q "$T2S_TEST_ROOT/kdb/utils/rebuild_day.q" "$@" < /dev/null 2>&1; }
-check_eod() { T2S_TP_LOG_DIR="$T2S_SB_TPLOGS" T2S_HDB_DIR="$T2S_SB_HDB" T2S_TMP_DIR="$T2S_SB_TMP" ./check_eod.sh "$@" 2>&1; }
+check_eod() { T2S_TP_PORT="$T2S_PORT_TP" T2S_WDB_PORT="$T2S_PORT_WDB" T2S_TP_LOG_DIR="$T2S_SB_TPLOGS" T2S_HDB_DIR="$T2S_SB_HDB" T2S_TMP_DIR="$T2S_SB_TMP" ./check_eod.sh "$@" 2>&1; }
 qtp() { q -q -p 0 < /dev/null <<QEOF
 h:hopen (\`\$":localhost:$T2S_PORT_TP"; 3000); r:h "$1"; hclose h; system "sleep 0.05"; exit 0
 QEOF
