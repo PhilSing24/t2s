@@ -361,6 +361,7 @@ Run the full suite from the project root:
 The runner discovers `tests/test_*.q`, `tests/test_*.sh`, and any compiled binaries at `build/test_*`, then reports pass/fail per file. Current coverage:
 
 - **`test_schemas.q`** — schemas.q column counts, types, and derived index positions. Catches accidental schema changes that would break the rest of the pipeline.
+- **`test_hdb_utils.q`** — `kdb/utils/hdbUtils.q` on a small partitioned HDB loaded by a relative and by an absolute path: table listing, row counts, compression stats, clock-corrected rows.
 - **`test_afml.q`** — Q tests for AFML primitives in `kdb/ml/afml.q`.
 - **`test_labels.q`** — Q tests for labeling primitives in `kdb/ml/labels.q`.
 - **`test_depth_config.sh`** — the shared symbols/depth config: depth 3 end to end (schema, widths, registration, the real quote handler refused with exit code 2), TP and WDB refusing to start over partitions or tmp dirs of another depth, bad shared configs, each quote binary refusing the other market's config.

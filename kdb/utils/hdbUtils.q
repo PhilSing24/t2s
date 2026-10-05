@@ -68,7 +68,10 @@
   if[not .hdb.loaded; -1 "ERROR: No HDB loaded"; :()];
   if[not tab in .hdb.tables[]; -1 "ERROR: Table not found: ", string tab; :()];
   dates: date where (date >= startDt) & (date <= endDt);
-  basePath: 1 _ string .hdb.path;
+  // As in .hdb.tables: the HDB is the current directory, so partitions are
+  // addressed from there, whether .hdb.use was given a relative or an
+  // absolute path
+  basePath: ".";
   getStats: {[basePath; tab; dt]
     tabPath: hsym `$(basePath, "/", (string dt), "/", string tab);
     colList: key tabPath;
