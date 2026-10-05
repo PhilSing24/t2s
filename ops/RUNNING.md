@@ -144,6 +144,26 @@ go to the right directory, and WDB counts them as `unexpectedDateRows`, which
 `./status.sh` also raises for the alert window. It is expected in that one
 case.
 
+Measured on 2026-10-05 with a 9-minute lid close (all four handlers):
+
+| Table | Corrected rows | Of which without an event time | Lagging rows left uncorrected |
+|---|---|---|---|
+| `quote_binance` | 212 | 3 (invalid rows) | 0 |
+| `quote_binance_fut` | 307 | 3 (invalid rows) | 0 |
+| `trade_binance` | 2,738 | 2,000 (backfilled) | 0 |
+| `trade_binance_fut` | 9,810 | 5,626 (backfilled) | 0 |
+
+The clock read 02:39:21 to 02:39:26 for all of them, while their exchange
+times run from 02:39:23 to 02:48:51, a lag of 2 to 565 seconds. Two things
+that run showed:
+
+- The lag starts *before* the sleep, not only after the wake. While the
+  machine goes down the clock nearly stops and data still arrives for a couple
+  of minutes (exchange times 02:39 to 02:41 against a clock stuck at 02:39:2x).
+- A trade handler can log a second, short `CLOCK LAG` right after the first
+  ends: a backfill reply that arrived while the clock was stale and was
+  published just after it was stepped. Its rows are corrected like the others.
+
 Only a clock that is behind is handled this way. A clock that is ahead, or a
 drift under 2 seconds, is left to the `t2s-clock` timer and TP's `clock skew`.
 
