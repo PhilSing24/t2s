@@ -80,7 +80,7 @@ stop_pids() {
 # editor whose arguments mention the binary (and once killed the operator's
 # own session mid-stop); pgrep -x cannot be used because the kernel
 # truncates process names to 15 characters ("trade_feed_hand").
-fh_pids() { pgrep -f '^(\./)?build/(trade_feed_handler|trade_feed_handler_fut|quote_feed_handler|quote_feed_handler_fut)( |$)' 2>/dev/null || true; }
+fh_pids() { pgrep -f "^(\./|$BASEDIR/)?build/(trade_feed_handler|trade_feed_handler_fut|quote_feed_handler|quote_feed_handler_fut)( |\$)" 2>/dev/null || true; }
 # The process LISTENING on a port, not its clients (lsof -ti:PORT alone
 # also returns every process connected to it, e.g. the handlers on TP's port).
 pid_by_port() { lsof -ti TCP:"$1" -sTCP:LISTEN 2>/dev/null || true; }

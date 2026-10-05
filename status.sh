@@ -26,7 +26,9 @@ echo "t2s status  $(date -u +%Y-%m-%dT%H:%M:%SZ)  ($BASEDIR)"
 
 # ---------------- processes ----------------
 listener() { lsof -ti TCP:"$1" -sTCP:LISTEN 2>/dev/null | head -1; }
-fh_pid()   { pgrep -f "^(\./)?build/$1( |$)" 2>/dev/null | head -1; }
+# The binary as tmux mode starts it (./build/x or build/x) or as its systemd
+# unit does ($BASEDIR/build/x). Anchored, so it cannot match a shell or editor.
+fh_pid()   { pgrep -f "^(\./|$BASEDIR/)?build/$1( |$)" 2>/dev/null | head -1; }
 TP_PID=$(listener "$PORT_TP"); WDB_PID=$(listener "$PORT_WDB")
 SPOT=$(fh_pid trade_feed_handler); FUT=$(fh_pid trade_feed_handler_fut)
 QUOTE=$(fh_pid quote_feed_handler); QUOTE_FUT=$(fh_pid quote_feed_handler_fut)
@@ -123,7 +125,7 @@ if command -v powershell.exe >/dev/null 2>&1; then
         echo "CLOCK: could not read the Windows clock through interop"
     fi
 else
-    echo "CLOCK: no Windows interop (not WSL?) - drift check skipped"
+    echo "CLOCK: Windows clock not reachable from here (no interop, e.g. when run by a systemd timer); see the hardware clock below"
 fi
 # The same check the t2s-clock timer runs: WSL clock vs the VM's hardware clock
 if [[ -x "$BASEDIR/ops/clock_check.sh" ]]; then

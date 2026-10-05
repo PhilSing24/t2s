@@ -73,14 +73,15 @@ system "l ",.lm.dir,"/../schemas.q";
 / tpSeqNo list dict; rows whose table or width is unknown).
 .log.scan:{[f]
   .log.acc.seqs::.log.cfg.tables ! (count .log.cfg.tables)#enlist `long$();
+  .log.acc.dates::.log.cfg.tables ! (count .log.cfg.tables)#enlist `date$();
   .log.acc.unknown::0j;
   upd::{[t;d]
     $[(t in .log.cfg.tables) and (count d) = .log.width t;
-      .log.acc.seqs[t],::last d;
+      [.log.acc.seqs[t],::last d; .log.acc.dates[t],::`date$first d];
       .log.acc.unknown+::1]};
   r:.[{-11! x}; enlist f; {[e] (`error; e)}];
   if[(0h = type r) and (first r) ~ `error; '"log scan failed: ", last r];
-  `rows`seqs`unknownShape ! (count each .log.acc.seqs; .log.acc.seqs; .log.acc.unknown)
+  `rows`seqs`unknownShape`dates ! (count each .log.acc.seqs; .log.acc.seqs; .log.acc.unknown; .log.acc.dates)
  };
 
 / tpSeqNo on disk for table t in the partitions of d-1, d, d+1 (those that exist)
@@ -90,6 +91,12 @@ system "l ",.lm.dir,"/../schemas.q";
  };
 
 .log.partitionExists:{[d] not () ~ key hsym `$ .log.cfg.hdbDir,"/",string d};
+
+/ tpSeqNo of table t in the intraday dir tmp.<d> (rows flushed but not yet rolled)
+.log.cfg.tmpDir:$[count v:getenv `T2S_TMP_DIR; v; .lm.dir,"/../../tmp/"];
+.log.tmpSeqs:{[d; t]
+  p:hsym `$ raze (.log.cfg.tmpDir; $["/" = last .log.cfg.tmpDir; ""; "/"]; "tmp."; string d; "/"; string t; "/tpSeqNo");
+  $[() ~ key p; `long$(); @[get; p; {[e] `long$()}]]};
 
 / -------------------------------------------------------
 / Assessment
@@ -108,13 +115,29 @@ system "l ",.lm.dir,"/../schemas.q";
   / be rebuilt from their log.
   sc:@[.log.scan; f; {[e] (`error; e)}];
   if[(0h = type sc) and (first sc) ~ `error;
-    :`date`sizeMB`logRows`complete`status`reason`detail!(d; sizeMB; 0Nj; 0b; `keep; "log unreadable: ", last sc; "")];
-  missing:{[d; sc; t] count (sc[`seqs] t) except .log.diskSeqs[d; t]}[d; sc] each .log.cfg.tables;
-  missing:.log.cfg.tables ! missing;
+    :`date`sizeMB`logRows`complete`status`reason`detail`dayComplete`nextDay`nextNote!(d; sizeMB; 0Nj; 0b; `keep; "log unreadable: ", last sc; ""; 0b; 0j; "")];
+  / A row logged just before TP rotates at midnight can carry a receive time
+  / just AFTER midnight: it sits in this log but belongs to the next day's
+  / partition, which does not exist until that day is rolled. Such rows are
+  / counted apart (nextDay): they do not make THIS day incomplete, and the
+  / detail says how many are already on disk in tmp.<d+1>. For retention
+  / nothing changes: `complete` stays strict, every row must be in the HDB.
+  mi:{[d; sc; t] where not (sc[`seqs] t) in .log.diskSeqs[d; t]}[d; sc] each .log.cfg.tables;
+  mi:.log.cfg.tables ! mi;
+  missing:count each mi;
+  nextIdx:{[d; sc; mi; t] i:mi t; i where (sc[`dates][t] i) > d}[d; sc; mi] each .log.cfg.tables;
+  nextIdx:.log.cfg.tables ! nextIdx;
+  nextDay:count each nextIdx;
+  nextOnDisk:.log.cfg.tables ! {[d; sc; nextIdx; t] sum (sc[`seqs][t] nextIdx t) in .log.tmpSeqs[d + 1; t]}[d; sc; nextIdx] each .log.cfg.tables;
   logRows:sum sc `rows;
   complete:partition and (0 = sum missing) and 0 = sc `unknownShape;
-  detail:", " sv {[t; n; m] raze (string t; ":"; string n; " rows, "; string m; " missing")}'[.log.cfg.tables; sc[`rows] .log.cfg.tables; missing .log.cfg.tables];
+  dayComplete:partition and (0 = sum missing - nextDay) and 0 = sc `unknownShape;
+  detail:", " sv {[t; n; m; x] raze (string t; ":"; string n; " rows, "; string m - x; " missing"; $[x > 0; raze (" (+"; string x; " for the next day)"); ""])}'[.log.cfg.tables; sc[`rows] .log.cfg.tables; missing .log.cfg.tables; nextDay .log.cfg.tables];
   if[sc[`unknownShape] > 0; detail:detail, raze ("; "; string sc `unknownShape; " rows of unknown table/shape")];
+  nextNote:$[0 < sum nextDay;
+    raze (string sum nextDay; " row(s) in this log were received just after midnight and belong to "; string d + 1;
+          " ("; string sum nextOnDisk; " already on disk in tmp."; string d + 1; ", the rest in WDB's buffer)");
+    ""];
   / Decide. The first reason that forbids deletion wins.
   reason:$[d = today;                        "today's log";
            d in .log.cfg.protected;          "protected (T2S_LOG_PROTECTED)";
@@ -124,7 +147,7 @@ system "l ",.lm.dir,"/../schemas.q";
            ageDays <= .log.cfg.retentionDays; raze ("complete in HDB but only "; string ageDays; " day(s) old (retention "; string .log.cfg.retentionDays; ")");
            raze ("complete in HDB, "; string ageDays; " days old")];
   status:$[(d <> today) and (not d in .log.cfg.protected) and complete and ageDays > .log.cfg.retentionDays; `delete; `keep];
-  `date`sizeMB`logRows`complete`status`reason`detail!(d; sizeMB; logRows; complete; status; reason; detail)
+  `date`sizeMB`logRows`complete`status`reason`detail`dayComplete`nextDay`nextNote!(d; sizeMB; logRows; complete; status; reason; detail; dayComplete; sum nextDay; nextNote)
  };
 
 .log.summary:{[]
@@ -179,11 +202,17 @@ if[.lm.has "-check-eod";
     -1 "LOG: check-eod ",string[d],": no log for that date in ",.log.cfg.logDir;
     system "sleep 0.1"; exit 1];
   a:.log.assess d;
-  -1 "LOG: check-eod ",string[d],": ",$[a `complete; "COMPLETE"; "INCOMPLETE"]," - ",a `reason;
+  / The day is confirmed when every row DATED d (or earlier) in its log is in
+  / the HDB. Rows received just after midnight belong to d+1 and are checked
+  / again, strictly, before this log may ever be deleted.
+  ok:a `dayComplete;
+  -1 "LOG: check-eod ",string[d],": ",$[ok; "COMPLETE"; "INCOMPLETE"]," - ",
+     $[ok and not a `complete; raze ("every row dated "; string d; " is in the HDB"); a `reason];
   -1 "LOG:   ",a `detail;
+  if[count a `nextNote; -1 "LOG:   ",a `nextNote];
   -1 "LOG:   log ",string[a `sizeMB]," MB, ",string[a `logRows]," rows; partition ",$[.log.partitionExists d; "present"; "MISSING"];
   system "sleep 0.1";
-  exit $[a `complete; 0; 1]];
+  exit $[ok; 0; 1]];
 if[.lm.has "-retention";
   .log.retention[.lm.has "-apply"];
   system "sleep 0.1";

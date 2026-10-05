@@ -113,6 +113,43 @@ OUT=$(T2S_TP_LOG_DIR="$T2S_SB_TPLOGS" T2S_HDB_DIR="$T2S_SB_HDB" T2S_TMP_DIR="$T2
 echo "$OUT" | sed 's/^/    /'
 [[ $RC -ne 0 ]] && echo "  PASS: check_eod.sh reports $D1 as needing attention" || fail "check_eod.sh wrongly confirmed the open day $D1"
 
+# ----------------------------------------------------------------------------
+# Rows received just after midnight but logged before TP rotated: they sit in
+# D0's log and belong to D1. Seen on the first real midnight under traffic
+# (12 such rows): check_eod must not call D0 incomplete because of them.
+# ----------------------------------------------------------------------------
+echo ""
+echo "=== rows dated the next day in a day's log ==="
+kill -9 "$WDB_PID" "$TP_PID" 2>/dev/null; WDB_PID=""; TP_PID=""
+t2s_kill_port "$T2S_PORT_TP"; t2s_kill_port "$T2S_PORT_WDB"
+t2s_sandbox_reset; rm -f "$T2S_SANDBOX/fhseq"
+TP_PID=$(t2s_spawn_tp "$T2S_PORT_TP" "$TP_LOG" "T2S_TP_FAKE_DATE=$D0")
+t2s_wait_port "$T2S_PORT_TP" 6 || { fail "TP did not start"; exit 1; }
+WDB_PID=$(t2s_spawn_wdb "$T2S_PORT_WDB" "$T2S_PORT_TP" "$WDB_LOG" T2S_WDB_ROLL_GRACE_SEC=0 "T2S_WDB_FAKE_DATE=$D0")
+t2s_wait_port "$T2S_PORT_WDB" 6 || { fail "WDB did not start"; exit 1; }
+sleep 1
+tp -step publish -table trade_binance -rows 50 -date "$D0" -session 9101
+tp -step publish -table quote_binance -rows 20 -date "$D0" -session 9102
+sleep 1
+# WDB's clock passes midnight first (it rolls D0); TP has not rotated yet
+wdb -step set_clock -date "$D1"; sleep 7
+tp -step publish -table trade_binance -rows 3 -date "$D1" -session 9101     # in D0's log, dated D1
+tp -step publish -table quote_binance -rows 2 -date "$D1" -session 9102
+sleep 1
+qtp ".tp.clock.set[$D1]" > /dev/null; sleep 2
+wdb -step assert_partition -table trade_binance -date "$D0" -rows 50
+wdb -step shutdown; sleep 2; WDB_PID=""
+OUT=$(T2S_TP_LOG_DIR="$T2S_SB_TPLOGS" T2S_HDB_DIR="$T2S_SB_HDB" T2S_TMP_DIR="$T2S_SB_TMP" ./check_eod.sh "$D0" 2>&1); RC=$?
+echo "$OUT" | grep -E "check-eod|belong to|rows," | sed 's/^/    /' | cut -c1-230
+[[ $RC -eq 0 ]] && echo "  PASS: check_eod.sh confirms $D0 although its log holds rows of $D1" || fail "check_eod.sh rejected $D0 (rc=$RC)"
+echo "$OUT" | grep -q "5 row(s) in this log were received just after midnight and belong to $D1 (5 already on disk in tmp.$D1" && echo "  PASS: the five next-day rows are reported, and found on disk in tmp.$D1" || fail "next-day rows not reported"
+echo "$OUT" | grep -q "trade_binance:53 rows, 0 missing (+3 for the next day)" && echo "  PASS: per-table detail separates them from missing rows" || fail "per-table detail"
+SUM=$(T2S_TP_LOG_DIR="$T2S_SB_TPLOGS" T2S_HDB_DIR="$T2S_SB_HDB" T2S_TMP_DIR="$T2S_SB_TMP" T2S_LOG_RETENTION_DAYS=0 q kdb/utils/logmgr.q -retention < /dev/null 2>&1)
+echo "$SUM" | grep "^$D0" | grep -q " keep " && echo "  PASS: retention stays strict: $D0's log is kept until those rows are in the HDB too" || { fail "retention would delete $D0's log"; echo "$SUM" | grep "^$D0"; }
+# a row of D0 that really is missing must still fail the check
+rm -rf "$T2S_SB_HDB/$D0/quote_binance"
+T2S_TP_LOG_DIR="$T2S_SB_TPLOGS" T2S_HDB_DIR="$T2S_SB_HDB" T2S_TMP_DIR="$T2S_SB_TMP" ./check_eod.sh "$D0" > /dev/null 2>&1 && fail "check_eod confirmed a day with a table missing" || echo "  PASS: rows of $D0 that are really missing still fail the check"
+
 echo ""; echo "==========================================="
 if [[ $FAILURES -eq 0 ]]; then echo "Midnight roll: all checks passed"; echo "==========================================="; exit 0; fi
 echo "Midnight roll: $FAILURES failure(s)"; echo "==========================================="; exit 1
