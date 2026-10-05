@@ -28,7 +28,10 @@
 // List tables actually on disk in HDB (not just in memory)
 .hdb.tables: {[]
   if[not .hdb.loaded; -1 "ERROR: No HDB loaded"; :()];
-  firstPart: hsym `$(1 _ string .hdb.path), "/", string first date;
+  // \l made the HDB the current directory, so the partition is addressed
+  // from there: this works whether .hdb.use was given a relative or an
+  // absolute path
+  firstPart: hsym `$string first date;
   contents: key firstPart;
   contents where not contents like ".*"  // exclude hidden files
  };
