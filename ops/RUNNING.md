@@ -107,20 +107,45 @@ On wake, in order:
    5 minutes, and `./status.sh` (`CLOCK` lines; TP's `clock skew` against the
    exchange's event times). See **Clock**.
 
-**Known limit: the first seconds after wake.** WSL corrects its clock a few
-seconds after resuming, not at once. Rows received in between carry the
-pre-sleep time in `time` and `fhRecvTimeUtcNs`. Measured on 2026-10-04 after a
-6-minute sleep: 377 spot quote rows stamped 23:39:09 to 23:39:13 whose exchange
-event times run up to 23:45:20. Their `exchEventTimeMs` is right. The window is
-too short for the clock timer; it is visible afterwards as rows whose receive
-time is earlier than their exchange event time:
+**The first seconds after wake.** WSL corrects its clock a few seconds after
+resuming, not at once. Measured on 2026-10-04 after a 6-minute sleep: 377 spot
+quote rows were received in that window, with the clock still reading the
+pre-sleep time. That window is too short for the clock timer, so the handlers
+deal with it row by row:
 
-```q
-select from quote_binance where date = 2026.10.04, isValid, exchEventTimeMs > 5000 + (`long$time - 1970.01.01D0) div 1000000
-```
+- While the exchange event time is more than 2 seconds ahead of the handler's
+  clock (`clock_lag_ms` in `config/shared.json`), the row's `time` is the
+  exchange event time. `fhRecvTimeUtcNs` keeps the stale clock reading.
+- Such a row is identifiable afterwards because its `time` differs from its
+  `fhRecvTimeUtcNs`:
 
-A sleep that ends just after midnight UTC could therefore put a few rows in
-the previous day's partition.
+  ```q
+  \l kdb/utils/hdbUtils.q
+  .hdb.use[`:hdb]
+  .hdb.clockCorrected[`quote_binance; 2026.10.06]
+  ```
+
+- Each handler logs `CLOCK LAG` at the start and the end, and `./status.sh`
+  raises `clockLagRows` for the alert window:
+
+  ```
+  RECENT (60 min): quote_binance clockLagRows +377 (4 min ago)
+         - quote_binance: clockLagRows +377 in the last 60 min
+  ```
+
+  It needs no action when it follows a `SLEEP` line. Without a sleep it means
+  the clock fell behind while running: look at the `CLOCK` lines and
+  `ops/cron/clock.log`.
+
+Rows are partitioned by `time`, so a wake just after midnight UTC no longer
+puts rows in the previous day's partition. One side effect remains: in that
+case WDB's own clock still reads yesterday while rows dated today arrive. They
+go to the right directory, and WDB counts them as `unexpectedDateRows`, which
+`./status.sh` also raises for the alert window. It is expected in that one
+case.
+
+Only a clock that is behind is handled this way. A clock that is ahead, or a
+drift under 2 seconds, is left to the `t2s-clock` timer and TP's `clock skew`.
 
 Nothing in this sequence needs you. What to look at afterwards:
 

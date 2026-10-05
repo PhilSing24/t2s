@@ -125,7 +125,7 @@ t2s/
 │   ├── trade_feed_handler_fut.json   # USD-M futures aggTrade FH
 │   ├── quote_feed_handler.json       # Spot quote FH
 │   ├── quote_feed_handler_fut.json   # USD-M futures quote FH
-│   └── shared.json                   # Symbols and quote depth for all four handlers and the q schemas
+│   └── shared.json                   # Symbols, quote depth and clock-lag threshold for all four handlers; symbols and depth also for the q schemas
 ├── hdb/                      # Live HDB partitions (gitignored, populated at EOD)
 ├── tmp/                      # WDB intraday writedown directory (gitignored)
 ├── hdb_binancedata/          # Historical research HDB (gitignored)
@@ -239,13 +239,14 @@ Paths and ports can also be set per process through environment variables, which
 | `T2S_LOG_RETENTION_DAYS`, `T2S_LOG_PROTECTED` | logmgr | `7`, unset (no protected dates) | Retention policy inputs (see below) |
 | `T2S_WDB_MAXROWS`, `T2S_WDB_ROLL_GRACE_SEC`, `T2S_WDB_ROLL_FALLBACK_SEC`, `T2S_WDB_REPLAY_DELAY_MS`, `T2S_TP_INDEX_EVERY`, `T2S_TP_FAKE_DATE`, `T2S_WDB_FAKE_DATE` | both | unset | Test hooks only. The fake dates fix the process clock; `start.sh` refuses to run with either set, and the test guard only allows them inside `tests/sandbox`. |
 
-**Symbols and quote depth.** `config/shared.json` holds two values for the whole pipeline:
+**Symbols and quote depth.** `config/shared.json` holds the values shared by the whole pipeline:
 
 ```json
-{ "symbols": ["btcusdt", "ethusdt", "solusdt"], "quote_depth": 5 }
+{ "symbols": ["btcusdt", "ethusdt", "solusdt"], "quote_depth": 5, "clock_lag_ms": 2000 }
 ```
 
 - `symbols` is the one list all four handlers subscribe to. A handler config with its own `symbols` list is refused. Changing the list needs a restart of the handlers only.
+- `clock_lag_ms` (optional, default 2000, 100 to 3600000) is read by the handlers only: how far the exchange event time may run ahead of the handler's clock before the clock is taken to be behind (see **Row time and the clock** below). Changing it needs a restart of the handlers only.
 - `quote_depth` (1 to 50) is the number of book levels per side that the quote handlers publish. It drives the published row (`cpp/include/quote_row.hpp`), the width each quote handler announces to TP, and the generated schemas `.schema.quote` and `.schema.quoteFut` in `kdb/schemas.q`.
 
 **A different depth is a different table layout.** `quote_binance` has `10 + 4*depth` feed-handler columns (`bidPrice1..N`, `bidQty1..N`, `askPrice1..N`, `askQty1..N`), `quote_binance_fut` two more. Two layouts cannot share one table in a partitioned HDB, so the change is guarded rather than applied silently:
@@ -313,7 +314,7 @@ select by srcTable, sym, firstMissingId from trade_gap where date = 2026.10.04  
 *Backfilled rows.* Spot trades come from `GET /api/v3/historicalTrades`, futures aggTrades from `GET /fapi/v1/aggTrades`, both by id and without an API key. A backfilled row is an ordinary row of its table, with two things to know:
 
 - `exchEventTimeMs` is null, because REST does not return the event time. That null is the marker: `select from trade_binance where null exchEventTimeMs` lists the backfilled trades.
-- `time` is the handler's receive time, as for every row, so here it is the moment the REST reply arrived, and it decides the partition. The trade's own time is `exchTradeTimeMs`. Analytics that need trades in trade order should sort on `exchTradeTimeMs` or the trade id, not on `time`. `fhParseUs` and `fhSendUs` are 0.
+- `time` is the handler's receive time, as for every row, so here it is the moment the REST reply arrived, and it decides the partition. (While the clock lags the exchange, a backfilled row is clock-corrected like any other; see **Row time and the clock**.) The trade's own time is `exchTradeTimeMs`. Analytics that need trades in trade order should sort on `exchTradeTimeMs` or the trade id, not on `time`. `fhParseUs` and `fhSendUs` are 0.
 
 Requests use the same scheduler as the quote snapshots: a tenth of the exchange's weight limit, backoff after a failure, a pause on HTTP 429 or 418. TP derives each gap's progress from the backfilled rows it logs, so a handler that dies mid-backfill resumes exactly where the log ends, with no id fetched or published twice.
 
@@ -324,7 +325,29 @@ Requests use the same scheduler as the quote snapshots: a tenth of the exchange'
 
 **Feed handler sessions.** Every handler connection starts with a synchronous `.tp.registerSession[table; sessionId; nextFhSeqNo; rowWidth]` call. The session id is the handler's start time, so a new id is a restart and the same id on a new connection is a reconnect; TP logs and counts both, and counts the rows missed in between as `missed`. The row width is checked against `kdb/schemas.q` at registration: a mismatched binary is refused and exits with the reason in its own log. TP never drops a row on a guess: a backward fhSeqNo inside a session is accepted and counted as `outOfOrder`, rows from an unregistered publisher are accepted and counted, and rows with the wrong width are rejected and counted as `schemaMismatch`. See `.health[]` and `.tp.status[]`.
 
-**Partition date.** WDB routes every row to the HDB partition for the date of its own `time` column, which is the feed handler's UTC receive timestamp, for all three tables. Rows are never assigned a date by when an end-of-day message arrived, and WDB rolls on its own clock, so a missed or late end-of-day cannot mix two days into one partition. Trade-off: Binance's archive files are split by exchange time, so a live partition and an archive day differ by the handful of rows whose exchange timestamp falls on one side of midnight and whose receive timestamp falls on the other. Comparing the two needs those few rows from the neighbouring partition.
+**Partition date.** WDB routes every row to the HDB partition for the date of its own `time` column, which is the feed handler's UTC receive timestamp (or the exchange event time on a clock-corrected row, see below), for every table. Rows are never assigned a date by when an end-of-day message arrived, and WDB rolls on its own clock, so a missed or late end-of-day cannot mix two days into one partition. Trade-off: Binance's archive files are split by exchange time, so a live partition and an archive day differ by the handful of rows whose exchange timestamp falls on one side of midnight and whose receive timestamp falls on the other. Comparing the two needs those few rows from the neighbouring partition.
+
+**Row time and the clock.** `time` and `fhRecvTimeUtcNs` are normally the same instant, the handler's clock reading when the message arrived (`time` as a timestamp, `fhRecvTimeUtcNs` as nanoseconds since 1970). The exception is a clock that is behind the exchange, which happens for the first seconds after the machine wakes from sleep:
+
+- A row is **clock-corrected** when the exchange event time is ahead of the handler's clock by more than `clock_lag_ms` (2 seconds). In normal running the receive time is a few hundred milliseconds *after* the event time, so an event time seconds ahead can only be a clock that is behind.
+- On a corrected row, `time` is the exchange event time (millisecond resolution) and `fhRecvTimeUtcNs` keeps the raw, stale clock reading. So the row sorts and is partitioned by the right time, and the original receive time is still there.
+- **The marker is `time` differing from `fhRecvTimeUtcNs`.** No column was added. `kdb/utils/hdbUtils.q` has the query, so the epoch offset between the two columns never has to be typed:
+
+  ```q
+  \l kdb/utils/hdbUtils.q
+  .hdb.use[`:hdb]
+  .hdb.clockCorrected[`quote_binance; 2026.10.06]     / the corrected rows of one table for one date
+  select rows:count i, maxLagMs:max clockLagMs, first time, last time by sym from .hdb.clockCorrected[`trade_binance; 2026.10.06]
+  .hdb.clockCorrectedRows select from trade_binance   / the same on any in-memory table
+  ```
+
+  Both return the rows with two extra columns: `fhRecvTime`, the original receive time as a timestamp, and `clockLagMs`, how far the clock was behind (`time` minus `fhRecvTime`).
+- Which exchange time: the row's own `exchEventTimeMs`. A row without one (an invalid quote row, a backfilled trade) takes the event time of the most recent event its handler received. There is no running maximum, so one wrong event time from the exchange affects one row.
+- Only a clock that is *behind* is corrected. A receive time well after the event time looks the same as late delivery, which is normal after a wake when Binance sends a backlog; TP's `clock skew` reports that case.
+- `tpRecvTimeUtcNs` and `wdbRecvTimeUtcNs` are TP's and WDB's own clock readings and are never changed. Latency computed from `fhRecvTimeUtcNs` shows the lag as it was for those rows; exclude corrected rows from latency statistics.
+- Each handler logs `CLOCK LAG` when a lag starts and ends and reports the count as `clockLagRows`. An increase is raised by `./status.sh` for the alert window, e.g. `quote_binance: clockLagRows +377 in the last 60 min`.
+
+Rows stored before this was introduced (2026-10-05) are not corrected: a wake before that date left rows whose `time` is the stale reading.
 
 Pipeline-wide table schemas live in `kdb/schemas.q` and are loaded by every q process, TP included. Adding or modifying a column there propagates everywhere on the next restart; the field indices TP and WDB use (fhSeqNo, tpSeqNo, expected feed-handler row width) are derived from the schema per table, and a handler whose row width disagrees with the schema is refused at registration.
 
@@ -346,6 +369,8 @@ The runner discovers `tests/test_*.q`, `tests/test_*.sh`, and any compiled binar
 - **`test_resend.sh`** — `build/sim_trade_publisher` (synthetic trades through the handlers' own `TpPublisher`) with TP killed by `kill -9` and by SIGTERM mid-stream: `missed` stays 0 and the logged `fhSeqNo` is exactly 1..N; with a ring of one row, what cannot be resent equals TP's `missed`.
 - **`test_trade_gap.sh`** — trade-id gaps: recorded in `trade_gap`, kept while TP is down, detected across a handler restart (also with TP killed, and on a new day), backfilled from a fake exchange with every missing id on disk exactly once, the unrecoverable reasons, and a handler killed mid-backfill resuming without duplicates.
 - **`test_recent_status.sh`** — problems are flagged while within the alert window and clear afterwards, while totals remain.
+- **`test_clock_lag.sh`** — `build/sim_trade_publisher` with a clock that reads yesterday for some rows: those rows take `time` from the exchange event time, keep the stale reading in `fhRecvTimeUtcNs`, are stored under today's date and found by `.hdb.clockCorrected`; backfilled rows use the most recent event time; `clockLagRows` reaches TP and `status.q` raises it; a lag under the threshold changes nothing.
+- **`build/test_row_clock`** — C++ unit tests (Catch2) for the rule that decides a row's `time` (`cpp/include/row_clock.hpp`): the threshold, a clock ahead left alone, rows without an event time, one bad event time not affecting later rows, the start and end of a lag.
 - **`build/test_resend_ring`**, **`build/test_trade_gap`**, **`build/test_trade_backfill`** — C++ unit tests (Catch2) for the resend ring, gap detection and the gap row, and the backfill with a fake fetcher (paging, rate budget, failures, every unrecoverable reason, resume, the REST reply parsers).
 - **`test_smoke.sh`** — starts each q process (tp, wdb) in isolation against test ports, asserts `.health[]` returns a sane response. Catches load-time errors and missing `.health[]` interface.
 - **`test_wdb_eod.sh`** — full TP→WDB integration test: publishes synthetic data, forces EOD, verifies a partition lands in the sandbox HDB with correct row counts. Validates the EOD persistence path end-to-end.
@@ -476,6 +501,7 @@ Range mode skips dates whose partition already exists (so backfills are idempote
 .hdb.dateRange[]
 .hdb.rowCounts[`trade; 2026.01.14; 2026.01.20]
 .hdb.loadBySym[`trade; `BTCUSDT; 2026.01.14; 2026.01.20]
+.hdb.clockCorrected[`quote_binance; 2026.10.06]    / live HDB: rows stamped from the exchange time (see "Row time and the clock")
 ```
 
 **ML feature pipeline (in progress).** `kdb/ml/` contains an in-progress implementation of feature engineering primitives from López de Prado's *Advances in Financial Machine Learning*. Currently includes dollar-imbalance bars (`afml.q`, `features.q`) — see `markdown_docs/dollar_imbalance_bars_guide.md` for design notes. Expect breaking changes.
