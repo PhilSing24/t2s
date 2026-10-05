@@ -16,7 +16,8 @@
  *   known and there is no horizon.
  *
  *   When the market moves toward the horizon the known levels run down.
- *   Below `refreshLowWater` known levels the book asks for a background
+ *   Below `refreshLowWater` known levels (500, half a 1000-level snapshot)
+ *   the book asks for a background
  *   refresh (wantsRefresh): the live book keeps applying deltas and keeps
  *   publishing, the deltas are also buffered, and when the new snapshot
  *   arrives a shadow book is built from it with the normal sync rule and
@@ -24,6 +25,15 @@
  *   known levels than the published depth before the refresh lands, the
  *   quote is published invalid (and counted) rather than with a slot that
  *   might be wrong.
+ *
+ *   Why 500 and not fewer: the refresh takes 150 to 300 ms (two or three
+ *   stream events) to land, and the side must not run out meanwhile. With
+ *   the mark at 100 levels - about $10 of price on BTC futures - a fast
+ *   move took a side from above the mark to under five levels within two
+ *   events, twice in 20 minutes on 2026-10-05, each time costing one
+ *   invalid row. At 500 the request goes out about $50 before the edge.
+ *   The price is more snapshot requests, which the scheduler caps at a
+ *   tenth of the exchange's weight limit.
  *
  * Storage: one sorted vector of levels per side per symbol, worst price
  * first so the frequent top-of-book inserts and deletes touch the end.
@@ -67,7 +77,10 @@ constexpr size_t MAX_DELTA_BUFFER_SIZE = 1000;
 struct BookConfig {
     int         depth           = DEFAULT_BOOK_DEPTH;  ///< levels published per side
     std::size_t snapshotLimit   = 1000;  ///< levels per side requested from REST
-    std::size_t refreshLowWater = 100;   ///< known levels below which a refresh is wanted
+    /// Known levels below which a background refresh is wanted (see the file
+    /// comment for why 500). Capped at half the snapshot limit, so a fresh
+    /// snapshot always lifts a side back above the mark.
+    std::size_t refreshLowWater = 500;
     std::size_t maxLevels       = 4000;  ///< cap on stored levels per side
     t2s::DepthSync sync = t2s::DepthSync::Spot;  ///< which exchange sequencing rule applies
 };
@@ -189,6 +202,9 @@ public:
     explicit OrderBookManager(const std::vector<std::string>& symbols,
                               BookConfig cfg = BookConfig{})
         : cfg_(cfg) {
+        // A mark above what one snapshot can restore would ask for a refresh
+        // again as soon as the previous one landed.
+        if (cfg_.refreshLowWater > cfg_.snapshotLimit / 2) cfg_.refreshLowWater = cfg_.snapshotLimit / 2;
         numSymbols_ = static_cast<int>(symbols.size());
 
         for (int i = 0; i < numSymbols_; ++i) {
@@ -288,6 +304,9 @@ public:
     }
 
     bool refreshPending(int idx) const { return refreshPending_[idx] || shadows_[idx].pending; }
+
+    /// The low-water mark in effect (after the cap at half the snapshot limit)
+    std::size_t refreshLowWater() const { return cfg_.refreshLowWater; }
 
     // -- counters (all symbols, since start) --------------------------------
     long long bufferOverflows() const { return bufferOverflows_; }

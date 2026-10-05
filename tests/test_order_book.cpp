@@ -613,6 +613,60 @@ TEST_CASE("Known depth running low asks for a refresh; the refresh is seamless",
     REQUIRE(mgr.getQuote(0, 0, 0).bidPrices[1] == 84.0);
 }
 
+TEST_CASE("Default low-water mark: the refresh starts at half the snapshot, early enough for a fast move", "[ordrbook][refresh]") {
+    // Seen live on 2026-10-05 (BTC futures) with the mark at 100 levels: one
+    // event took a side from above the mark to almost nothing, the refresh
+    // was requested only then, and the next event exhausted the side before
+    // the snapshot arrived. With the mark at 500 the refresh is already in
+    // flight when such a move comes.
+    OrderBookManager mgr({"BTCUSDT"});                       // defaults: limit 1000
+    REQUIRE(mgr.refreshLowWater() == 500);
+    mgr.applySnapshot(0, 100, bidsN(100000.0, 1000), asksN(100001.0, 1000));
+    REQUIRE(mgr.applyDelta(0, 101, 101, {}, {}, 0));
+    REQUIRE(mgr.hasHorizon(0, true));
+    REQUIRE_FALSE(mgr.wantsRefresh(0));
+
+    auto fall = [&](long long id, double fromBest, int levels) {
+        std::vector<PriceLevel> del;
+        for (int i = 0; i < levels; ++i) del.push_back(pl(fromBest - i, 0.0));
+        REQUIRE(mgr.applyDelta(0, id, id, del, {}, 0));
+    };
+    fall(102, 100000.0, 500);                                // drift: 500 known bids left, at the mark
+    REQUIRE(mgr.knownLevels(0, true) == 500);
+    REQUIRE_FALSE(mgr.wantsRefresh(0));
+    fall(103, 99500.0, 1);                                   // 499: below the mark
+    REQUIRE(mgr.wantsRefresh(0));
+    mgr.beginRefresh(0);
+
+    // The fast move while the snapshot is being fetched: 200 levels in two events
+    fall(104, 99499.0, 100);
+    fall(105, 99399.0, 100);
+    REQUIRE(mgr.knownLevels(0, true) == 299);
+    REQUIRE(mgr.getQuote(0, 0, 0).isValid);
+    REQUIRE(mgr.depthExhaustedEvents() == 0);                // with the mark at 100 this was an invalid row
+
+    // Snapshot taken at update id 104 lands; event 105 is replayed onto it
+    REQUIRE(mgr.onSnapshot(0, 104, bidsN(99399.0, 1000), asksN(100001.0, 1000)) == SnapshotOutcome::REFRESHED);
+    REQUIRE(mgr.knownLevels(0, true) == 900);
+    REQUIRE_FALSE(mgr.wantsRefresh(0));
+    BookQuote q = mgr.getQuote(0, 0, 0);
+    REQUIRE(q.isValid);
+    REQUIRE(q.bidPrices[0] == 99299.0);
+    REQUIRE(mgr.depthExhaustedEvents() == 0);
+}
+
+TEST_CASE("The low-water mark never exceeds half the snapshot limit", "[ordrbook][refresh]") {
+    BookConfig c; c.snapshotLimit = 100;                     // default mark 500 would never be satisfied
+    OrderBookManager mgr({"BTCUSDT"}, c);
+    REQUIRE(mgr.refreshLowWater() == 50);
+    mgr.applySnapshot(0, 100, bidsN(100.0, 100), asksN(101.0, 100));
+    REQUIRE(mgr.applyDelta(0, 101, 101, {}, {}, 0));
+    REQUIRE_FALSE(mgr.wantsRefresh(0));                      // a fresh snapshot is above the mark
+
+    BookConfig small; small.snapshotLimit = 20; small.refreshLowWater = 8;
+    REQUIRE(OrderBookManager({"BTCUSDT"}, small).refreshLowWater() == 8);   // an explicit lower mark is kept
+}
+
 TEST_CASE("A refresh snapshot ahead of the stream waits for its bridging delta", "[ordrbook][refresh]") {
     OrderBookManager mgr({"BTCUSDT"}, smallCfg());
     mgr.applySnapshot(0, 100, bidsN(100.0, 20), asksN(101.0, 20));

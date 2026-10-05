@@ -65,7 +65,7 @@ struct FeedHandlerConfig {
     static constexpr long long MAX_CLOCK_LAG_MS = 3600000;
 
     /// Smallest / largest quote depth accepted. The upper bound keeps the
-    /// depth well under the book's refresh low-water mark (100 levels).
+    /// depth well under the book's refresh low-water mark (500 levels).
     static constexpr int MIN_QUOTE_DEPTH = 1;
     static constexpr int MAX_QUOTE_DEPTH = 50;
 
